@@ -26,7 +26,6 @@ defmodule AshBpmn.Resources.ProcessEvent do
     instance = Keyword.fetch!(opts, :instance)
     table = Keyword.get(opts, :table, "bpmn_process_events")
     tenant? = Keyword.get(opts, :tenant?, false)
-    do_block = Keyword.get(opts, :do, nil)
 
     quote do
       use Ash.Resource,
@@ -133,10 +132,8 @@ defmodule AshBpmn.Resources.ProcessEvent do
       end
 
       code_interface do
-        define :create!, action: :create
+        define :create, action: :create
       end
-
-      unquote(do_block)
     end
   end
 end

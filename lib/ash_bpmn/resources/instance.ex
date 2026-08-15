@@ -25,7 +25,6 @@ defmodule AshBpmn.Resources.Instance do
     definition = Keyword.fetch!(opts, :definition)
     table = Keyword.get(opts, :table, "bpmn_instances")
     tenant? = Keyword.get(opts, :tenant?, false)
-    do_block = Keyword.get(opts, :do, nil)
 
     quote do
       use Ash.Resource,
@@ -118,43 +117,51 @@ defmodule AshBpmn.Resources.Instance do
 
         update :mark_completed do
           accept [:outcome]
+          require_atomic? false
 
-          validate attribute_equals(:status, :running) do
-            message "can only complete a running instance"
-          end
-
+          validate AshBpmn.Resources.Instance.StatusIsRunning
           change set_attribute(:status, :completed)
         end
 
         update :mark_failed do
           accept []
+          require_atomic? false
 
-          validate attribute_equals(:status, :running) do
-            message "can only fail a running instance"
-          end
-
+          validate AshBpmn.Resources.Instance.StatusIsRunning
           change set_attribute(:status, :failed)
         end
 
         update :cancel do
           accept []
+          require_atomic? false
 
-          validate attribute_equals(:status, :running) do
-            message "can only cancel a running instance"
-          end
-
+          validate AshBpmn.Resources.Instance.StatusIsRunning
           change set_attribute(:status, :cancelled)
         end
       end
 
       code_interface do
-        define :create!, action: :create
-        define :mark_completed!, action: :mark_completed, args: [:outcome]
-        define :mark_failed!, action: :mark_failed
-        define :cancel!, action: :cancel
+        define :create, action: :create
+        define :mark_completed, action: :mark_completed, args: [:outcome]
+        define :mark_failed, action: :mark_failed
+        define :cancel, action: :cancel
       end
+    end
+  end
+end
 
-      unquote(do_block)
+defmodule AshBpmn.Resources.Instance.StatusIsRunning do
+  @moduledoc false
+  use Ash.Resource.Validation
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    status = Ash.Changeset.get_attribute(changeset, :status)
+
+    if status == :running do
+      :ok
+    else
+      {:error, field: :status, message: "can only perform this action on a running instance"}
     end
   end
 end

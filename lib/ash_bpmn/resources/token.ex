@@ -25,7 +25,6 @@ defmodule AshBpmn.Resources.Token do
     instance = Keyword.fetch!(opts, :instance)
     table = Keyword.get(opts, :table, "bpmn_tokens")
     tenant? = Keyword.get(opts, :tenant?, false)
-    do_block = Keyword.get(opts, :do, nil)
 
     quote do
       use Ash.Resource,
@@ -107,42 +106,140 @@ defmodule AshBpmn.Resources.Token do
 
         update :claim do
           accept []
+          require_atomic? false
 
-          filter expr(status == :active)
+          validate AshBpmn.Resources.Token.StatusIsActive
+          change AshBpmn.Resources.Token.EnsureActiveInDb
           change set_attribute(:status, :executing)
-          change atomic_update(:attempts, expr(attempts + 1))
+          change AshBpmn.Resources.Token.IncrementAttempts
         end
 
         update :consume do
           accept []
+          require_atomic? false
 
-          filter expr(status == :executing)
+          validate AshBpmn.Resources.Token.StatusIsExecuting
           change set_attribute(:status, :consumed)
         end
 
         update :kill do
           accept []
-
           change set_attribute(:status, :dead)
         end
 
         update :reactivate do
           accept []
+          require_atomic? false
 
-          filter expr(status in [:dead, :executing])
+          validate AshBpmn.Resources.Token.StatusIsDeadOrExecuting
           change set_attribute(:status, :active)
         end
       end
 
       code_interface do
-        define :create!, action: :create
-        define :claim!, action: :claim
-        define :consume!, action: :consume
-        define :kill!, action: :kill
-        define :reactivate!, action: :reactivate
+        define :create, action: :create
+        define :claim, action: :claim
+        define :consume, action: :consume
+        define :kill, action: :kill
+        define :reactivate, action: :reactivate
       end
-
-      unquote(do_block)
     end
+  end
+end
+
+defmodule AshBpmn.Resources.Token.StatusIsActive do
+  @moduledoc false
+  use Ash.Resource.Validation
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    if Ash.Changeset.get_attribute(changeset, :status) == :active do
+      :ok
+    else
+      {:error, field: :status, message: "token must be active to claim"}
+    end
+  end
+end
+
+defmodule AshBpmn.Resources.Token.StatusIsExecuting do
+  @moduledoc false
+  use Ash.Resource.Validation
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    if Ash.Changeset.get_attribute(changeset, :status) == :executing do
+      :ok
+    else
+      {:error, field: :status, message: "token must be executing to consume"}
+    end
+  end
+end
+
+defmodule AshBpmn.Resources.Token.StatusIsDeadOrExecuting do
+  @moduledoc false
+  use Ash.Resource.Validation
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    status = Ash.Changeset.get_attribute(changeset, :status)
+
+    if status in [:dead, :executing] do
+      :ok
+    else
+      {:error, field: :status, message: "token must be dead or executing to reactivate"}
+    end
+  end
+end
+
+defmodule AshBpmn.Resources.Token.IncrementAttempts do
+  @moduledoc false
+  use Ash.Resource.Change
+
+  @impl true
+  def change(changeset, _opts, _context) do
+    current = Ash.Changeset.get_attribute(changeset, :attempts) || 0
+    Ash.Changeset.change_attribute(changeset, :attempts, current + 1)
+  end
+end
+
+defmodule AshBpmn.Resources.Token.EnsureActiveInDb do
+  @moduledoc """
+  Before-action check that reads the actual DB state to guarantee single-winner
+  claim semantics.  Prevents stale-data race where two processes both see
+  :active and both succeed.  If the record is no longer :active in the DB,
+  the claim is rejected with an error.
+  """
+  use Ash.Resource.Change
+
+  @impl true
+  def change(changeset, _opts, _context) do
+    Ash.Changeset.before_action(changeset, fn changeset ->
+      pk = Map.get(changeset.data, :id)
+
+      if is_nil(pk) do
+        changeset
+      else
+        try do
+          current =
+            changeset.resource
+            |> Ash.Query.for_read(:read)
+            |> Ash.Query.filter(id == ^pk)
+            |> Ash.read_one!(authorize?: false)
+
+          if current && current.status == :active do
+            changeset
+          else
+            Ash.Changeset.add_error(changeset,
+              field: :status,
+              message: "token is no longer active (concurrent modification)")
+          end
+        rescue
+          _ ->
+            Ash.Changeset.add_error(changeset,
+              field: :status,
+              message: "could not verify token status")
+        end
+      end
+    end)
   end
 end

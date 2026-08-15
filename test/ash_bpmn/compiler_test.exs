@@ -223,7 +223,9 @@ defmodule AshBpmn.CompilerTest do
       xml = read_fixture("access_request.bpmn")
       {:ok, graph} = Compiler.compile(xml)
       waits_for = graph["joins"]["Join_1"]["waits_for"]
-      assert Enum.sort(waits_for) == ["ManagerApproval", "SecurityApproval"]
+      # waits_for holds the join's incoming SOURCE node ids (DESIGN §5) --
+      # MgrDecision is the gateway on the manager branch feeding Join_1.
+      assert Enum.sort(waits_for) == ["MgrDecision", "SecurityApproval"]
     end
 
     test "has correct flow count" do
@@ -400,7 +402,7 @@ defmodule AshBpmn.CompilerTest do
           <bpmn2:sequenceFlow id="F1" sourceRef="S" targetRef="GW"/>
           <bpmn2:sequenceFlow id="F2" sourceRef="GW" targetRef="E1"/>
           <bpmn2:sequenceFlow id="F3" sourceRef="GW" targetRef="E2">
-            <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression">&&&invalid!!!</bpmn2:conditionExpression>
+            <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression">((( ???</bpmn2:conditionExpression>
           </bpmn2:sequenceFlow>
         </bpmn2:process>
       </bpmn2:definitions>)

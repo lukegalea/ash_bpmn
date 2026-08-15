@@ -21,5 +21,7 @@
       <bpmn2:incoming>Flow_2</bpmn2:incoming>
     </bpmn2:endEvent>
 
+      <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Service_1"/>
+    <bpmn2:sequenceFlow id="Flow_2" sourceRef="Service_1" targetRef="End_1"/>
   </bpmn2:process>
 </bpmn2:definitions>

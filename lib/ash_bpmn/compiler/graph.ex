@@ -7,8 +7,6 @@ defmodule AshBpmn.Compiler.Graph do
   alias AshBpmn.Compiler.Xml
   alias AshBpmn.Compiler.Errors
 
-  @ash_ns "https://github.com/lukegalea/ash_bpmn/ns"
-
   @spec build(tuple()) :: {:ok, map()} | {:error, [map()]}
   def build(process) do
     errors = []
@@ -82,14 +80,7 @@ defmodule AshBpmn.Compiler.Graph do
     {supported, unsupported_errors}
   end
 
-  defp check_unsupported_process_children(process_xml, supported_nodes, flows_xml) do
-    supported_ids =
-      MapSet.new(
-        Enum.map(supported_nodes ++ flows_xml, fn node ->
-          Xml.element_attr(node, "id")
-        end)
-      )
-
+  defp check_unsupported_process_children(process_xml, _supported_nodes, _flows_xml) do
     # Get all direct children of the process
     all_children = Xml.get_element_children(process_xml)
 
@@ -117,8 +108,8 @@ defmodule AshBpmn.Compiler.Graph do
         normalized in supported_local_names ->
           []
 
-        String.starts_with?(normalized, "bpmn2:") ->
-          if Xml.normalize_name(normalized) in supported_local_names do
+        String.starts_with?(type, "bpmn2:") ->
+          if normalized in supported_local_names do
             []
           else
             [
@@ -221,7 +212,9 @@ defmodule AshBpmn.Compiler.Graph do
                )}
             else
               # Check for unknown ash child elements
-              check_unknown_ash_children(config, node, ["candidates", "exclusions", "outcomes", "timers"])
+              check_unknown_ash_children(config, node, ["candidates", "exclusions", "outcomes", "timers"], %{
+                "action" => action
+              })
             end
         end
     end
@@ -416,7 +409,7 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
-  defp check_unknown_ash_children(config, node, known_children) do
+  defp check_unknown_ash_children(config, node, known_children, extra \\ %{}) do
     id = Xml.element_attr(node, "id")
     known = MapSet.new(known_children)
     children = Xml.get_element_children(config)
@@ -433,7 +426,7 @@ defmodule AshBpmn.Compiler.Graph do
       {:error,
        Errors.error(id, "Unknown ash: element '#{name}' in ash:taskConfig for '#{id}'")}
     else
-      {:ok, %{}}
+      {:ok, extra}
     end
   end
 

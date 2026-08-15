@@ -26,7 +26,6 @@ defmodule AshBpmn.Resources.TaskCandidate do
     task = Keyword.fetch!(opts, :task)
     table = Keyword.get(opts, :table, "bpmn_task_candidates")
     tenant? = Keyword.get(opts, :tenant?, false)
-    do_block = Keyword.get(opts, :do, nil)
 
     quote do
       use Ash.Resource,
@@ -102,11 +101,9 @@ defmodule AshBpmn.Resources.TaskCandidate do
       end
 
       code_interface do
-        define :create!, action: :create
-        define :destroy!, action: :destroy
+        define :create, action: :create
+        define :destroy, action: :destroy
       end
-
-      unquote(do_block)
     end
   end
 end

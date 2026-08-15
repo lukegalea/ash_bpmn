@@ -16,11 +16,6 @@ defmodule AshBpmn.Expr do
       literal := integer | float | quoted-string | true | false
   """
 
-  @comparison_ops [">", ">=", "<", "<=", "==", "!="]
-  @in_op "in"
-
-  # ── Public API ──────────────────────────────────────────────────────────
-
   @doc """
   Parses an expression string into a JSON-able AST map.
 
@@ -229,7 +224,9 @@ defmodule AshBpmn.Expr do
   end
 
   defp do_read_float(<<".", c::utf8, rest::binary>>, pos, acc) when c in ?0..?9 do
-    do_read_float_frac(rest, pos + 2, [?. | acc])
+    # Push BOTH the dot and the first fractional digit (c was matched but
+    # previously dropped, so "3.14" tokenized as 3.4).
+    do_read_float_frac(rest, pos + 2, [c, ?. | acc])
   end
 
   defp do_read_float(<<".", rest::binary>>, pos, acc) do
@@ -478,10 +475,8 @@ defmodule AshBpmn.Expr do
   defp peek(tokens, pos) when pos < length(tokens), do: Enum.at(tokens, pos)
   defp peek(_tokens, _pos), do: nil
 
-  defp flatten_binary_op(%{op => children}, op) when is_binary(op) do
-    children
-  end
-
+  defp flatten_binary_op(%{"or" => children}, "or"), do: children
+  defp flatten_binary_op(%{"and" => children}, "and"), do: children
   defp flatten_binary_op(other, _op), do: [other]
 
   # ── Evaluator ─────────────────────────────────────────────────────────────
@@ -561,7 +556,7 @@ defmodule AshBpmn.Expr do
 
   # ── Comparison semantics ────────────────────────────────────────────────
 
-  defp safe_compare(val, "=="", literal), do: val == literal
+  defp safe_compare(val, "==", literal), do: val == literal
   defp safe_compare(val, "!=", literal), do: val != nil and val != literal
 
   defp safe_compare(val, op, literal) when is_number(val) and is_number(literal) do

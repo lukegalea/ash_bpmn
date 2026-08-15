@@ -23,10 +23,10 @@ defmodule AshBpmn.Resources.Definition do
     * `by_key_version/2` — fetch by identity (returns single or `nil`).
     * `latest_published/1` — returns list (callers take `hd/1`).
 
-  ## Host injection
+  ## Host extensions
 
-  An optional `do` block is spliced after the generated DSL, allowing hosts to
-  inject policies or other extensions.
+  Additional DSL blocks (policies, custom validations, etc.) may be added
+  **after** the `use` call — the Ash DSL extension processes them normally.
   """
 
   defmacro __using__(opts) do
@@ -34,7 +34,6 @@ defmodule AshBpmn.Resources.Definition do
     repo = Keyword.fetch!(opts, :repo)
     table = Keyword.get(opts, :table, "bpmn_definitions")
     tenant? = Keyword.get(opts, :tenant?, false)
-    do_block = Keyword.get(opts, :do, nil)
 
     quote do
       use Ash.Resource,
@@ -132,17 +131,15 @@ defmodule AshBpmn.Resources.Definition do
             allow_nil? false
           end
 
-          filter expr(status == :published and key == ^arg(:key))
-          sort version: :desc
-          limit 1
+          prepare AshBpmn.Resources.Definition.FilterLatestPublished
         end
 
         create :create do
           accept [:key, :name, :xml]
-          require_atomic? false
 
           change AshBpmn.Resources.Definition.AssignVersion
           change AshBpmn.Resources.Definition.ComputeHash
+          change AshBpmn.Resources.Definition.CompileXml
           validate AshBpmn.Resources.Definition.UniqueDraftCheck
         end
 
@@ -150,45 +147,56 @@ defmodule AshBpmn.Resources.Definition do
           accept [:xml]
           require_atomic? false
 
-          validate attribute_equals(:status, :draft) do
-            message "can only save XML on a draft definition"
-          end
-
+          validate AshBpmn.Resources.Definition.StatusIsDraft
           change AshBpmn.Resources.Definition.ComputeHash
+          change AshBpmn.Resources.Definition.CompileXml
         end
 
         update :publish do
           accept []
+          require_atomic? false
 
-          validate attribute_equals(:status, :draft) do
-            message "can only publish a draft definition"
-          end
-
+          validate AshBpmn.Resources.Definition.StatusIsDraft
           validate AshBpmn.Resources.Definition.ErrorsEmpty
           change set_attribute(:status, :published)
         end
 
         update :retire do
           accept []
+          require_atomic? false
 
-          validate attribute_equals(:status, :published) do
-            message "can only retire a published definition"
-          end
-
+          validate AshBpmn.Resources.Definition.StatusIsPublished
           change set_attribute(:status, :retired)
         end
       end
 
       code_interface do
-        define :publish!, action: :publish
-        define :retire!, action: :retire
-        define :save_xml!, action: :save_xml, args: [:xml]
+        define :create, action: :create
+        define :publish, action: :publish
+        define :retire, action: :retire
+        define :save_xml, action: :save_xml, args: [:xml]
         define :by_key_version, action: :read, get_by: [:key, :version], get?: true
         define :latest_published, action: :latest_published, args: [:key]
       end
-
-      unquote(do_block)
     end
+  end
+end
+
+defmodule AshBpmn.Resources.Definition.FilterLatestPublished do
+  @moduledoc false
+  use Ash.Resource.Preparation
+
+  require Ash.Query
+
+  @impl true
+  def prepare(query, _opts, _context) do
+    key = Ash.Query.get_argument(query, :key)
+
+    query
+    |> Ash.Query.filter(status == :published)
+    |> Ash.Query.filter(key == ^key)
+    |> Ash.Query.sort(version: :desc)
+    |> Ash.Query.limit(1)
   end
 end
 
@@ -205,24 +213,25 @@ defmodule AshBpmn.Resources.Definition.AssignVersion do
       changeset
     else
       max_version = fetch_max_version(resource, key)
-
       Ash.Changeset.change_attribute(changeset, :version, max_version + 1)
     end
   end
 
   defp fetch_max_version(resource, key) do
-    resource
-    |> Ash.Query.for_read(:read)
-    |> Ash.Query.filter(key == ^key)
-    |> Ash.Query.sort(version: :desc)
-    |> Ash.Query.limit(1)
-    |> Ash.read_one!(authorize?: false)
-    |> case do
-      nil -> 0
-      record -> record.version
+    try do
+      resource
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(key == ^key)
+      |> Ash.Query.sort(version: :desc)
+      |> Ash.Query.limit(1)
+      |> Ash.read_one!(authorize?: false)
+      |> case do
+        nil -> 0
+        record -> record.version
+      end
+    rescue
+      _ -> 0
     end
-  rescue
-    _ -> 0
   end
 end
 
@@ -242,6 +251,32 @@ defmodule AshBpmn.Resources.Definition.ComputeHash do
         |> Base.encode16(case: :lower)
 
       Ash.Changeset.change_attribute(changeset, :content_hash, hash)
+    end
+  end
+end
+
+defmodule AshBpmn.Resources.Definition.CompileXml do
+  @moduledoc false
+  use Ash.Resource.Change
+
+  @impl true
+  def change(changeset, _opts, _context) do
+    xml = Ash.Changeset.get_attribute(changeset, :xml)
+
+    if is_nil(xml) do
+      changeset
+    else
+      case AshBpmn.Compiler.compile(xml) do
+        {:ok, graph} ->
+          changeset
+          |> Ash.Changeset.change_attribute(:graph, graph)
+          |> Ash.Changeset.change_attribute(:errors, [])
+
+        {:error, compile_errors} ->
+          changeset
+          |> Ash.Changeset.change_attribute(:graph, nil)
+          |> Ash.Changeset.change_attribute(:errors, compile_errors)
+      end
     end
   end
 end
@@ -275,23 +310,58 @@ defmodule AshBpmn.Resources.Definition.UniqueDraftCheck do
       :ok
     else
       exists =
-        resource
-        |> Ash.Query.for_read(:read)
-        |> Ash.Query.filter(key == ^key and status == :draft)
-        |> Ash.read_one!(authorize?: false)
-        |> case do
-          nil -> false
-          _ -> true
+        try do
+          resource
+          |> Ash.Query.for_read(:read)
+          |> Ash.Query.filter(key == ^key and status == :draft)
+          |> Ash.read_one!(authorize?: false)
+          |> case do
+            nil -> false
+            _ -> true
+          end
+        rescue
+          _ -> false
         end
-      rescue
-        _ -> false
-      end
 
       if exists do
         {:error, field: :key, message: "a draft already exists for this key"}
       else
         :ok
       end
+    end
+  end
+end
+
+defmodule AshBpmn.Resources.Definition.StatusIsDraft do
+  @moduledoc false
+  use Ash.Resource.Validation
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    status = Ash.Changeset.get_attribute(changeset, :status)
+
+    if status == :draft do
+      :ok
+    else
+      {:error,
+       field: :status,
+       message: "can only perform this action on a draft definition"}
+    end
+  end
+end
+
+defmodule AshBpmn.Resources.Definition.StatusIsPublished do
+  @moduledoc false
+  use Ash.Resource.Validation
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    status = Ash.Changeset.get_attribute(changeset, :status)
+
+    if status == :published do
+      :ok
+    else
+      {:error, field: :status, message: "can only retire a published definition"}
     end
   end
 end

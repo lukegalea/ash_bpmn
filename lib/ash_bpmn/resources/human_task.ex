@@ -25,7 +25,6 @@ defmodule AshBpmn.Resources.HumanTask do
     token = Keyword.fetch!(opts, :token)
     table = Keyword.get(opts, :table, "bpmn_human_tasks")
     tenant? = Keyword.get(opts, :tenant?, false)
-    do_block = Keyword.get(opts, :do, nil)
 
     quote do
       use Ash.Resource,
@@ -171,24 +170,27 @@ defmodule AshBpmn.Resources.HumanTask do
 
         update :claim do
           accept [:assignee_type, :assignee_id]
+          require_atomic? false
 
-          filter expr(status == :open)
+          validate AshBpmn.Resources.HumanTask.StatusIsOpen
           change set_attribute(:status, :claimed)
           change set_attribute(:claimed_at, &DateTime.utc_now/0)
         end
 
         update :complete do
           accept [:outcome, :comment, :decided_by_id]
+          require_atomic? false
 
-          filter expr(status == :claimed)
+          validate AshBpmn.Resources.HumanTask.StatusIsClaimed
           validate AshBpmn.Resources.HumanTask.RequireOutcome
           change set_attribute(:status, :completed)
         end
 
         update :cancel do
           accept []
+          require_atomic? false
 
-          filter expr(status in [:open, :claimed])
+          validate AshBpmn.Resources.HumanTask.StatusIsOpenOrClaimed
           change set_attribute(:status, :cancelled)
         end
 
@@ -196,7 +198,7 @@ defmodule AshBpmn.Resources.HumanTask do
           accept [:assignee_type, :assignee_id]
           require_atomic? false
 
-          filter expr(status == :claimed)
+          validate AshBpmn.Resources.HumanTask.StatusIsClaimed
           change AshBpmn.Resources.HumanTask.RecordDelegatedFrom
         end
 
@@ -206,24 +208,23 @@ defmodule AshBpmn.Resources.HumanTask do
 
         update :force_complete do
           accept [:outcome]
+          require_atomic? false
 
-          filter expr(status in [:open, :claimed])
+          validate AshBpmn.Resources.HumanTask.StatusIsOpenOrClaimed
           change set_attribute(:status, :completed)
           change set_attribute(:decided_by_id, nil)
         end
       end
 
       code_interface do
-        define :create!, action: :create
-        define :claim!, action: :claim
-        define :complete!, action: :complete
-        define :cancel!, action: :cancel
-        define :delegate!, action: :delegate, args: [:assignee_type, :assignee_id]
-        define :force_complete!, action: :force_complete, args: [:outcome]
-        define :attach_timers!, action: :attach_timers, args: [:timer_job_ids]
+        define :create, action: :create
+        define :claim, action: :claim
+        define :complete, action: :complete
+        define :cancel, action: :cancel
+        define :delegate, action: :delegate, args: [:assignee_type, :assignee_id]
+        define :force_complete, action: :force_complete, args: [:outcome]
+        define :attach_timers, action: :attach_timers, args: [:timer_job_ids]
       end
-
-      unquote(do_block)
     end
   end
 end
@@ -257,5 +258,49 @@ defmodule AshBpmn.Resources.HumanTask.RecordDelegatedFrom do
       end
 
     Ash.Changeset.change_attribute(changeset, :delegated_from_id, current_assignee_id)
+  end
+end
+
+defmodule AshBpmn.Resources.HumanTask.StatusIsOpen do
+  @moduledoc false
+  use Ash.Resource.Validation
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    if Ash.Changeset.get_attribute(changeset, :status) == :open do
+      :ok
+    else
+      {:error, field: :status, message: "task must be open to claim"}
+    end
+  end
+end
+
+defmodule AshBpmn.Resources.HumanTask.StatusIsClaimed do
+  @moduledoc false
+  use Ash.Resource.Validation
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    if Ash.Changeset.get_attribute(changeset, :status) == :claimed do
+      :ok
+    else
+      {:error, field: :status, message: "task must be claimed"}
+    end
+  end
+end
+
+defmodule AshBpmn.Resources.HumanTask.StatusIsOpenOrClaimed do
+  @moduledoc false
+  use Ash.Resource.Validation
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    status = Ash.Changeset.get_attribute(changeset, :status)
+
+    if status in [:open, :claimed] do
+      :ok
+    else
+      {:error, field: :status, message: "task must be open or claimed"}
+    end
   end
 end

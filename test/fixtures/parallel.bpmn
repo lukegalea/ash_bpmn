@@ -41,5 +41,11 @@
       <bpmn2:incoming>Flow_6</bpmn2:incoming>
     </bpmn2:endEvent>
 
+      <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Fork_1"/>
+    <bpmn2:sequenceFlow id="Flow_2" sourceRef="Fork_1" targetRef="Task_A"/>
+    <bpmn2:sequenceFlow id="Flow_3" sourceRef="Fork_1" targetRef="Task_B"/>
+    <bpmn2:sequenceFlow id="Flow_4" sourceRef="Task_A" targetRef="Join_1"/>
+    <bpmn2:sequenceFlow id="Flow_5" sourceRef="Task_B" targetRef="Join_1"/>
+    <bpmn2:sequenceFlow id="Flow_6" sourceRef="Join_1" targetRef="End_1"/>
   </bpmn2:process>
 </bpmn2:definitions>

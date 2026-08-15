@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                    xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
                    id="Definitions_1"
                    targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
@@ -36,5 +37,12 @@
       <bpmn2:incoming>Flow_3</bpmn2:incoming>
     </bpmn2:endEvent>
 
+      <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Gateway_1"/>
+    <bpmn2:sequenceFlow id="Flow_cond" sourceRef="Gateway_1" targetRef="Task_A">
+      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression">subject.amount > 100</bpmn2:conditionExpression>
+    </bpmn2:sequenceFlow>
+    <bpmn2:sequenceFlow id="Flow_default" sourceRef="Gateway_1" targetRef="Task_B"/>
+    <bpmn2:sequenceFlow id="Flow_2" sourceRef="Task_A" targetRef="End_1"/>
+    <bpmn2:sequenceFlow id="Flow_3" sourceRef="Task_B" targetRef="End_1"/>
   </bpmn2:process>
 </bpmn2:definitions>

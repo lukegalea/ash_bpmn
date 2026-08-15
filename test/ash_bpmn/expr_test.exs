@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Luke Galea
 # SPDX-License-Identifier: MIT
 
+# Helper struct for struct traversal tests
+defmodule MyStruct do
+  defstruct [:name, :level]
+end
+
 defmodule AshBpmn.ExprTest do
   use ExUnit.Case, async: true
 
@@ -346,41 +351,43 @@ defmodule AshBpmn.ExprTest do
 
   # ── Round-trip property tests ───────────────────────────────────────────
 
-  for op <- [">", ">=", "<", "<=", "==", "!="] do
-    test "round-trip parse+eval for op #{op} with numbers" do
-      path = "subject.value"
-      literal = 42
-
-      assert {:ok, ast} = Expr.parse("#{path} #{op} #{literal}")
-      assert {:ok, result} = Expr.eval(ast, %{"subject" => %{"value" => 42}})
-
-      case op do
-        "==" -> assert result == true
-        "!=" -> assert result == false
-        ">=" -> assert result == true
-        ">" -> assert result == false
-        "<=" -> assert result == true
-        "<" -> assert result == false
-      end
-    end
+  test "round-trip parse+eval for op > with numbers" do
+    assert {:ok, ast} = Expr.parse("subject.value > 42")
+    assert {:ok, false} = Expr.eval(ast, %{"subject" => %{"value" => 42}})
   end
 
-  for op <- ["==", "!="] do
-    test "round-trip parse+eval for op #{op} with strings" do
-      path = "subject.name"
-
-      assert {:ok, ast} = Expr.parse("#{path} #{op} \"alice\"")
-      assert {:ok, result} = Expr.eval(ast, %{"subject" => %{"name" => "alice"}})
-
-      case op do
-        "==" -> assert result == true
-        "!=" -> assert result == false
-      end
-    end
+  test "round-trip parse+eval for op >= with numbers" do
+    assert {:ok, ast} = Expr.parse("subject.value >= 42")
+    assert {:ok, true} = Expr.eval(ast, %{"subject" => %{"value" => 42}})
   end
-end
 
-# Helper struct for struct traversal tests
-defmodule MyStruct do
-  defstruct [:name, :level]
+  test "round-trip parse+eval for op < with numbers" do
+    assert {:ok, ast} = Expr.parse("subject.value < 100")
+    assert {:ok, true} = Expr.eval(ast, %{"subject" => %{"value" => 42}})
+  end
+
+  test "round-trip parse+eval for op <= with numbers" do
+    assert {:ok, ast} = Expr.parse("subject.value <= 42")
+    assert {:ok, true} = Expr.eval(ast, %{"subject" => %{"value" => 42}})
+  end
+
+  test "round-trip parse+eval for op == with numbers" do
+    assert {:ok, ast} = Expr.parse("subject.value == 42")
+    assert {:ok, true} = Expr.eval(ast, %{"subject" => %{"value" => 42}})
+  end
+
+  test "round-trip parse+eval for op != with numbers" do
+    assert {:ok, ast} = Expr.parse("subject.value != 42")
+    assert {:ok, false} = Expr.eval(ast, %{"subject" => %{"value" => 42}})
+  end
+
+  test "round-trip parse+eval for op == with strings" do
+    assert {:ok, ast} = Expr.parse(~s(subject.name == "alice"))
+    assert {:ok, true} = Expr.eval(ast, %{"subject" => %{"name" => "alice"}})
+  end
+
+  test "round-trip parse+eval for op != with strings" do
+    assert {:ok, ast} = Expr.parse(~s(subject.name != "alice"))
+    assert {:ok, false} = Expr.eval(ast, %{"subject" => %{"name" => "alice"}})
+  end
 end

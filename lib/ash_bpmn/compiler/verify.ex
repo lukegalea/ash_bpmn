@@ -48,7 +48,7 @@ defmodule AshBpmn.Compiler.Verify do
         [] ->
           [Errors.error("process", "Process must have exactly one start event") | errors]
 
-        [{id, _}] ->
+        [{_id, _}] ->
           errors
 
         _multiple ->
@@ -79,11 +79,6 @@ defmodule AshBpmn.Compiler.Verify do
       flows
       |> Enum.group_by(fn {_fid, f} -> f["from"] end, fn {_fid, f} -> f["to"] end)
 
-    # Build incoming to each node
-    incoming =
-      flows
-      |> Enum.group_by(fn {_fid, f} -> f["to"] end, fn {_fid, f} -> f["from"] end)
-
     # BFS from start to find reachable nodes
     reachable = bfs_reachable(start, outgoing)
 
@@ -102,11 +97,6 @@ defmodule AshBpmn.Compiler.Verify do
       |> Enum.concat(errors)
 
     # For each reachable node, check it can reach some end event
-    # Build reverse adjacency for backward reachability
-    reverse_adj =
-      flows
-      |> Enum.group_by(fn {_fid, f} -> f["to"] end, fn {_fid, f} -> f["from"] end)
-
     end_nodes =
       nodes
       |> Enum.filter(fn {_id, n} -> n["type"] == "endEvent" end)
@@ -198,10 +188,6 @@ defmodule AshBpmn.Compiler.Verify do
     defaults =
       outgoing
       |> Enum.filter(fn {_fid, f} -> f["condition"] == nil end)
-
-    conditioned =
-      outgoing
-      |> Enum.filter(fn {_fid, f} -> f["condition"] != nil end)
 
     cond do
       default_flow != nil and length(defaults) > 1 ->

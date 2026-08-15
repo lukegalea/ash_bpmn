@@ -3,15 +3,16 @@
 
 # Test instantiations of all six BPMN resource macros with permissive policies
 # for testing. Each module is owned by Lane A (test/support/**).
+# Policies are added after `use` because Elixir `use` does not support `do` blocks.
 
 defmodule AshBpmn.Test.Definition do
   use AshBpmn.Resources.Definition,
     domain: AshBpmn.Test.Domain,
-    repo: AshBpmn.TestRepo do
-    policies do
-      bypass do
-        authorize_if always()
-      end
+    repo: AshBpmn.TestRepo
+
+  policies do
+    bypass do
+      authorize_if always()
     end
   end
 end
@@ -20,11 +21,11 @@ defmodule AshBpmn.Test.Instance do
   use AshBpmn.Resources.Instance,
     domain: AshBpmn.Test.Domain,
     repo: AshBpmn.TestRepo,
-    definition: AshBpmn.Test.Definition do
-    policies do
-      bypass do
-        authorize_if always()
-      end
+    definition: AshBpmn.Test.Definition
+
+  policies do
+    bypass do
+      authorize_if always()
     end
   end
 end
@@ -33,11 +34,11 @@ defmodule AshBpmn.Test.Token do
   use AshBpmn.Resources.Token,
     domain: AshBpmn.Test.Domain,
     repo: AshBpmn.TestRepo,
-    instance: AshBpmn.Test.Instance do
-    policies do
-      bypass do
-        authorize_if always()
-      end
+    instance: AshBpmn.Test.Instance
+
+  policies do
+    bypass do
+      authorize_if always()
     end
   end
 end
@@ -47,11 +48,11 @@ defmodule AshBpmn.Test.HumanTask do
     domain: AshBpmn.Test.Domain,
     repo: AshBpmn.TestRepo,
     instance: AshBpmn.Test.Instance,
-    token: AshBpmn.Test.Token do
-    policies do
-      bypass do
-        authorize_if always()
-      end
+    token: AshBpmn.Test.Token
+
+  policies do
+    bypass do
+      authorize_if always()
     end
   end
 end
@@ -60,11 +61,11 @@ defmodule AshBpmn.Test.TaskCandidate do
   use AshBpmn.Resources.TaskCandidate,
     domain: AshBpmn.Test.Domain,
     repo: AshBpmn.TestRepo,
-    task: AshBpmn.Test.HumanTask do
-    policies do
-      bypass do
-        authorize_if always()
-      end
+    task: AshBpmn.Test.HumanTask
+
+  policies do
+    bypass do
+      authorize_if always()
     end
   end
 end
@@ -73,11 +74,11 @@ defmodule AshBpmn.Test.ProcessEvent do
   use AshBpmn.Resources.ProcessEvent,
     domain: AshBpmn.Test.Domain,
     repo: AshBpmn.TestRepo,
-    instance: AshBpmn.Test.Instance do
-    policies do
-      bypass do
-        authorize_if always()
-      end
+    instance: AshBpmn.Test.Instance
+
+  policies do
+    bypass do
+      authorize_if always()
     end
   end
 end
@@ -90,6 +91,8 @@ defmodule AshBpmn.Test.Subject do
     data_layer: AshPostgres.DataLayer
 
   @ash_bpmn_kind :not_bpmn
+
+  def ash_bpmn_kind, do: @ash_bpmn_kind
 
   postgres do
     table "bpmn_test_subjects"

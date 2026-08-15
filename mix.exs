@@ -39,9 +39,10 @@ defmodule AshBpmn.MixProject do
   defp elixirc_paths(_), do: ["lib"]
 
   # The library owns no supervision tree. Oban workers are started by the host's
-  # Oban instance; the test support starts its own under test.
+  # Oban instance; the test support starts its own under test. `:xmerl` is OTP's
+  # XML parser -- the compiler's only XML dependency, no hex package needed.
   def application do
-    [extra_applications: [:logger]]
+    [extra_applications: [:logger, :xmerl, :crypto, :ssl]]
   end
 
   defp package do
@@ -65,6 +66,7 @@ defmodule AshBpmn.MixProject do
       {:jason, "~> 1.2"},
       {:phoenix_live_view, "~> 1.0"},
       # dev/test only
+      {:simple_sat, "~> 0.1", only: [:dev, :test]},
       {:sourceror, "~> 1.8", only: [:dev, :test]},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
