@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_1"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_access_request" name="Privileged access request" isExecutable="true">
+
+    <bpmn2:startEvent id="Start_1" name="Request submitted">
+      <bpmn2:outgoing>Flow_1</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <bpmn2:serviceTask id="Validate" name="Validate request">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="validate_request"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:exclusiveGateway id="PrivilegedGateway" name="Privileged role?" default="Flow_NotPriv">
+      <bpmn2:incoming>Flow_2</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_Sec</bpmn2:outgoing>
+      <bpmn2:outgoing>Flow_NotPriv</bpmn2:outgoing>
+    </bpmn2:exclusiveGateway>
+
+    <bpmn2:userTask id="SecurityApproval" name="Security approval">
+      <bpmn2:extensionElements>
+        <ash:taskConfig>
+          <ash:candidates>
+            <ash:candidate kind="role" of="security_admin"/>
+          </ash:candidates>
+          <ash:outcomes>
+            <ash:outcome name="approved"/>
+            <ash:outcome name="rejected"/>
+          </ash:outcomes>
+          <ash:timers>
+            <ash:timer kind="remind" hours="12"/>
+            <ash:timer kind="escalate" hours="24"/>
+            <ash:timer kind="expire" days="3"/>
+          </ash:timers>
+        </ash:taskConfig>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Sec</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_SecOut</bpmn2:outgoing>
+    </bpmn2:userTask>
+
+    <bpmn2:userTask id="ManagerApproval" name="Manager approval">
+      <bpmn2:extensionElements>
+        <ash:taskConfig>
+          <ash:candidates>
+            <ash:candidate kind="manager_of" of="subject.created_by_id"/>
+          </ash:candidates>
+          <ash:exclusions>
+            <ash:exclusion who="subject.created_by_id"/>
+          </ash:exclusions>
+          <ash:outcomes>
+            <ash:outcome name="approved"/>
+            <ash:outcome name="rejected"/>
+          </ash:outcomes>
+          <ash:timers>
+            <ash:timer kind="remind" hours="24"/>
+            <ash:timer kind="escalate" hours="48"/>
+            <ash:timer kind="expire" days="7"/>
+          </ash:timers>
+        </ash:taskConfig>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_NotPriv</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_MgrOut</bpmn2:outgoing>
+    </bpmn2:userTask>
+
+    <bpmn2:exclusiveGateway id="MgrDecision" name="Manager decision?" default="Flow_MgrRej">
+      <bpmn2:incoming>Flow_MgrOut</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_MgrApp</bpmn2:outgoing>
+      <bpmn2:outgoing>Flow_MgrRej</bpmn2:outgoing>
+    </bpmn2:exclusiveGateway>
+
+    <bpmn2:endEvent id="End_rejected" name="Rejected by manager">
+      <bpmn2:incoming>Flow_MgrRej</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+    <bpmn2:parallelGateway id="Join_1" name="Join approvals">
+      <bpmn2:incoming>Flow_SecOut</bpmn2:incoming>
+      <bpmn2:incoming>Flow_MgrApp</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_JoinOut</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+
+    <bpmn2:serviceTask id="Provision" name="Provision access">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="provision_access"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_JoinOut</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_Done</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_approved" name="Approved">
+      <bpmn2:incoming>Flow_Done</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+  </bpmn2:process>
+</bpmn2:definitions>

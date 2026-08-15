@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Luke Galea
+# SPDX-License-Identifier: MIT
+/_build/
+/cover/
+/deps/
+/doc/
+/priv/plts/
+/.fetch
+erl_crash.dump
+*.beam
+/mix.lock.license
+# Generated at test time from the resource snapshots, like ash_events.
+/priv/test_repo/
+/.elixir_ls/
+/.devenv*
+.devenv.flake.nix
+.devenv.json

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_1"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_parallel" name="Parallel process" isExecutable="true">
+
+    <bpmn2:startEvent id="Start_1" name="Start">
+      <bpmn2:outgoing>Flow_1</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <bpmn2:parallelGateway id="Fork_1" name="Fork">
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
+      <bpmn2:outgoing>Flow_3</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+
+    <bpmn2:serviceTask id="Task_A" name="Task A">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="task_a"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_2</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_4</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:serviceTask id="Task_B" name="Task B">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="task_b"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_3</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_5</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:parallelGateway id="Join_1" name="Join">
+      <bpmn2:incoming>Flow_4</bpmn2:incoming>
+      <bpmn2:incoming>Flow_5</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_6</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+
+    <bpmn2:endEvent id="End_1" name="End">
+      <bpmn2:incoming>Flow_6</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+  </bpmn2:process>
+</bpmn2:definitions>

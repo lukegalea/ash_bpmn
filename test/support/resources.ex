@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: 2026 Luke Galea
+# SPDX-License-Identifier: MIT
+
+# Test instantiations of all six BPMN resource macros with permissive policies
+# for testing. Each module is owned by Lane A (test/support/**).
+
+defmodule AshBpmn.Test.Definition do
+  use AshBpmn.Resources.Definition,
+    domain: AshBpmn.Test.Domain,
+    repo: AshBpmn.TestRepo do
+    policies do
+      bypass do
+        authorize_if always()
+      end
+    end
+  end
+end
+
+defmodule AshBpmn.Test.Instance do
+  use AshBpmn.Resources.Instance,
+    domain: AshBpmn.Test.Domain,
+    repo: AshBpmn.TestRepo,
+    definition: AshBpmn.Test.Definition do
+    policies do
+      bypass do
+        authorize_if always()
+      end
+    end
+  end
+end
+
+defmodule AshBpmn.Test.Token do
+  use AshBpmn.Resources.Token,
+    domain: AshBpmn.Test.Domain,
+    repo: AshBpmn.TestRepo,
+    instance: AshBpmn.Test.Instance do
+    policies do
+      bypass do
+        authorize_if always()
+      end
+    end
+  end
+end
+
+defmodule AshBpmn.Test.HumanTask do
+  use AshBpmn.Resources.HumanTask,
+    domain: AshBpmn.Test.Domain,
+    repo: AshBpmn.TestRepo,
+    instance: AshBpmn.Test.Instance,
+    token: AshBpmn.Test.Token do
+    policies do
+      bypass do
+        authorize_if always()
+      end
+    end
+  end
+end
+
+defmodule AshBpmn.Test.TaskCandidate do
+  use AshBpmn.Resources.TaskCandidate,
+    domain: AshBpmn.Test.Domain,
+    repo: AshBpmn.TestRepo,
+    task: AshBpmn.Test.HumanTask do
+    policies do
+      bypass do
+        authorize_if always()
+      end
+    end
+  end
+end
+
+defmodule AshBpmn.Test.ProcessEvent do
+  use AshBpmn.Resources.ProcessEvent,
+    domain: AshBpmn.Test.Domain,
+    repo: AshBpmn.TestRepo,
+    instance: AshBpmn.Test.Instance do
+    policies do
+      bypass do
+        authorize_if always()
+      end
+    end
+  end
+end
+
+# A simple subject resource for engine / approval tests.
+# No authorizer — open access in test contexts.
+defmodule AshBpmn.Test.Subject do
+  use Ash.Resource,
+    domain: AshBpmn.Test.Domain,
+    data_layer: AshPostgres.DataLayer
+
+  @ash_bpmn_kind :not_bpmn
+
+  postgres do
+    table "bpmn_test_subjects"
+    repo AshBpmn.TestRepo
+  end
+
+  attributes do
+    uuid_primary_key :id
+
+    attribute :name, :string do
+      allow_nil? false
+      public? true
+    end
+
+    attribute :amount, :integer do
+      default 0
+      public? true
+    end
+
+    attribute :is_privileged, :boolean do
+      default false
+      public? true
+    end
+
+    attribute :created_by_id, :uuid do
+      public? true
+    end
+
+    timestamps()
+  end
+
+  actions do
+    read :read do
+      primary? true
+    end
+
+    create :create do
+      accept [:name, :amount, :is_privileged, :created_by_id]
+    end
+
+    update :update do
+      accept [:name, :amount, :is_privileged, :created_by_id]
+    end
+  end
+
+  code_interface do
+    define :create!, action: :create
+    define :update!, action: :update
+  end
+end

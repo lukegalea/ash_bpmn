@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_1"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_exclusive" name="Exclusive gateway process" isExecutable="true">
+
+    <bpmn2:startEvent id="Start_1" name="Start">
+      <bpmn2:outgoing>Flow_1</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <bpmn2:exclusiveGateway id="Gateway_1" name="Choose?" default="Flow_default">
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_cond</bpmn2:outgoing>
+      <bpmn2:outgoing>Flow_default</bpmn2:outgoing>
+    </bpmn2:exclusiveGateway>
+
+    <bpmn2:serviceTask id="Task_A" name="Task A">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="task_a"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_cond</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:serviceTask id="Task_B" name="Task B">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="task_b"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_default</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_3</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_1" name="End">
+      <bpmn2:incoming>Flow_2</bpmn2:incoming>
+      <bpmn2:incoming>Flow_3</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+  </bpmn2:process>
+</bpmn2:definitions>
