@@ -10,7 +10,7 @@ every embeddable BPMN editor ultimately is — wrapped in a LiveView hook and a
 server-rendered properties panel. This page is how to embed it, how the `ash:`
 bindings work, and the one licence obligation you cannot skip.
 
-![The designer editing a draft process](https://raw.githubusercontent.com/lukegalea/ash_bpmn/main/documentation/assets/designer.png)
+![The designer editing a draft process](../assets/designer.png)
 
 The canvas is bpmn-js. The header is the definition's identity — key, version,
 and whether you are looking at a draft or a published version — plus the four
@@ -63,7 +63,7 @@ an element, the hook pushes `selection_changed` — carrying the element's curre
 `ash:` binding, read out of the modeller — and the LiveView renders the
 appropriate form.
 
-![A user task selected, showing its candidates, outcomes, exclusions and timers](https://raw.githubusercontent.com/lukegalea/ash_bpmn/main/documentation/assets/designer-user-task.png)
+![A user task selected, showing its candidates, outcomes, exclusions and timers](../assets/designer-user-task.png)
 
 For a user task that is candidates, outcomes, exclusions and timers; every list
 shows one row per existing entry plus a blank row to add another. The panel is
@@ -74,7 +74,7 @@ rendered blanks over a configured task would erase it on Apply.
 
 A service task has exactly one binding, and the panel narrows to it:
 
-![A service task selected, showing only its action reference](https://raw.githubusercontent.com/lukegalea/ash_bpmn/main/documentation/assets/designer-service-task.png)
+![A service task selected, showing only its action reference](../assets/designer-service-task.png)
 
 Save asks the hook for `saveXML({format: true})` and stores the document; publish
 runs the compiler and, on success, freezes the version.

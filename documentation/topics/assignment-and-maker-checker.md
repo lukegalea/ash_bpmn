@@ -36,7 +36,7 @@ with hedging words.
 
 `AshBpmn.Web.TaskListLive` is that query rendered:
 
-![The task list showing one open task and one claimed task with its decision form](https://raw.githubusercontent.com/lukegalea/ash_bpmn/main/documentation/assets/task-list.png)
+![The task list showing one open task and one claimed task with its decision form](../assets/task-list.png)
 
 Open tasks the actor is a candidate for offer Claim; claimed ones offer the
 decision — an outcome, a comment, or a delegation. Both sections come from the

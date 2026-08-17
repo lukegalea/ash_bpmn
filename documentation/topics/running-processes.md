@@ -94,7 +94,7 @@ declared alternative to waiting forever, and it is opt-in per task.
 `AshBpmn.Web.ViewerLive` renders an instance against the graph it pinned, with
 its live tokens marked on the diagram:
 
-![The instance viewer showing a running instance parked on two parallel reviews](https://raw.githubusercontent.com/lukegalea/ash_bpmn/main/documentation/assets/viewer-running.png)
+![The instance viewer showing a running instance parked on two parallel reviews](../assets/viewer-running.png)
 
 Everything on the right is a row in Postgres, not a reconstruction: the token
 table is the branch state (`consumed` for the path already taken, `executing`
@@ -105,7 +105,7 @@ reverse order. Nothing here is derived from an in-memory process.
 The same view of a finished instance is the audit trail an approver's manager
 actually gets asked for:
 
-![The viewer showing a completed instance with every token consumed](https://raw.githubusercontent.com/lukegalea/ash_bpmn/main/documentation/assets/viewer.png)
+![The viewer showing a completed instance with every token consumed](../assets/viewer.png)
 
 Every token is `consumed`, and the event list reads end to end: started, routed
 at the gateway, task created, claimed, completed, the action invoked, instance
