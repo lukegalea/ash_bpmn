@@ -36,13 +36,23 @@ defmodule AshBpmn.MixProject do
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]
+  # `dev/` is the demo host app: a real Phoenix server that mounts the designer,
+  # viewer and task list against a real database. It is how the screenshots in
+  # the docs are produced, and the only way to exercise the bpmn-js hook.
+  defp elixirc_paths(:dev), do: ["lib", "dev/lib"]
   defp elixirc_paths(_), do: ["lib"]
 
   # The library owns no supervision tree. Oban workers are started by the host's
   # Oban instance; the test support starts its own under test. `:xmerl` is OTP's
   # XML parser -- the compiler's only XML dependency, no hex package needed.
+  #
+  # In :dev the demo app supplies one, so `mix dev.server` has something to run.
   def application do
-    [extra_applications: [:logger, :xmerl, :crypto, :ssl]]
+    [extra_applications: [:logger, :xmerl, :crypto, :ssl]] ++ dev_application()
+  end
+
+  defp dev_application do
+    if Mix.env() == :dev, do: [mod: {AshBpmnDev.Application, []}], else: []
   end
 
   defp package do
@@ -66,18 +76,32 @@ defmodule AshBpmn.MixProject do
       {:jason, "~> 1.2"},
       {:phoenix_live_view, "~> 1.0"},
       # dev/test only
+      {:bandit, "~> 1.0", only: :dev},
       {:simple_sat, "~> 0.1", only: [:dev, :test]},
       {:sourceror, "~> 1.8", only: [:dev, :test]},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:igniter, "~> 0.6", only: [:dev, :test]},
+      {:lazy_html, ">= 0.1.0", only: :test},
       {:mix_audit, ">= 0.0.0", only: [:dev, :test], runtime: false}
     ]
   end
 
   defp docs do
     [
+      # Screenshots live in documentation/assets. The README sits at the root of
+      # both the repository and the generated docs, so its relative links work
+      # in both; the topic pages do not (ex_doc flattens them into the doc root
+      # while GitHub keeps them nested), so those link the images by absolute
+      # URL instead.
+      assets: %{"documentation/assets" => "documentation/assets"},
+      # The demo app under dev/ is compiled in :dev, which is the env ex_doc
+      # runs in — without this filter its modules land in the published API
+      # reference alongside the library's.
+      filter_modules: fn module, _metadata ->
+        not (Atom.to_string(module) =~ ~r/^Elixir\.AshBpmnDev/)
+      end,
       extras: [
         {"README.md", title: "Home"},
         "documentation/topics/how-it-works.md",
@@ -104,7 +128,11 @@ defmodule AshBpmn.MixProject do
   defp aliases do
     [
       credo: "credo --strict",
-      test: ["test"]
+      test: ["test"],
+      "dev.assets": ["cmd --cd dev/assets npm install", "cmd --cd dev/assets npm run build"],
+      "dev.setup": ["ash_postgres.create", "ash_postgres.migrate", "run dev/priv/seeds.exs"],
+      "dev.reset": ["ash_postgres.drop", "dev.setup"],
+      "dev.server": ["run --no-halt"]
     ]
   end
 end

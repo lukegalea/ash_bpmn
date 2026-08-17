@@ -55,6 +55,26 @@ flowchart LR
     TASKS --> ENGINE
 ```
 
+## What it looks like
+
+The designer is bpmn-js embedded in a LiveView, with a server-rendered
+properties panel for the `ash:` bindings. Selecting a user task shows the
+candidates, outcomes, exclusions and timers that the compiler will read:
+
+![The ash_bpmn designer with a user task selected](documentation/assets/designer-user-task.png)
+
+The instance viewer renders the version an instance pinned, marks the nodes it
+currently holds tokens on, and lists the tokens, tasks and events behind it:
+
+![The instance viewer showing a running instance](documentation/assets/viewer-running.png)
+
+And the task list is the candidate rows, queried:
+
+![The task list](documentation/assets/task-list.png)
+
+All three are real screenshots of the demo app in [`dev/`](https://github.com/lukegalea/ash_bpmn/tree/main/dev), which you can
+run yourself — see [running the demo](#running-the-demo).
+
 The engine orchestrates and never decides: every node resolves to a host callback,
 every mutation runs through ordinary Ash actions with their own policies and
 validations. Business logic in the graph is the controller-layer authorization
@@ -72,8 +92,8 @@ create :submit do
     key: "access_request.grant",
     name: "Approve access request",
     outcomes: [:approved, :rejected],
-    candidates: [{:manager_of, "created_by_id"}],   # your resolver interprets these
-    excluding: [:created_by_id],                     # maker-checker, by subtraction
+    candidates: [{:manager_of, "subject.created_by_id"}],   # your resolver interprets these
+    excluding: ["subject.created_by_id"],                     # maker-checker, by subtraction
                                                       # at candidate resolution — not
                                                       # a policy forbid_if
     on_complete: %{approved: "provision_access"},    # your invoker runs it after
@@ -169,6 +189,29 @@ Then:
 `mix igniter.install ash_bpmn` does the formatter wiring; see the topics below for
 the rest, step by step.
 
+## Running the demo
+
+`dev/` is a small Phoenix application that instantiates the six resources,
+implements the two callback modules against a hard-coded org chart, and mounts
+the designer, viewer and task list. It is the fastest way to see the whole thing
+working, and it is where the screenshots above come from.
+
+```bash
+mix deps.get
+mix dev.assets   # npm install + esbuild/tailwind into dev/priv/static
+mix dev.setup    # create the database, migrate, seed a published process
+mix dev.server   # http://localhost:4008
+```
+
+The seeds leave three instances behind — one waiting on a manager, one forked
+into two parallel reviews, one already completed — so every view has something
+real in it. `mix dev.reset` starts over. To regenerate the documentation
+screenshots against a running server:
+
+```bash
+node dev/screenshots/capture.mjs
+```
+
 ## Documentation
 
 - [How it works](documentation/topics/how-it-works.md) — one artifact, one-way
@@ -185,17 +228,23 @@ the rest, step by step.
 ## Status
 
 0.1.0. The approval layer and the engine are exercised by the test suite against
-real Postgres; the designer is exercised through its LiveView contracts. The
-reference integration lives in `ash_enterprise` (privileged access request
-approval). Expect the assignment resolver interface to move — it is the part most
-likely to be redesigned after first contact with a real org chart, and it is
-versioned accordingly.
+real Postgres; the designer is exercised through its LiveView contracts and, in
+a browser, through the `dev/` app. The reference integration lives in
+`ash_enterprise` (privileged access request approval).
+
+The assignment resolver is the interface most likely to move on contact with a
+real org chart. Both callers now hand it one normalized spec shape — see
+[assignment and maker-checker](documentation/topics/assignment-and-maker-checker.md#one-resolver-both-layers)
+— so a host writes a single implementation; what may still change is the
+vocabulary of clauses that shape carries.
 
 ## Contributing
 
 Issues and PRs at [github.com/lukegalea/ash_bpmn](https://github.com/lukegalea/ash_bpmn).
 `mix compile --warnings-as-errors` and the test suite must pass; CI runs both
-against Postgres 16.
+against Postgres 16. Changes to the LiveViews or the designer hook should be
+checked in the `dev/` app — the test suite exercises the LiveView contracts, but
+only a browser exercises bpmn-js — and the affected screenshots regenerated.
 
 ## License
 

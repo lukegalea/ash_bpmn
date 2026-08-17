@@ -89,6 +89,33 @@ problem.
 Human tasks never fail the instance by themselves: they wait. Expiry is the
 declared alternative to waiting forever, and it is opt-in per task.
 
+## Watching an instance run
+
+`AshBpmn.Web.ViewerLive` renders an instance against the graph it pinned, with
+its live tokens marked on the diagram:
+
+![The instance viewer showing a running instance parked on two parallel reviews](https://raw.githubusercontent.com/lukegalea/ash_bpmn/main/documentation/assets/viewer-running.png)
+
+Everything on the right is a row in Postgres, not a reconstruction: the token
+table is the branch state (`consumed` for the path already taken, `executing`
+for the two parallel reviews this instance is waiting on), the task table is the
+human work those tokens parked at, and the event list is the audit trail in
+reverse order. Nothing here is derived from an in-memory process.
+
+The same view of a finished instance is the audit trail an approver's manager
+actually gets asked for:
+
+![The viewer showing a completed instance with every token consumed](https://raw.githubusercontent.com/lukegalea/ash_bpmn/main/documentation/assets/viewer.png)
+
+Every token is `consumed`, and the event list reads end to end: started, routed
+at the gateway, task created, claimed, completed, the action invoked, instance
+completed. Because the viewer renders the *pinned* version, this is what the
+instance executed, not what the process looks like today.
+
+The nodes an instance is currently on are marked with the `ash-bpmn-highlight`
+class, styled by `priv/js/ash_bpmn.css` — which the hook imports, so you get it
+by importing the hook.
+
 ## The reconciliation sweep
 
 `AshBpmn.Runtime.SweepWorker` is a plain Oban worker you may put on a cron

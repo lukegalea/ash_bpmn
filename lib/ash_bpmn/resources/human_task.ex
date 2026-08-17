@@ -267,7 +267,10 @@ defmodule AshBpmn.Resources.HumanTask.StatusIsOpen do
 
   @impl true
   def validate(changeset, _opts, _context) do
-    if Ash.Changeset.get_attribute(changeset, :status) == :open do
+    # The *current* status is on changeset.data. `get_attribute/2` would return
+    # the value the action's own `set_attribute` is about to write, which makes
+    # a transition guard trivially self-satisfying.
+    if changeset.data.status == :open do
       :ok
     else
       {:error, field: :status, message: "task must be open to claim"}
@@ -281,7 +284,7 @@ defmodule AshBpmn.Resources.HumanTask.StatusIsClaimed do
 
   @impl true
   def validate(changeset, _opts, _context) do
-    if Ash.Changeset.get_attribute(changeset, :status) == :claimed do
+    if changeset.data.status == :claimed do
       :ok
     else
       {:error, field: :status, message: "task must be claimed"}
@@ -295,9 +298,7 @@ defmodule AshBpmn.Resources.HumanTask.StatusIsOpenOrClaimed do
 
   @impl true
   def validate(changeset, _opts, _context) do
-    status = Ash.Changeset.get_attribute(changeset, :status)
-
-    if status in [:open, :claimed] do
+    if changeset.data.status in [:open, :claimed] do
       :ok
     else
       {:error, field: :status, message: "task must be open or claimed"}

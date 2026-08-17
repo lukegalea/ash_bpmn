@@ -18,11 +18,20 @@ jobs:
     with:
       postgres: true
       postgres-version: "16"
+      # The test suite migrates and sandboxes its own database in
+      # test_helper.exs, so the shared workflow's ash_postgres setup steps are
+      # not wanted — only the Postgres service is.
       ash_postgres: false
       ecto_postgres: false
       tenants: false
       sobelow: false
       changelog-lint: false
       reuse: true
+      # This library defines no Spark DSL extension: it ships `use` macros that
+      # instantiate ordinary Ash resources. `mix spark.formatter --check` runs
+      # bare and fails ("must supply a comma separated list of extensions"),
+      # and there are no cheat sheets to generate.
+      spark-formatter: false
+      spark-cheat-sheets: false
     secrets:
       HEX_API_KEY: ${{ secrets.HEX_API_KEY }}

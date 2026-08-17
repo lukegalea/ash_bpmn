@@ -29,7 +29,7 @@ defmodule AshBpmn.Compiler do
       }
   """
 
-  alias AshBpmn.Compiler.{Xml, Graph, Verify, Errors}
+  alias AshBpmn.Compiler.{Errors, Graph, Verify, Xml}
 
   @doc """
   Compiles BPMN XML into a verified graph snapshot.

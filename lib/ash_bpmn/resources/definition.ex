@@ -218,20 +218,18 @@ defmodule AshBpmn.Resources.Definition.AssignVersion do
   end
 
   defp fetch_max_version(resource, key) do
-    try do
-      resource
-      |> Ash.Query.for_read(:read)
-      |> Ash.Query.filter(key == ^key)
-      |> Ash.Query.sort(version: :desc)
-      |> Ash.Query.limit(1)
-      |> Ash.read_one!(authorize?: false)
-      |> case do
-        nil -> 0
-        record -> record.version
-      end
-    rescue
-      _ -> 0
+    resource
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(key == ^key)
+    |> Ash.Query.sort(version: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read_one!(authorize?: false)
+    |> case do
+      nil -> 0
+      record -> record.version
     end
+  rescue
+    _ -> 0
   end
 end
 
@@ -343,9 +341,7 @@ defmodule AshBpmn.Resources.Definition.StatusIsDraft do
     if status == :draft do
       :ok
     else
-      {:error,
-       field: :status,
-       message: "can only perform this action on a draft definition"}
+      {:error, field: :status, message: "can only perform this action on a draft definition"}
     end
   end
 end

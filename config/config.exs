@@ -8,6 +8,6 @@ import Config
 # own resolver/invoker/domains. Same pattern as ash_strangler.
 config :ash_bpmn, ecto_repos: [AshBpmn.TestRepo]
 
-if config_env() == :test do
-  import_config "test.exs"
+if config_env() in [:dev, :test] do
+  import_config "#{config_env()}.exs"
 end

@@ -1,0 +1,15 @@
+{
+  "name": "ash-bpmn-screenshots",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drives a browser against the demo app to capture the screenshots used in the documentation.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "capture": "node capture.mjs",
+    "install-browser": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
+}

@@ -6,11 +6,11 @@ defmodule AshBpmn.ResourcesTest do
 
   alias AshBpmn.Test.{
     Definition,
-    Instance,
-    Token,
     HumanTask,
+    Instance,
+    ProcessEvent,
     TaskCandidate,
-    ProcessEvent
+    Token
   }
 
   # Minimal test XML — not valid BPMN, so the compiler will store errors.

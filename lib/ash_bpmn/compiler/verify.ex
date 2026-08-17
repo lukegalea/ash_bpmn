@@ -52,9 +52,15 @@ defmodule AshBpmn.Compiler.Verify do
           errors
 
         _multiple ->
-          ids = Enum.map(starts, fn {id, _} -> "'#{id}'" end) |> Enum.join(", ")
+          ids = Enum.map_join(starts, ", ", fn {id, _} -> "'#{id}'" end)
 
-          [Errors.error("process", "Process has multiple start events: #{ids}; exactly one is required") | errors]
+          [
+            Errors.error(
+              "process",
+              "Process has multiple start events: #{ids}; exactly one is required"
+            )
+            | errors
+          ]
       end
 
     errors =
@@ -106,10 +112,8 @@ defmodule AshBpmn.Compiler.Verify do
     errors =
       reachable
       |> Enum.filter(fn id ->
-        nodes[id]["type"] != "endEvent"
-      end)
-      |> Enum.filter(fn id ->
-        not can_reach_end?(id, outgoing, end_nodes, MapSet.new())
+        nodes[id]["type"] != "endEvent" and
+          not can_reach_end?(id, outgoing, end_nodes, MapSet.new())
       end)
       |> Enum.map(fn id ->
         Errors.error(id, "Node '#{id}' cannot reach any end event")
@@ -172,12 +176,15 @@ defmodule AshBpmn.Compiler.Verify do
         flows
         |> Enum.filter(fn {_fid, f} -> f["from"] == id end)
 
-      cond do
-        outgoing == [] ->
-          [Errors.error(id, "exclusiveGateway '#{id}' must have at least one outgoing sequenceFlow")]
-
-        true ->
-          verify_exclusive_branches(id, node, outgoing)
+      if outgoing == [] do
+        [
+          Errors.error(
+            id,
+            "exclusiveGateway '#{id}' must have at least one outgoing sequenceFlow"
+          )
+        ]
+      else
+        verify_exclusive_branches(id, node, outgoing)
       end
     end)
   end
@@ -225,7 +232,7 @@ defmodule AshBpmn.Compiler.Verify do
           end
         end
 
-      default_flow == nil and length(defaults) > 0 ->
+      default_flow == nil and defaults != [] ->
         [
           Errors.error(
             gw_id,

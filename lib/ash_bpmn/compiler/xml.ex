@@ -7,38 +7,35 @@ defmodule AshBpmn.Compiler.Xml do
   # XML parsing helpers using :xmerl. Handles bpmn2: prefixed names pragmatically.
   # DI section (bpmndi:) is entirely ignored.
 
-  @ash_ns "https://github.com/lukegalea/ash_bpmn/ns"
+  # The ash: namespace URI is https://github.com/lukegalea/ash_bpmn/ns, but it
+  # is never compared against: xmerl scans without :namespace_conform, so
+  # extension attributes arrive as prefixed atoms and are matched by prefix.
   @supported_node_types ~w(startEvent endEvent userTask serviceTask exclusiveGateway parallelGateway)
   @supported_node_types_with_prefix Enum.map(@supported_node_types, &"bpmn2:#{&1}")
 
   @spec parse(String.t()) :: {:ok, tuple()} | {:error, String.t()}
   def parse(xml) when is_binary(xml) do
-    try do
-      {doc, _} =
-        :xmerl_scan.string(
-          :unicode.characters_to_list(xml),
-          [
-            # NOTE: no :namespace_conform here. The default keeps prefixed
-            # names ('bpmn2:process'), which is what the matchers expect;
-            # the option also only accepts booleans and :strict crashes
-            # initial_state/2.
-            {:quiet, true}
-          ]
-        )
+    {doc, _} =
+      :xmerl_scan.string(
+        :unicode.characters_to_list(xml),
+        [
+          # NOTE: no :namespace_conform here. The default keeps prefixed
+          # names ('bpmn2:process'), which is what the matchers expect;
+          # the option also only accepts booleans and :strict crashes
+          # initial_state/2.
+          {:quiet, true}
+        ]
+      )
 
-      {:ok, doc}
-    rescue
-      e in [MatchError] ->
-        {:error, "XML parse error: #{Exception.message(e)}"}
-
-      e ->
-        {:error, "XML parse error: #{Exception.message(e)}"}
-    catch
-      # NOTE: bare `catch {:exit, r}` would match a *thrown* {:exit, r} tuple,
-      # not a real exit — malformed XML (e.g. a bare `&`) exits here.
-      :exit, reason ->
-        {:error, "XML parse error: #{inspect(reason)}"}
-    end
+    {:ok, doc}
+  rescue
+    e ->
+      {:error, "XML parse error: #{Exception.message(e)}"}
+  catch
+    # NOTE: bare `catch {:exit, r}` would match a *thrown* {:exit, r} tuple,
+    # not a real exit — malformed XML (e.g. a bare `&`) exits here.
+    :exit, reason ->
+      {:error, "XML parse error: #{inspect(reason)}"}
   end
 
   @spec extract_process(tuple()) :: {:ok, map()} | {:error, String.t()}
@@ -91,7 +88,8 @@ defmodule AshBpmn.Compiler.Xml do
   #   text:     {:xmlText, parents, pos, ?, value_charlist, type} (6-tuple)
   #              -> value at idx 4
 
-  defguard is_element?(el) when is_tuple(el) and tuple_size(el) >= 9 and elem(el, 0) == :xmlElement
+  defguard is_element?(el)
+           when is_tuple(el) and tuple_size(el) >= 9 and elem(el, 0) == :xmlElement
 
   defp raw_attributes(el) when is_element?(el), do: elem(el, 7) |> List.wrap()
   defp raw_attributes(_), do: []
@@ -112,7 +110,9 @@ defmodule AshBpmn.Compiler.Xml do
   defp xml_attr(element, name) do
     element
     |> raw_attributes()
-    |> Enum.find(fn attr -> is_tuple(attr) and tuple_size(attr) >= 2 and elem(attr, 1) == String.to_atom(name) end)
+    |> Enum.find(fn attr ->
+      is_tuple(attr) and tuple_size(attr) >= 2 and elem(attr, 1) == String.to_atom(name)
+    end)
     |> attr_value()
   end
 
@@ -185,11 +185,10 @@ defmodule AshBpmn.Compiler.Xml do
     element
     |> raw_content()
     |> Enum.filter(fn child -> is_tuple(child) and elem(child, 0) == :xmlText end)
-    |> Enum.map(fn text ->
+    |> Enum.map_join("", fn text ->
       value = elem(text, 4)
       if is_list(value), do: List.to_string(value), else: to_string(value)
     end)
-    |> Enum.join()
     |> String.trim()
     |> case do
       "" -> nil
@@ -256,23 +255,23 @@ defmodule AshBpmn.Compiler.Xml do
   def normalize_name("ash:" <> local), do: local
   def normalize_name(name), do: name
 
-  @spec is_supported_node_type?(String.t()) :: boolean()
-  def is_supported_node_type?(type), do: type in @supported_node_types
+  @spec supported_node_type?(String.t()) :: boolean()
+  def supported_node_type?(type), do: type in @supported_node_types
 
-  @spec is_flow_type?(String.t()) :: boolean()
-  def is_flow_type?("sequenceFlow"), do: true
-  def is_flow_type?(_), do: false
+  @spec flow_type?(String.t()) :: boolean()
+  def flow_type?("sequenceFlow"), do: true
+  def flow_type?(_), do: false
 
-  @spec is_di_element?(String.t()) :: boolean()
-  def is_di_element?("BPMNDiagram"), do: true
-  def is_di_element?("BPMNPlane"), do: true
-  def is_di_element?("BPMNShape"), do: true
-  def is_di_element?("BPMNEdge"), do: true
-  def is_di_element?("bpmndi:BPMNDiagram"), do: true
-  def is_di_element?("bpmndi:BPMNPlane"), do: true
-  def is_di_element?("bpmndi:BPMNShape"), do: true
-  def is_di_element?("bpmndi:BPMNEdge"), do: true
-  def is_di_element?("dc:Bounds"), do: true
-  def is_di_element?("di:waypoint"), do: true
-  def is_di_element?(_), do: false
+  @spec di_element?(String.t()) :: boolean()
+  def di_element?("BPMNDiagram"), do: true
+  def di_element?("BPMNPlane"), do: true
+  def di_element?("BPMNShape"), do: true
+  def di_element?("BPMNEdge"), do: true
+  def di_element?("bpmndi:BPMNDiagram"), do: true
+  def di_element?("bpmndi:BPMNPlane"), do: true
+  def di_element?("bpmndi:BPMNShape"), do: true
+  def di_element?("bpmndi:BPMNEdge"), do: true
+  def di_element?("dc:Bounds"), do: true
+  def di_element?("di:waypoint"), do: true
+  def di_element?(_), do: false
 end
