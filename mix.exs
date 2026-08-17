@@ -90,12 +90,19 @@ defmodule AshBpmn.MixProject do
 
   defp docs do
     [
-      # Screenshots live in documentation/assets. The README sits at the root of
-      # both the repository and the generated docs, so its relative links work
-      # in both; the topic pages do not (ex_doc flattens them into the doc root
-      # while GitHub keeps them nested), so those link the images by absolute
-      # URL instead.
+      # Screenshots live in documentation/assets and are linked relatively:
+      # `documentation/assets/x.png` from the README, `../assets/x.png` from a
+      # topic page. Those are the paths GitHub needs, and on a private
+      # repository they are the *only* ones that work — GitHub fetches absolute
+      # image URLs through an unauthenticated proxy, so a raw.githubusercontent
+      # link renders as a broken image for everyone, owner included.
+      #
+      # ex_doc flattens the topic pages into the doc root, where `../assets/`
+      # points outside the output, so the shim below rewrites those two prefixes
+      # to the copied location at render time. Assets are copied, not linked, so
+      # the paths it rewrites to are guaranteed to exist.
       assets: %{"documentation/assets" => "documentation/assets"},
+      before_closing_body_tag: &before_closing_body_tag/1,
       # The demo app under dev/ is compiled in :dev, which is the env ex_doc
       # runs in — without this filter its modules land in the published API
       # reference alongside the library's.
@@ -124,6 +131,26 @@ defmodule AshBpmn.MixProject do
       ]
     ]
   end
+
+  # Points the topic pages' `../assets/...` image links at the copy ex_doc made
+  # under documentation/assets. See the comment on `:assets` above for why the
+  # markdown cannot simply spell the path ex_doc wants.
+  defp before_closing_body_tag(:html) do
+    """
+    <script>
+      document.addEventListener("DOMContentLoaded", function () {
+        document.querySelectorAll('img[src^="../assets/"]').forEach(function (img) {
+          img.setAttribute(
+            "src",
+            img.getAttribute("src").replace("../assets/", "documentation/assets/")
+          );
+        });
+      });
+    </script>
+    """
+  end
+
+  defp before_closing_body_tag(_format), do: ""
 
   defp aliases do
     [
