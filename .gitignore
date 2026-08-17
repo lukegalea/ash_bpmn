@@ -8,10 +8,16 @@
 /.fetch
 erl_crash.dump
 *.beam
-/mix.lock.license
-# Generated at test time from the resource snapshots, like ash_events.
-/priv/test_repo/
+# The test migration is hand-maintained and tracked: nothing generates it at
+# test time, and test_helper.exs skips migrating when the directory is absent —
+# so ignoring it left a fresh clone with an empty database and no way to notice.
 /.elixir_ls/
+
+# Demo app build output and dependencies (dev/ is excluded from the package).
+/dev/priv/static/assets/
+/dev/assets/node_modules/
+/dev/screenshots/node_modules/
+/dev/screenshots/package-lock.json
 /.devenv*
 .devenv.flake.nix
 .devenv.json

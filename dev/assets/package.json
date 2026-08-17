@@ -1,0 +1,20 @@
+{
+  "name": "ash-bpmn-dev-assets",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Asset bundle for the ash_bpmn demo app. Mirrors what a host application does: it owns the bpmn-js dependency, and the library ships only the plain-ESM hook.",
+  "license": "MIT",
+  "scripts": {
+    "build": "npm run build:js && npm run build:css",
+    "build:js": "NODE_PATH=../../deps:./node_modules esbuild js/app.js --bundle --format=esm --target=es2020 --outfile=../priv/static/assets/app.js --loader:.woff=dataurl --loader:.woff2=dataurl --loader:.ttf=dataurl --loader:.svg=dataurl --loader:.eot=dataurl --loader:.png=dataurl",
+    "build:css": "tailwindcss -i css/app.css -o ../priv/static/assets/tailwind.css --minify",
+    "watch": "npm run build:js -- --watch"
+  },
+  "dependencies": {
+    "bpmn-js": "^18.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "tailwindcss": "^3.4.0"
+  }
+}

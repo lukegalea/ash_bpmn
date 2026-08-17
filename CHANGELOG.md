@@ -25,3 +25,6 @@ Nothing has been released yet. Everything below is the initial body of work.
   materialized candidates and maker-checker exclusion, cancellable timers.
 - An embedded bpmn-js designer (LiveView hook + server-rendered config panel)
   and read-only instance viewer.
+- A runnable demo application under `dev/` — a real Phoenix server mounting the
+  designer, viewer and task list against Postgres — plus the screenshot script
+  that produces the images in the documentation.

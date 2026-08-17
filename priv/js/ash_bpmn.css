@@ -1,0 +1,32 @@
+/*
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+Styles the markers the ash_bpmn hooks apply to diagram elements. The hook
+imports this file, so a host that imports the hook gets it automatically.
+
+`.ash-bpmn-highlight` marks the nodes an instance currently has live tokens on.
+diagram-js applies the marker class to the element's <g>, so the rules target
+its shape children.
+*/
+
+.ash-bpmn-highlight .djs-visual > :nth-child(1) {
+  stroke: #4f46e5 !important;
+  stroke-width: 3px !important;
+  fill: #eef2ff !important;
+}
+
+.ash-bpmn-highlight .djs-visual > text {
+  fill: #312e81 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .ash-bpmn-highlight .djs-visual > :nth-child(1) {
+    stroke: #a5b4fc !important;
+    fill: #312e81 !important;
+  }
+
+  .ash-bpmn-highlight .djs-visual > text {
+    fill: #e0e7ff !important;
+  }
+}

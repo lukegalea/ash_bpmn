@@ -153,7 +153,10 @@ defmodule AshBpmn.Resources.Token.StatusIsActive do
 
   @impl true
   def validate(changeset, _opts, _context) do
-    if Ash.Changeset.get_attribute(changeset, :status) == :active do
+    # The *current* status is on changeset.data. `get_attribute/2` would return
+    # the value the action's own `set_attribute` is about to write, which makes
+    # a transition guard trivially self-satisfying.
+    if changeset.data.status == :active do
       :ok
     else
       {:error, field: :status, message: "token must be active to claim"}
@@ -167,7 +170,7 @@ defmodule AshBpmn.Resources.Token.StatusIsExecuting do
 
   @impl true
   def validate(changeset, _opts, _context) do
-    if Ash.Changeset.get_attribute(changeset, :status) == :executing do
+    if changeset.data.status == :executing do
       :ok
     else
       {:error, field: :status, message: "token must be executing to consume"}
@@ -181,9 +184,7 @@ defmodule AshBpmn.Resources.Token.StatusIsDeadOrExecuting do
 
   @impl true
   def validate(changeset, _opts, _context) do
-    status = Ash.Changeset.get_attribute(changeset, :status)
-
-    if status in [:dead, :executing] do
+    if changeset.data.status in [:dead, :executing] do
       :ok
     else
       {:error, field: :status, message: "token must be dead or executing to reactivate"}
@@ -231,13 +232,15 @@ defmodule AshBpmn.Resources.Token.EnsureActiveInDb do
           else
             Ash.Changeset.add_error(changeset,
               field: :status,
-              message: "token is no longer active (concurrent modification)")
+              message: "token is no longer active (concurrent modification)"
+            )
           end
         rescue
           _ ->
             Ash.Changeset.add_error(changeset,
               field: :status,
-              message: "could not verify token status")
+              message: "could not verify token status"
+            )
         end
       end
     end)

@@ -25,7 +25,7 @@ the diagram and the bindings live in one document, and bpmn-js edits both.
 
 ## One compilation
 
-Publishing a definition runs `AshBpmn.compile/1`:
+Publishing a definition runs `AshBpmn.Compiler.compile/1`:
 
 ```
 BPMN XML ──parse──> elements ──verify──> errors (fix in the designer)

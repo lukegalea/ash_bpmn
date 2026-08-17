@@ -34,6 +34,15 @@ creation pays for the inversion once per task instead of once per render.
 people can claim this" is a query — not an estimate a support engineer gives
 with hedging words.
 
+`AshBpmn.Web.TaskListLive` is that query rendered:
+
+![The task list showing one open task and one claimed task with its decision form](https://raw.githubusercontent.com/lukegalea/ash_bpmn/main/documentation/assets/task-list.png)
+
+Open tasks the actor is a candidate for offer Claim; claimed ones offer the
+decision — an outcome, a comment, or a delegation. Both sections come from the
+same join against `TaskCandidate`, which is why the list costs one query no
+matter how large the org chart behind the candidate clauses is.
+
 ## Maker-checker without a deny rule
 
 Segregation of duties — the person who raised the request may not approve it —
@@ -51,11 +60,35 @@ The same principle runs through both layers: `excluding:` on
 `RequireApproval`, `<ash:exclusion who="..."/>` on a user task. The subtraction
 happens exactly once, at resolution, in the one place subtraction is allowed.
 
+## One resolver, both layers
+
+A resolver receives the same normalized, string-keyed maps whichever layer asked:
+
+```elixir
+# from <ash:candidate kind="manager_of" of="subject.created_by_id"/>
+# and from candidates: [{:manager_of, "subject.created_by_id"}]
+%{"kind" => "manager_of", "of" => "subject.created_by_id"}
+
+# from <ash:exclusion who="subject.created_by_id"/>
+# and from excluding: ["subject.created_by_id"]
+%{"who" => "subject.created_by_id"}
+```
+
+`AshBpmn.Changes.RequireApproval` runs its options through
+`AshBpmn.AssignmentResolver.normalize_candidate_spec/1` and
+`normalize_exclusion_spec/1` first, so the diagram layer and the approval layer
+cannot drift into two different shapes that a host has to handle separately.
+
+Normalization converts shape only. The values are passed through verbatim,
+because `of` is not always a subject path — `kind="team" of="security"` is a
+perfectly good clause — and a library that rewrote those strings would be
+deciding what a clause means. Write the same spelling in the diagram and in the
+change options, and one resolver clause serves both.
+
 ## Resolution and re-checking
 
-Your resolver interprets the opaque specs from the diagram — `kind="manager_of"
-of="subject.created_by_id"` is a string the library passes through — against a
-live org chart. The rows it produces are an **index**, not the authority:
+Your resolver interprets those opaque specs against a live org chart. The rows
+it produces are an **index**, not the authority:
 
 - **Claim re-checks candidacy.** Claiming a task requires the actor's principal
   to appear in the task's candidate rows. The rows are what makes that check one

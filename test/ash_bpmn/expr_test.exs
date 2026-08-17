@@ -64,7 +64,7 @@ defmodule AshBpmn.ExprTest do
 
   test "parses in-list with multiple items" do
     assert {:ok, %{"in" => ["subject.status", ["pending", "active"]]}} =
-             Expr.parse("subject.status in [\"pending\", \"active\"]")
+             Expr.parse(~s(subject.status in ["pending", "active"]))
   end
 
   test "parses in-list with numeric items" do

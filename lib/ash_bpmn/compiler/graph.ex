@@ -4,10 +4,10 @@
 defmodule AshBpmn.Compiler.Graph do
   @moduledoc false
 
-  alias AshBpmn.Compiler.Xml
   alias AshBpmn.Compiler.Errors
+  alias AshBpmn.Compiler.Xml
 
-  @spec build(tuple()) :: {:ok, map()} | {:error, [map()]}
+  @spec build(map()) :: {:ok, map()} | {:error, [map()]}
   def build(process) do
     errors = []
     process_id = process.id || ""
@@ -63,7 +63,7 @@ defmodule AshBpmn.Compiler.Graph do
   defp filter_supported_nodes(nodes_xml) do
     {supported, unsupported} =
       Enum.split_with(nodes_xml, fn node ->
-        Xml.is_supported_node_type?(Xml.node_type(node))
+        Xml.supported_node_type?(Xml.node_type(node))
       end)
 
     unsupported_errors =
@@ -102,7 +102,7 @@ defmodule AshBpmn.Compiler.Graph do
       id = Xml.element_attr(child, "id") || "unknown"
 
       cond do
-        Xml.is_di_element?(normalized) ->
+        Xml.di_element?(normalized) ->
           []
 
         normalized in supported_local_names ->
@@ -155,20 +155,18 @@ defmodule AshBpmn.Compiler.Graph do
     type = Xml.node_type(node)
     name = Xml.element_attr(node, "name")
 
-    cond do
-      id == nil ->
-        {:error, Errors.error("unknown", "Node has no id attribute")}
+    if id == nil do
+      {:error, Errors.error("unknown", "Node has no id attribute")}
+    else
+      base = %{"type" => type, "name" => name}
 
-      true ->
-        base = %{"type" => type, "name" => name}
+      case build_node_config(node, type) do
+        {:ok, config} ->
+          {:ok, {id, Map.merge(base, config)}}
 
-        case build_node_config(node, type) do
-          {:ok, config} ->
-            {:ok, {id, Map.merge(base, config)}}
-
-          {:error, error} ->
-            {:error, error}
-        end
+        {:error, error} ->
+          {:error, error}
+      end
     end
   end
 
@@ -188,34 +186,38 @@ defmodule AshBpmn.Compiler.Graph do
       [config | _] ->
         action = Xml.element_attr(config, "action")
 
-        cond do
-          action == nil or String.trim(action) == "" ->
+        if action == nil or String.trim(action) == "" do
+          {:error,
+           Errors.error(
+             Xml.element_attr(node, "id"),
+             "serviceTask '#{Xml.element_attr(node, "id")}' ash:taskConfig must have a non-empty action attribute"
+           )}
+        else
+          # Check for unknown ash attributes on taskConfig
+          known_attrs = MapSet.new(["action"])
+
+          unknown_ash =
+            Enum.filter(Xml.find_ash_attributes(config), fn {k, _} -> k not in known_attrs end)
+
+          if unknown_ash != [] do
+            {k, _} = hd(unknown_ash)
+
             {:error,
              Errors.error(
                Xml.element_attr(node, "id"),
-               "serviceTask '#{Xml.element_attr(node, "id")}' ash:taskConfig must have a non-empty action attribute"
+               "Unknown ash: attribute '#{k}' on ash:taskConfig for serviceTask '#{Xml.element_attr(node, "id")}'"
              )}
-
-          true ->
-            # Check for unknown ash attributes on taskConfig
-            known_attrs = MapSet.new(["action"])
-            ash_attrs = Xml.find_ash_attributes(config)
-            unknown_ash = ash_attrs |> Enum.filter(fn {k, _} -> k not in known_attrs end)
-
-            if unknown_ash != [] do
-              {k, _} = hd(unknown_ash)
-
-              {:error,
-               Errors.error(
-                 Xml.element_attr(node, "id"),
-                 "Unknown ash: attribute '#{k}' on ash:taskConfig for serviceTask '#{Xml.element_attr(node, "id")}'"
-               )}
-            else
-              # Check for unknown ash child elements
-              check_unknown_ash_children(config, node, ["candidates", "exclusions", "outcomes", "timers"], %{
+          else
+            # Check for unknown ash child elements
+            check_unknown_ash_children(
+              config,
+              node,
+              ["candidates", "exclusions", "outcomes", "timers"],
+              %{
                 "action" => action
-              })
-            end
+              }
+            )
+          end
         end
     end
   end
@@ -423,8 +425,7 @@ defmodule AshBpmn.Compiler.Graph do
     if unknown do
       name = Xml.local_name(unknown)
 
-      {:error,
-       Errors.error(id, "Unknown ash: element '#{name}' in ash:taskConfig for '#{id}'")}
+      {:error, Errors.error(id, "Unknown ash: element '#{name}' in ash:taskConfig for '#{id}'")}
     else
       {:ok, extra}
     end
@@ -469,10 +470,18 @@ defmodule AshBpmn.Compiler.Graph do
         {:error, Errors.error(id, "sequenceFlow '#{id}' has no targetRef")}
 
       not Map.has_key?(nodes, source_ref) ->
-        {:error, Errors.error(id, "sequenceFlow '#{id}' references non-existent source node '#{source_ref}'")}
+        {:error,
+         Errors.error(
+           id,
+           "sequenceFlow '#{id}' references non-existent source node '#{source_ref}'"
+         )}
 
       not Map.has_key?(nodes, target_ref) ->
-        {:error, Errors.error(id, "sequenceFlow '#{id}' references non-existent target node '#{target_ref}'")}
+        {:error,
+         Errors.error(
+           id,
+           "sequenceFlow '#{id}' references non-existent target node '#{target_ref}'"
+         )}
 
       true ->
         # Parse condition expression
@@ -481,12 +490,17 @@ defmodule AshBpmn.Compiler.Graph do
           |> Xml.find_children("conditionExpression")
           |> List.first()
           |> case do
-            nil -> nil
+            nil ->
+              nil
+
             expr_el ->
               body = Xml.element_text(expr_el)
+
               if body != nil and String.trim(body) != "" do
                 case AshBpmn.Expr.parse(String.trim(body)) do
-                  {:ok, ast} -> ast
+                  {:ok, ast} ->
+                    ast
+
                   {:error, msg} ->
                     # Return error instead
                     throw({:flow_parse_error, id, msg})
@@ -517,15 +531,9 @@ defmodule AshBpmn.Compiler.Graph do
 
   defp build_joins(nodes, flows) do
     nodes
-    |> Enum.filter(fn {_id, node} ->
-      node["type"] == "parallelGateway"
-    end)
-    |> Enum.filter(fn {id, _node} ->
-      incoming_count =
-        flows
-        |> Enum.count(fn {_fid, f} -> f["to"] == id end)
-
-      incoming_count > 1
+    |> Enum.filter(fn {id, node} ->
+      node["type"] == "parallelGateway" and
+        Enum.count(flows, fn {_fid, f} -> f["to"] == id end) > 1
     end)
     |> Enum.map(fn {id, _node} ->
       waits_for =

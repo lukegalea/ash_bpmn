@@ -154,7 +154,8 @@ defmodule AshBpmn.Expr do
   end
 
   # Identifiers and keywords
-  defp do_tokenize(<<c::utf8, _rest::binary>> = input, pos, acc) when c in ?a..?z or c in ?A..?Z or c == ?_ do
+  defp do_tokenize(<<c::utf8, _rest::binary>> = input, pos, acc)
+       when c in ?a..?z or c in ?A..?Z or c == ?_ do
     case read_ident(input, pos) do
       {ident, new_pos, remaining} ->
         token =
@@ -392,8 +393,7 @@ defmodule AshBpmn.Expr do
                     {:ok, %{"in" => [path, literals]}, pos + 1}
 
                   token ->
-                    {:error,
-                     "expected ']' at position #{pos}, got: #{inspect(token)}"}
+                    {:error, "expected ']' at position #{pos}, got: #{inspect(token)}"}
                 end
 
               {:error, msg} ->
@@ -532,17 +532,15 @@ defmodule AshBpmn.Expr do
 
   defp do_resolve([part | rest], ctx) when is_map(ctx) do
     val =
-      cond do
-        is_struct(ctx) ->
-          # Structs use Map.get on field atoms
-          Map.get(ctx, String.to_atom(part))
-
-        true ->
-          # Regular maps: try atom key then string key
-          case Map.get(ctx, part) do
-            nil -> Map.get(ctx, String.to_atom(part))
-            val -> val
-          end
+      if is_struct(ctx) do
+        # Structs use Map.get on field atoms
+        Map.get(ctx, String.to_atom(part))
+      else
+        # Regular maps: try atom key then string key
+        case Map.get(ctx, part) do
+          nil -> Map.get(ctx, String.to_atom(part))
+          val -> val
+        end
       end
 
     case val do

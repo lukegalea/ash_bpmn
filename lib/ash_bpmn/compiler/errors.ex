@@ -11,8 +11,6 @@ defmodule AshBpmn.Compiler.Errors do
 
   @spec format_errors([map()]) :: String.t()
   def format_errors(errors) do
-    errors
-    |> Enum.map(fn %{path: path, message: msg} -> "  [#{path}] #{msg}" end)
-    |> Enum.join("\n")
+    Enum.map_join(errors, "\n", fn %{path: path, message: msg} -> "  [#{path}] #{msg}" end)
   end
 end

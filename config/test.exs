@@ -23,7 +23,17 @@ config :ash_bpmn,
   queue: :bpmn,
   max_attempts: 5
 
-config :ash_bpmn, ash_domains: [AshBpmn.Test.Domain]
+config :ash_bpmn, ash_domains: [AshBpmn.Test.Domain, AshBpmn.ApprovalTestSupport.Domain]
+
+# The web test endpoint (test/support/web_endpoint.ex). Config lives here —
+# not in a compile-time Application.put_env in the module body — because that
+# trick only executes on fresh compilation, never from cached beams.
+config :ash_bpmn, AshBpmn.Web.TestEndpoint,
+  server: false,
+  pubsub_server: AshBpmn.Web.TestPubSub,
+  secret_key_base: String.duplicate("a", 64),
+  live_view: [signing_salt: String.duplicate("b", 32)],
+  render_errors: [formats: [html: {AshBpmn.ErrorView, :render, []}], layout: false]
 
 config :ash, :validate_domain_resource_inclusion?, false
 config :ash, :validate_domain_config_inclusion?, false

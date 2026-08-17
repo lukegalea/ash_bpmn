@@ -6,6 +6,7 @@
 # Policies are added after `use` because Elixir `use` does not support `do` blocks.
 
 defmodule AshBpmn.Test.Definition do
+  @moduledoc false
   use AshBpmn.Resources.Definition,
     domain: AshBpmn.Test.Domain,
     repo: AshBpmn.TestRepo
@@ -18,6 +19,7 @@ defmodule AshBpmn.Test.Definition do
 end
 
 defmodule AshBpmn.Test.Instance do
+  @moduledoc false
   use AshBpmn.Resources.Instance,
     domain: AshBpmn.Test.Domain,
     repo: AshBpmn.TestRepo,
@@ -31,6 +33,7 @@ defmodule AshBpmn.Test.Instance do
 end
 
 defmodule AshBpmn.Test.Token do
+  @moduledoc false
   use AshBpmn.Resources.Token,
     domain: AshBpmn.Test.Domain,
     repo: AshBpmn.TestRepo,
@@ -44,6 +47,7 @@ defmodule AshBpmn.Test.Token do
 end
 
 defmodule AshBpmn.Test.HumanTask do
+  @moduledoc false
   use AshBpmn.Resources.HumanTask,
     domain: AshBpmn.Test.Domain,
     repo: AshBpmn.TestRepo,
@@ -58,6 +62,7 @@ defmodule AshBpmn.Test.HumanTask do
 end
 
 defmodule AshBpmn.Test.TaskCandidate do
+  @moduledoc false
   use AshBpmn.Resources.TaskCandidate,
     domain: AshBpmn.Test.Domain,
     repo: AshBpmn.TestRepo,
@@ -71,6 +76,7 @@ defmodule AshBpmn.Test.TaskCandidate do
 end
 
 defmodule AshBpmn.Test.ProcessEvent do
+  @moduledoc false
   use AshBpmn.Resources.ProcessEvent,
     domain: AshBpmn.Test.Domain,
     repo: AshBpmn.TestRepo,
@@ -86,6 +92,7 @@ end
 # A simple subject resource for engine / approval tests.
 # No authorizer — open access in test contexts.
 defmodule AshBpmn.Test.Subject do
+  @moduledoc false
   use Ash.Resource,
     domain: AshBpmn.Test.Domain,
     data_layer: AshPostgres.DataLayer

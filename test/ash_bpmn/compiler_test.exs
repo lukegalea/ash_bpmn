@@ -19,7 +19,7 @@ defmodule AshBpmn.CompilerTest do
   describe "linear.bpmn" do
     test "compiles successfully" do
       xml = read_fixture("linear.bpmn")
-      assert {:ok, graph} = Compiler.compile(xml)
+      assert {:ok, _graph} = Compiler.compile(xml)
     end
 
     test "has correct process_id" do
@@ -81,7 +81,7 @@ defmodule AshBpmn.CompilerTest do
   describe "exclusive.bpmn" do
     test "compiles successfully" do
       xml = read_fixture("exclusive.bpmn")
-      assert {:ok, graph} = Compiler.compile(xml)
+      assert {:ok, _graph} = Compiler.compile(xml)
     end
 
     test "has correct node count" do
@@ -116,7 +116,7 @@ defmodule AshBpmn.CompilerTest do
   describe "parallel.bpmn" do
     test "compiles successfully" do
       xml = read_fixture("parallel.bpmn")
-      assert {:ok, graph} = Compiler.compile(xml)
+      assert {:ok, _graph} = Compiler.compile(xml)
     end
 
     test "has correct node count" do
@@ -151,7 +151,7 @@ defmodule AshBpmn.CompilerTest do
   describe "access_request.bpmn" do
     test "compiles successfully" do
       xml = read_fixture("access_request.bpmn")
-      assert {:ok, graph} = Compiler.compile(xml)
+      assert {:ok, _graph} = Compiler.compile(xml)
     end
 
     test "has correct process_id" do
@@ -209,7 +209,7 @@ defmodule AshBpmn.CompilerTest do
       manager_timers = graph["nodes"]["ManagerApproval"]["timers"]
       assert %{"kind" => "remind", "minutes" => 1440} in manager_timers
       assert %{"kind" => "escalate", "minutes" => 2880} in manager_timers
-      assert %{"kind" => "expire", "minutes" => 10080} in manager_timers
+      assert %{"kind" => "expire", "minutes" => 10_080} in manager_timers
     end
 
     test "exclusive gateways have correct defaults" do
@@ -281,7 +281,11 @@ defmodule AshBpmn.CompilerTest do
       </bpmn2:definitions>)
 
       assert {:error, errors} = Compiler.compile(xml)
-      assert Enum.any?(errors, fn e -> String.contains?(e.message, "'Bad'") and String.contains?(e.message, "not supported") end)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "'Bad'") and
+                 String.contains?(e.message, "not supported")
+             end)
     end
   end
 
@@ -339,7 +343,10 @@ defmodule AshBpmn.CompilerTest do
       </bpmn2:definitions>)
 
       assert {:error, errors} = Compiler.compile(xml)
-      assert Enum.any?(errors, fn e -> String.contains?(e.message, "outgoing flows without conditions") end)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "outgoing flows without conditions")
+             end)
     end
   end
 
@@ -382,7 +389,11 @@ defmodule AshBpmn.CompilerTest do
       </bpmn2:definitions>)
 
       assert {:error, errors} = Compiler.compile(xml)
-      assert Enum.any?(errors, fn e -> String.contains?(e.message, "both a fork") and String.contains?(e.message, "and a join") end)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "both a fork") and
+                 String.contains?(e.message, "and a join")
+             end)
     end
   end
 
@@ -408,7 +419,10 @@ defmodule AshBpmn.CompilerTest do
       </bpmn2:definitions>)
 
       assert {:error, errors} = Compiler.compile(xml)
-      assert Enum.any?(errors, fn e -> String.contains?(e.message, "conditionExpression parse error") end)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "conditionExpression parse error")
+             end)
     end
   end
 
@@ -429,7 +443,10 @@ defmodule AshBpmn.CompilerTest do
       </bpmn2:definitions>)
 
       assert {:error, errors} = Compiler.compile(xml)
-      assert Enum.any?(errors, fn e -> String.contains?(e.message, "must have an ash:taskConfig") end)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "must have an ash:taskConfig")
+             end)
     end
   end
 
@@ -492,7 +509,10 @@ defmodule AshBpmn.CompilerTest do
       </bpmn2:definitions>)
 
       assert {:error, errors} = Compiler.compile(xml)
-      assert Enum.any?(errors, fn e -> String.contains?(e.message, "isExecutable must be true") end)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "isExecutable must be true")
+             end)
     end
   end
 
@@ -528,7 +548,10 @@ defmodule AshBpmn.CompilerTest do
       </bpmn2:definitions>)
 
       assert {:error, errors} = Compiler.compile(xml)
-      assert Enum.any?(errors, fn e -> String.contains?(e.message, "not reachable from the start") end)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "not reachable from the start")
+             end)
     end
   end
 
@@ -555,7 +578,10 @@ defmodule AshBpmn.CompilerTest do
       </bpmn2:definitions>)
 
       assert {:error, errors} = Compiler.compile(xml)
-      assert Enum.any?(errors, fn e -> String.contains?(e.message, "cannot reach any end event") end)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "cannot reach any end event")
+             end)
     end
   end
 

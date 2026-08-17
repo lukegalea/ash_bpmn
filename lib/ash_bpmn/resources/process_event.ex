@@ -53,8 +53,8 @@ defmodule AshBpmn.Resources.ProcessEvent do
       attributes do
         uuid_primary_key :id
 
+        # Nullable: standalone approvals (RequireApproval) have no instance.
         attribute :instance_id, :uuid do
-          allow_nil? false
           public? true
         end
 
@@ -66,28 +66,36 @@ defmodule AshBpmn.Resources.ProcessEvent do
           public? true
         end
 
+        # Standalone approvals have no instance or node, so the task is the only
+        # thing their events can be correlated by.
+        attribute :task_id, :uuid do
+          public? true
+        end
+
         attribute :kind, :atom do
           allow_nil? false
+
           constraints one_of: [
-            :instance_started,
-            :node_entered,
-            :node_completed,
-            :gateway_branch_taken,
-            :task_created,
-            :task_claimed,
-            :task_delegated,
-            :task_completed,
-            :task_cancelled,
-            :task_expired,
-            :timer_fired,
-            :timer_cancelled,
-            :action_invoked,
-            :action_failed,
-            :instance_completed,
-            :instance_failed,
-            :instance_cancelled,
-            :sweep_recovered
-          ]
+                        :instance_started,
+                        :node_entered,
+                        :node_completed,
+                        :gateway_branch_taken,
+                        :task_created,
+                        :task_claimed,
+                        :task_delegated,
+                        :task_completed,
+                        :task_cancelled,
+                        :task_expired,
+                        :timer_fired,
+                        :timer_cancelled,
+                        :action_invoked,
+                        :action_failed,
+                        :instance_completed,
+                        :instance_failed,
+                        :instance_cancelled,
+                        :sweep_recovered
+                      ]
+
           public? true
         end
 
@@ -115,7 +123,8 @@ defmodule AshBpmn.Resources.ProcessEvent do
 
       relationships do
         belongs_to :instance, unquote(instance) do
-          allow_nil? false
+          # Nullable: standalone approvals have no instance to correlate.
+          allow_nil? true
           public? true
           destination_attribute :id
         end
@@ -127,7 +136,7 @@ defmodule AshBpmn.Resources.ProcessEvent do
         end
 
         create :create do
-          accept [:instance_id, :token_id, :node_id, :kind, :data]
+          accept [:instance_id, :token_id, :node_id, :task_id, :kind, :data]
         end
       end
 

@@ -16,6 +16,10 @@ import 'bpmn-js/dist/assets/diagram-js.css';
 import 'bpmn-js/dist/assets/bpmn-js.css';
 import 'bpmn-js/dist/assets/bpmn-font/css/bpmn-embedded.css';
 
+// The marker styles the viewer's highlight relies on. Without this the marker
+// class lands on the element and paints nothing.
+import './ash_bpmn.css';
+
 // ---------------------------------------------------------------------------
 // Moddle descriptor — ash: extension namespace
 // URI:  https://github.com/lukegalea/ash_bpmn/ns
@@ -32,12 +36,19 @@ import 'bpmn-js/dist/assets/bpmn-font/css/bpmn-embedded.css';
 //   Outcome      attrs: name
 //   Timers       child: timer
 //   Timer        attrs: kind, minutes?, hours?, days?
+//
+// The package declares `xml: { tagAlias: 'lowerCase' }`, the same way
+// camunda-bpmn-moddle does. Without it moddle looks for <ash:TaskConfig> and
+// reports "unparsable content / unknown type" for the <ash:taskConfig> the
+// compiler actually reads — so the modeller drops every binding on import and
+// saves the diagram back with its ash: configuration silently erased.
 // ---------------------------------------------------------------------------
 
 export const ashBpmnModdle = {
   name: 'ash',
   uri: 'https://github.com/lukegalea/ash_bpmn/ns',
   prefix: 'ash',
+  xml: { tagAlias: 'lowerCase' },
   types: [
     {
       name: 'TaskConfig',
@@ -122,6 +133,53 @@ function pushError(hook, err) {
   hook.pushEvent('import_error', {
     message: String(err?.message || err)
   });
+}
+
+/**
+ * Read an element's existing ash:TaskConfig back into a plain object, in the
+ * same shape buildTaskConfig consumes.
+ *
+ * The server only ever sees the last *saved* XML, so without this the
+ * properties panel would render blank fields for an already-configured node —
+ * and Apply, which rewrites extensionElements from scratch, would erase the
+ * configuration the user was looking at.
+ */
+function readTaskConfig(element) {
+  const bo = element && element.businessObject;
+  const ext = bo && bo.get && bo.get('extensionElements');
+  const values = ext ? ext.get('values') || [] : [];
+  const cfg = values.filter(function (v) {
+    return v.$type === 'ash:TaskConfig';
+  })[0];
+
+  if (!cfg) return {};
+
+  const list = function (holder, prop) {
+    if (!holder) return [];
+    return holder.get(prop) || [];
+  };
+
+  return {
+    action: cfg.action || '',
+    outcome: cfg.outcome || '',
+    candidates: list(cfg.candidates, 'candidate').map(function (c) {
+      return { kind: c.kind || '', of: c.of || '' };
+    }),
+    exclusions: list(cfg.exclusions, 'exclusion').map(function (e) {
+      return { who: e.who || '' };
+    }),
+    outcomes: list(cfg.outcomes, 'outcome').map(function (o) {
+      return o.name || '';
+    }),
+    timers: list(cfg.timers, 'timer').map(function (t) {
+      return {
+        kind: t.kind || '',
+        minutes: t.minutes != null ? t.minutes : null,
+        hours: t.hours != null ? t.hours : null,
+        days: t.days != null ? t.days : null
+      };
+    })
+  };
 }
 
 /**
@@ -272,7 +330,8 @@ export const AshBpmnDesigner = {
         sel = {
           id: el.id,
           type: el.businessObject.$type,
-          name: el.businessObject.name || ''
+          name: el.businessObject.name || '',
+          config: readTaskConfig(el)
         };
       }
 
@@ -413,6 +472,12 @@ export const AshBpmnViewer = {
     var canvas = this._viewer.get('canvas');
     this._highlightedIds = new Set();
 
+    // The server pushes `highlight` from its first render, which can land
+    // before importXML resolves — and markers cannot be applied to elements
+    // that do not exist yet. Hold the last payload and replay it on import.
+    this._imported = false;
+    this._pendingHighlight = null;
+
     // Initial import from data-xml attribute
     var xml = this.el.dataset.xml || '';
     if (xml) {
@@ -420,7 +485,14 @@ export const AshBpmnViewer = {
         .importXML(xml)
         .then(function () {
           canvas.zoom('fit-viewport', 'auto');
-        })
+          this._imported = true;
+
+          if (this._pendingHighlight) {
+            var pending = this._pendingHighlight;
+            this._pendingHighlight = null;
+            this._applyHighlight(pending);
+          }
+        }.bind(this))
         .catch(function (err) {
           pushError(this, err);
         }.bind(this));
@@ -430,7 +502,7 @@ export const AshBpmnViewer = {
     // Server → client event handlers
     // -----------------------------------------------------------------------
 
-    this.handleEvent('highlight', function (payload) {
+    this._applyHighlight = function (payload) {
       try {
         var elementRegistry = this._viewer.get('elementRegistry');
 
@@ -457,6 +529,14 @@ export const AshBpmnViewer = {
         }
       } catch (err) {
         pushError(this, err);
+      }
+    }.bind(this);
+
+    this.handleEvent('highlight', function (payload) {
+      if (this._imported) {
+        this._applyHighlight(payload);
+      } else {
+        this._pendingHighlight = payload;
       }
     }.bind(this));
 

@@ -1,1 +1,1 @@
-ignore_warnings.
+[]

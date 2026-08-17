@@ -10,6 +10,18 @@ every embeddable BPMN editor ultimately is — wrapped in a LiveView hook and a
 server-rendered properties panel. This page is how to embed it, how the `ash:`
 bindings work, and the one licence obligation you cannot skip.
 
+![The designer editing a draft process](https://raw.githubusercontent.com/lukegalea/ash_bpmn/main/documentation/assets/designer.png)
+
+The canvas is bpmn-js. The header is the definition's identity — key, version,
+and whether you are looking at a draft or a published version — plus the four
+actions: fit, revert to the stored draft, save, and publish. The right-hand
+column is the properties panel, empty until something is selected.
+
+Every screenshot on this page comes from the demo app in `dev/`, which is a real
+Phoenix application mounting these LiveViews against Postgres. `mix dev.setup &&
+mix dev.assets && mix dev.server` runs it; `node dev/screenshots/capture.mjs`
+regenerates these images.
+
 ## Embedding in a Phoenix app
 
 The hook ships as plain ESM in the package (`priv/js/ash_bpmn_designer.js`), the
@@ -30,8 +42,12 @@ let liveSocket = new LiveSocket("/live", Socket, {
 })
 ```
 
-The hook imports bpmn-js and its stylesheets itself; esbuild resolves them from
-your `assets/node_modules`. Two LiveViews are wrapped by host modules:
+The hook imports bpmn-js and its stylesheets itself, plus `ash_bpmn.css` for the
+markers the viewer paints on live nodes; esbuild resolves bpmn-js from your
+`assets/node_modules`. Because the hook lives in `deps/`, point your bundler's
+module resolution at your app: `NODE_PATH=deps:assets/node_modules`, the same
+setting a generated Phoenix app already uses. `dev/assets/package.json` in this
+repo is a working example. Two LiveViews are wrapped by host modules:
 
 ```elixir
 defmodule MyAppWeb.Bpmn.DesignerLive do
@@ -43,13 +59,25 @@ end
 ```
 
 The canvas is the client's; the properties panel is the server's. When you select
-an element, the hook pushes `selection_changed` and the LiveView renders the
-appropriate form — candidates, exclusions, outcomes, timers for user tasks; the
-action reference for service tasks. Edits come back as `apply_config` and the hook
-rewrites the element's `extensionElements` from scratch via moddle — never
-merged, so a config panel can never leave an element in a half-edited state. Save
-asks the hook for `saveXML({format: true})` and stores the document; publish runs
-the compiler and, on success, freezes the version.
+an element, the hook pushes `selection_changed` — carrying the element's current
+`ash:` binding, read out of the modeller — and the LiveView renders the
+appropriate form.
+
+![A user task selected, showing its candidates, outcomes, exclusions and timers](https://raw.githubusercontent.com/lukegalea/ash_bpmn/main/documentation/assets/designer-user-task.png)
+
+For a user task that is candidates, outcomes, exclusions and timers; every list
+shows one row per existing entry plus a blank row to add another. The panel is
+populated from the canvas rather than from the last-saved XML, and that matters:
+edits come back as `apply_config` and the hook rewrites the element's
+`extensionElements` from scratch via moddle — never merged, so a panel that
+rendered blanks over a configured task would erase it on Apply.
+
+A service task has exactly one binding, and the panel narrows to it:
+
+![A service task selected, showing only its action reference](https://raw.githubusercontent.com/lukegalea/ash_bpmn/main/documentation/assets/designer-service-task.png)
+
+Save asks the hook for `saveXML({format: true})` and stores the document; publish
+runs the compiler and, on success, freezes the version.
 
 ## The `ash:` namespace
 
@@ -79,6 +107,14 @@ that vocabulary and nothing more — an unknown `ash:` attribute is a compile er
 naming the element, which is typo protection, not pedantry: a designer-typed
 `candiates` element that silently vanished would be indistinguishable from an
 unassigned task until nobody's task list showed it.
+
+The descriptor declares `xml: { tagAlias: "lowerCase" }`, the same way
+camunda-bpmn-moddle does, because the elements are written `<ash:taskConfig>` and
+the moddle type is `TaskConfig`. This is not cosmetic: without the alias moddle
+reports every `ash:` element as unparsable content and drops it, so the modeller
+loads a diagram with no bindings and saves one with the bindings gone — the exact
+silent-divergence failure the one-artifact rule exists to prevent. If you fork the
+descriptor, keep the alias.
 
 ## Versioning and the designer
 

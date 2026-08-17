@@ -122,7 +122,12 @@
         {Credo.Check.Refactor.CondStatements, []},
         {Credo.Check.Refactor.CyclomaticComplexity, false},
         {Credo.Check.Refactor.FunctionArity, []},
-        {Credo.Check.Refactor.LongQuoteBlocks, []},
+        # The library's public API *is* `use` macros: each one instantiates a
+        # whole Ash resource or LiveView into the host's namespace, so the
+        # quote block is necessarily the size of the thing being generated.
+        # Splitting them to satisfy a line count would scatter one resource
+        # definition across several functions and hide the DSL it produces.
+        {Credo.Check.Refactor.LongQuoteBlocks, false},
         {Credo.Check.Refactor.MapInto, false},
         {Credo.Check.Refactor.MatchInCondition, []},
         {Credo.Check.Refactor.NegatedConditionsInUnless, []},
