@@ -1,3 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Luke Galea
+# SPDX-License-Identifier: MIT
+
+# These checks are the ones ash-project's shared `ash-ci.yml` runs, written out
+# here instead of called.
+#
+# The shared workflow's credo job declares `permissions: security-events: write`
+# — and a job-level permissions block *replaces* the default set rather than
+# adding to it, so that job's token has no `contents: read`. On a public repo
+# actions/checkout needs no token and nobody notices; on a private one it fails
+# with "Repository not found", and a caller cannot grant back a permission the
+# called workflow dropped. This repository is private, so the shared workflow
+# can never go green here.
+#
+# Keep this file in step with upstream when adopting new checks. Its Credo SAST
+# upload is deliberately omitted: code scanning uploads need GitHub Advanced
+# Security, which private repositories do not have by default.
+
 name: Elixir CI
 
 on:
@@ -7,31 +25,124 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+env:
+  MIX_ENV: test
+
 jobs:
-  ash-ci:
-    uses: ash-project/ash/.github/workflows/ash-ci.yml@main
-    permissions:
-      contents: write
-      security-events: write
-      pages: write
-      id-token: write
-    with:
-      postgres: true
-      postgres-version: "16"
-      # The test suite migrates and sandboxes its own database in
-      # test_helper.exs, so the shared workflow's ash_postgres setup steps are
-      # not wanted — only the Postgres service is.
-      ash_postgres: false
-      ecto_postgres: false
-      tenants: false
-      sobelow: false
-      changelog-lint: false
-      reuse: true
-      # This library defines no Spark DSL extension: it ships `use` macros that
-      # instantiate ordinary Ash resources. `mix spark.formatter --check` runs
-      # bare and fails ("must supply a comma separated list of extensions"),
-      # and there are no cheat sheets to generate.
-      spark-formatter: false
-      spark-cheat-sheets: false
-    secrets:
-      HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+  test:
+    name: mix test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          TZ: UTC
+          PGTZ: UTC
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-elixir
+      # test_helper.exs creates the database and runs the migrations in
+      # priv/test_repo/migrations itself, so there is no setup task here.
+      - run: mix test
+
+  compile-test:
+    name: MIX_ENV=test mix compile --warnings-as-errors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-elixir
+      - run: mix compile --force --warnings-as-errors
+
+  compile-dev:
+    name: MIX_ENV=dev mix compile --warnings-as-errors
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: dev
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-elixir
+        with:
+          mix-env: dev
+      # Covers the demo app in dev/, which is where the LiveViews and the
+      # designer hook are actually exercised.
+      - run: mix compile --force --warnings-as-errors
+
+  format:
+    name: mix format --check-formatted
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-elixir
+      - run: mix format --check-formatted
+
+  credo:
+    name: mix credo --strict
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-elixir
+      - run: mix credo --strict
+
+  dialyzer:
+    name: mix dialyzer
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: dev
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-elixir
+        with:
+          mix-env: dev
+      # The PLT is expensive to build and only changes with the dependency set.
+      - uses: actions/cache@v6.1.0
+        with:
+          path: priv/plts
+          key: ${{ runner.os }}-plt-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-plt-
+      - run: mix dialyzer --format short
+
+  docs:
+    name: mix docs
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: dev
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-elixir
+        with:
+          mix-env: dev
+      - run: mix docs
+
+  unused-deps:
+    name: mix deps.unlock --check-unused
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-elixir
+      - run: mix deps.unlock --check-unused
+
+  audit:
+    name: mix deps.audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-elixir
+      - run: mix deps.audit
+
+  reuse:
+    name: REUSE compliance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: fsfe/reuse-action@v6
