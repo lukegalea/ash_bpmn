@@ -24,7 +24,10 @@ defmodule AshBpmn do
     * `:process` — process key (required)
     * `:subject` — the subject record (required)
     * `:actor` — the user starting the process
-    * `:tenant` — organization/tenant id
+    * `:tenant` — organization/tenant id. Set on the instance, its first token
+      and its events, and carried in the args of every job this start enqueues —
+      so it survives into the advance worker, which runs long after this call
+      has returned.
   """
   @spec start_instance!(module(), keyword()) :: map()
   def start_instance!(domain, opts) do
@@ -455,7 +458,10 @@ defmodule AshBpmn do
   @doc """
   Returns tasks where the given principal is a candidate.
 
-  Opts: `:principal_ids` — list of UUIDs (required)
+  Options:
+    * `:principal_ids` — list of UUIDs (required)
+    * `:actor`, `:tenant` — see `AshBpmn.Scope`. On a tenant-scoped install
+      `:tenant` is what stops this returning another organization's work.
   """
   @spec my_tasks(module(), keyword()) :: [map()]
   def my_tasks(domain, opts) do
