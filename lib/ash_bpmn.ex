@@ -13,6 +13,7 @@ defmodule AshBpmn do
 
   alias AshBpmn.Config
   alias AshBpmn.Runtime.{AdvanceWorker, DomainResolver, Oban}
+  alias AshBpmn.Scope
 
   # ── Instance lifecycle ───────────────────────────────────────────────────
 
@@ -36,12 +37,14 @@ defmodule AshBpmn do
     process_key = Keyword.fetch!(opts, :process)
     subject = Keyword.fetch!(opts, :subject)
     actor = Keyword.get(opts, :actor)
-    _tenant = Keyword.get(opts, :tenant)
+    scope = %{Scope.from_opts(opts) | domain: domain}
 
     {:ok, resources} = AshBpmn.Resources.for_domain(domain)
 
-    # Get latest published definition
-    definition_results = resources.definition.latest_published!(process_key)
+    # Get latest published definition. Read through the same scope as everything
+    # below it: a definition is tenant-scoped too when the host asked for that,
+    # and reading it globally would let one organization start another's process.
+    definition_results = resources.definition.latest_published!(process_key, Scope.engine(scope))
 
     case definition_results do
       [] ->
@@ -57,7 +60,7 @@ defmodule AshBpmn do
               subject_id: subject.id,
               started_by_id: if(actor, do: actor.id, else: nil)
             },
-            authorize?: false
+            Scope.engine(scope)
           )
 
         # Reload instance to get fresh state
@@ -65,7 +68,7 @@ defmodule AshBpmn do
           resources.instance
           |> Ash.Query.for_read(:read)
           |> Ash.Query.filter(id == ^instance.id)
-          |> Ash.read_one!(authorize?: false)
+          |> Ash.read_one!(Scope.engine(scope))
 
         # Create initial token at the start node
         start_node = definition.graph["start"]
@@ -77,7 +80,7 @@ defmodule AshBpmn do
               node_id: start_node,
               status: :active
             },
-            authorize?: false
+            Scope.engine(scope)
           )
 
         # Record instance_started event
@@ -90,22 +93,27 @@ defmodule AshBpmn do
               "definition_version" => definition.version
             }
           },
-          authorize?: false
+          Scope.engine(scope)
         )
 
-        # Enqueue first advance
-        Oban.insert(AdvanceWorker, %{
-          "instance_id" => instance.id,
-          "token_id" => token.id,
-          "node_id" => start_node
-        })
+        # Enqueue first advance. The tenant rides in the job args because the
+        # worker runs in a different process, quite possibly on a different node
+        # and after a restart -- there is nothing left for it to infer one from.
+        Oban.insert(
+          AdvanceWorker,
+          Scope.to_job_args(scope, %{
+            "instance_id" => instance.id,
+            "token_id" => token.id,
+            "node_id" => start_node
+          })
+        )
 
         # Reload instance to get fresh state
         fresh_instance =
           resources.instance
           |> Ash.Query.for_read(:read)
           |> Ash.Query.filter(id == ^instance.id)
-          |> Ash.read_one!(authorize?: false)
+          |> Ash.read_one!(Scope.engine(scope))
 
         {:ok, fresh_instance}
     end
@@ -142,10 +150,11 @@ defmodule AshBpmn do
     actor = Keyword.fetch!(opts, :actor)
 
     resources = DomainResolver.resolve!()
+    scope = Scope.from_record(task, opts)
 
     # Reload so we complete against current state, not a struct the caller may
     # have been holding since before the task's timers were attached.
-    task = reload_task!(resources, task)
+    task = reload_task!(resources, task, scope)
 
     # A task may be completed without an explicit claim; record the implicit
     # claim so the event log still shows who took it before deciding.
@@ -155,10 +164,10 @@ defmodule AshBpmn do
           resources.human_task.claim(
             task,
             %{assignee_type: :user, assignee_id: actor.id},
-            authorize?: false
+            Scope.engine(scope)
           )
 
-        record_claim_event(resources, claimed, actor)
+        record_claim_event(resources, claimed, actor, scope)
         claimed
       else
         task
@@ -168,7 +177,7 @@ defmodule AshBpmn do
       resources.human_task.complete!(
         task,
         %{outcome: outcome, comment: comment, decided_by_id: actor.id},
-        authorize?: false
+        Scope.engine(scope)
       )
 
     # Cancel timers
@@ -176,15 +185,21 @@ defmodule AshBpmn do
       AshBpmn.Runtime.Oban.cancel_job(job_id)
     end)
 
-    record_task_event(resources, completed, :task_completed, %{
-      "outcome" => outcome,
-      "decided_by_id" => actor.id,
-      "comment" => comment
-    })
+    record_task_event(
+      resources,
+      completed,
+      :task_completed,
+      %{
+        "outcome" => outcome,
+        "decided_by_id" => actor.id,
+        "comment" => comment
+      },
+      scope
+    )
 
     # If this is a process task, advance the token
     if completed.token_id do
-      advance_token_after_task(resources, completed, outcome, actor)
+      advance_token_after_task(resources, completed, outcome, scope)
     end
 
     {:ok, completed}
@@ -217,6 +232,7 @@ defmodule AshBpmn do
 
           if action_ref do
             invoker = Config.action_invoker!()
+            scope = Scope.from_record(completed, opts)
 
             # Load subject
             subject =
@@ -228,7 +244,7 @@ defmodule AshBpmn do
                   mod
                   |> Ash.Query.for_read(:read)
                   |> Ash.Query.filter(id == ^completed.subject_id)
-                  |> Ash.read_one!(authorize?: false)
+                  |> Ash.read_one!(Scope.subject(scope))
                 rescue
                   _ -> nil
                 end
@@ -269,13 +285,14 @@ defmodule AshBpmn do
   def claim_task(task, opts) do
     actor = Keyword.fetch!(opts, :actor)
     resources = DomainResolver.resolve!()
+    scope = Scope.from_record(task, opts)
 
     # Check candidacy
     candidates =
       resources.task_candidate
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(task_id == ^task.id)
-      |> Ash.read!(authorize?: false)
+      |> Ash.read!(Scope.engine(scope))
 
     principal_ids = gather_principal_ids(actor)
 
@@ -293,12 +310,12 @@ defmodule AshBpmn do
 
     claimed =
       resources.human_task.claim!(
-        reload_task!(resources, task),
+        reload_task!(resources, task, scope),
         %{assignee_type: :user, assignee_id: actor.id},
-        authorize?: false
+        Scope.engine(scope)
       )
 
-    record_claim_event(resources, claimed, actor)
+    record_claim_event(resources, claimed, actor, scope)
 
     {:ok, claimed}
   rescue
@@ -307,7 +324,7 @@ defmodule AshBpmn do
 
   # Events are recorded for standalone approvals too — they have no instance,
   # but "who claimed, who decided" is exactly what the log is for.
-  defp record_task_event(resources, task, kind, data) do
+  defp record_task_event(resources, task, kind, data, scope) do
     resources.process_event.create!(
       %{
         instance_id: task.instance_id,
@@ -317,21 +334,21 @@ defmodule AshBpmn do
         kind: kind,
         data: data
       },
-      authorize?: false
+      Scope.engine(scope)
     )
 
     :ok
   end
 
-  defp record_claim_event(resources, task, actor) do
-    record_task_event(resources, task, :task_claimed, %{"assignee_id" => actor.id})
+  defp record_claim_event(resources, task, actor, scope) do
+    record_task_event(resources, task, :task_claimed, %{"assignee_id" => actor.id}, scope)
   end
 
-  defp reload_task!(resources, task) do
+  defp reload_task!(resources, task, scope) do
     resources.human_task
     |> Ash.Query.for_read(:read)
     |> Ash.Query.filter(id == ^task.id)
-    |> Ash.read_one!(authorize?: false)
+    |> Ash.read_one!(Scope.engine(scope))
   end
 
   @doc "Delegates a claimed task to another principal."
@@ -345,22 +362,29 @@ defmodule AshBpmn do
     to_principal = Keyword.fetch!(opts, :to_principal)
     actor = Keyword.fetch!(opts, :actor)
     resources = DomainResolver.resolve!()
+    scope = Scope.from_record(task, opts)
 
     # The action's RecordDelegatedFrom change captures the outgoing assignee as
     # `delegated_from_id` — the accountability trail delegation exists for.
     delegated =
       resources.human_task.delegate!(
-        reload_task!(resources, task),
+        reload_task!(resources, task, scope),
         to_principal.type,
         to_principal.id,
-        authorize?: false
+        Scope.engine(scope)
       )
 
-    record_task_event(resources, delegated, :task_delegated, %{
-      "from_id" => actor.id,
-      "to_type" => to_principal.type,
-      "to_id" => to_principal.id
-    })
+    record_task_event(
+      resources,
+      delegated,
+      :task_delegated,
+      %{
+        "from_id" => actor.id,
+        "to_type" => to_principal.type,
+        "to_id" => to_principal.id
+      },
+      scope
+    )
 
     {:ok, delegated}
   rescue
@@ -369,16 +393,23 @@ defmodule AshBpmn do
 
   # ── Instance operations ─────────────────────────────────────────────────
 
-  @doc "Cancels a running instance."
-  @spec cancel_instance!(map()) :: map()
-  def cancel_instance!(instance) do
-    {:ok, cancelled} = cancel_instance(instance)
+  @doc """
+  Cancels a running instance.
+
+  `opts` may carry `:actor` and `:tenant`. Without a `:tenant` the instance's own
+  `organization_id` is used, which is the right answer whenever the caller loaded
+  the instance in the first place.
+  """
+  @spec cancel_instance!(map(), keyword()) :: map()
+  def cancel_instance!(instance, opts \\ []) do
+    {:ok, cancelled} = cancel_instance(instance, opts)
     cancelled
   end
 
-  @spec cancel_instance(map()) :: {:ok, map()} | {:error, term()}
-  def cancel_instance(instance) do
+  @spec cancel_instance(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def cancel_instance(instance, opts \\ []) do
     resources = DomainResolver.resolve!()
+    scope = Scope.from_record(instance, opts)
 
     # Kill all active/executing tokens
     active_tokens =
@@ -386,10 +417,10 @@ defmodule AshBpmn do
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(instance_id == ^instance.id)
       |> Ash.Query.filter(status in [:active, :executing])
-      |> Ash.read!(authorize?: false)
+      |> Ash.read!(Scope.engine(scope))
 
     Enum.each(active_tokens, fn token ->
-      resources.token.kill!(token, authorize?: false)
+      resources.token.kill!(token, Scope.engine(scope))
     end)
 
     # Cancel open tasks
@@ -398,14 +429,14 @@ defmodule AshBpmn do
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(instance_id == ^instance.id)
       |> Ash.Query.filter(status in [:open, :claimed])
-      |> Ash.read!(authorize?: false)
+      |> Ash.read!(Scope.engine(scope))
 
     Enum.each(open_tasks, fn task ->
       Enum.each(task.timer_job_ids || [], &AshBpmn.Runtime.Oban.cancel_job/1)
-      resources.human_task.cancel!(task, authorize?: false)
+      resources.human_task.cancel!(task, Scope.engine(scope))
     end)
 
-    cancelled = resources.instance.cancel!(instance, authorize?: false)
+    cancelled = resources.instance.cancel!(instance, Scope.engine(scope))
 
     resources.process_event.create!(
       %{
@@ -413,7 +444,7 @@ defmodule AshBpmn do
         kind: :instance_cancelled,
         data: %{}
       },
-      authorize?: false
+      Scope.engine(scope)
     )
 
     {:ok, cancelled}
@@ -429,6 +460,7 @@ defmodule AshBpmn do
   @spec my_tasks(module(), keyword()) :: [map()]
   def my_tasks(domain, opts) do
     principal_ids = Keyword.fetch!(opts, :principal_ids)
+    scope = Scope.from_opts(opts)
 
     {:ok, resources} = AshBpmn.Resources.for_domain(domain)
 
@@ -436,7 +468,7 @@ defmodule AshBpmn do
       resources.human_task
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(status in [:open, :claimed])
-      |> Ash.read!(authorize?: false)
+      |> Ash.read!(Scope.engine(scope))
 
     # Filter to tasks where user is a candidate
     Enum.filter(tasks, fn task ->
@@ -446,40 +478,41 @@ defmodule AshBpmn do
         |> Ash.Query.filter(task_id == ^task.id)
         |> Ash.Query.filter(principal_type == :user)
         |> Ash.Query.filter(principal_id in ^principal_ids)
-        |> Ash.read!(authorize?: false)
+        |> Ash.read!(Scope.engine(scope))
 
       candidates != []
     end)
   end
 
   @doc "Returns a full report of an instance (tokens, tasks, events)."
-  @spec instance_report(map()) :: %{
+  @spec instance_report(map(), keyword()) :: %{
           instance: map(),
           tokens: [map()],
           tasks: [map()],
           events: [map()]
         }
-  def instance_report(instance) do
+  def instance_report(instance, opts \\ []) do
     resources = DomainResolver.resolve!()
+    scope = Scope.from_record(instance, opts)
 
     tokens =
       resources.token
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(instance_id == ^instance.id)
-      |> Ash.read!(authorize?: false)
+      |> Ash.read!(Scope.engine(scope))
 
     tasks =
       resources.human_task
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(instance_id == ^instance.id)
-      |> Ash.read!(authorize?: false)
+      |> Ash.read!(Scope.engine(scope))
 
     events =
       resources.process_event
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(instance_id == ^instance.id)
       |> Ash.Query.sort(recorded_at: :asc)
-      |> Ash.read!(authorize?: false)
+      |> Ash.read!(Scope.engine(scope))
 
     %{
       instance: instance,
@@ -490,31 +523,35 @@ defmodule AshBpmn do
   end
 
   @doc "Retries a failed instance by reactivating dead tokens."
-  @spec retry_instance!(map()) :: map()
-  def retry_instance!(instance) do
-    {:ok, retried} = retry_instance(instance)
+  @spec retry_instance!(map(), keyword()) :: map()
+  def retry_instance!(instance, opts \\ []) do
+    {:ok, retried} = retry_instance(instance, opts)
     retried
   end
 
-  @spec retry_instance(map()) :: {:ok, map()} | {:error, term()}
-  def retry_instance(instance) do
+  @spec retry_instance(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def retry_instance(instance, opts \\ []) do
     resources = DomainResolver.resolve!()
+    scope = Scope.from_record(instance, opts)
 
     dead_tokens =
       resources.token
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(instance_id == ^instance.id)
       |> Ash.Query.filter(status == :dead)
-      |> Ash.read!(authorize?: false)
+      |> Ash.read!(Scope.engine(scope))
 
     Enum.each(dead_tokens, fn token ->
-      reactivated = resources.token.reactivate!(token, authorize?: false)
+      reactivated = resources.token.reactivate!(token, Scope.engine(scope))
 
-      Oban.insert(AdvanceWorker, %{
-        "instance_id" => instance.id,
-        "token_id" => reactivated.id,
-        "node_id" => reactivated.node_id
-      })
+      Oban.insert(
+        AdvanceWorker,
+        Scope.to_job_args(scope, %{
+          "instance_id" => instance.id,
+          "token_id" => reactivated.id,
+          "node_id" => reactivated.node_id
+        })
+      )
     end)
 
     # Reload
@@ -522,7 +559,7 @@ defmodule AshBpmn do
       resources.instance
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(id == ^instance.id)
-      |> Ash.read_one!(authorize?: false)
+      |> Ash.read_one!(Scope.engine(scope))
 
     {:ok, fresh}
   rescue
@@ -531,25 +568,25 @@ defmodule AshBpmn do
 
   # ── Private helpers ─────────────────────────────────────────────────────
 
-  defp advance_token_after_task(resources, task, outcome, _actor) do
+  defp advance_token_after_task(resources, task, outcome, scope) do
     token =
       resources.token
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(id == ^task.token_id)
-      |> Ash.read_one!(authorize?: false)
+      |> Ash.read_one!(Scope.engine(scope))
 
     if token.status == :executing && task.instance_id do
       instance =
         resources.instance
         |> Ash.Query.for_read(:read)
         |> Ash.Query.filter(id == ^task.instance_id)
-        |> Ash.read_one!(authorize?: false)
+        |> Ash.read_one!(Scope.engine(scope))
 
       definition =
         resources.definition
         |> Ash.Query.for_read(:read)
         |> Ash.Query.filter(id == ^instance.definition_id)
-        |> Ash.read_one!(authorize?: false)
+        |> Ash.read_one!(Scope.engine(scope))
 
       graph = definition.graph
 
@@ -562,7 +599,7 @@ defmodule AshBpmn do
       # Determine which flow to follow based on outcome (for gateways after user tasks)
       case outgoing do
         [flow] ->
-          follow_flow(resources, instance, token, graph, flow, outcome)
+          follow_flow(resources, instance, token, graph, flow, outcome, scope)
 
         flows when length(flows) > 1 ->
           # Multiple flows — check if this connects to a gateway
@@ -590,7 +627,7 @@ defmodule AshBpmn do
           target_flow = chosen || default_flow || List.first(flows)
 
           if target_flow do
-            follow_flow(resources, instance, token, graph, target_flow, outcome)
+            follow_flow(resources, instance, token, graph, target_flow, outcome, scope)
           end
 
         _ ->
@@ -599,7 +636,7 @@ defmodule AshBpmn do
     end
   end
 
-  defp follow_flow(resources, instance, token, graph, flow, outcome) do
+  defp follow_flow(resources, instance, token, graph, flow, outcome, scope) do
     next_node_id = flow["to"]
     next_node = graph["nodes"][next_node_id]
 
@@ -608,7 +645,7 @@ defmodule AshBpmn do
       join_info = graph["joins"][next_node_id]
 
       if join_info do
-        handle_join(resources, instance, token, graph, next_node_id, join_info, outcome)
+        handle_join(resources, instance, token, graph, next_node_id, join_info, outcome, scope)
       else
         # Consume current token via direct SQL (same status validation issue as in AdvanceWorker)
         consume_token_sql(token)
@@ -620,20 +657,23 @@ defmodule AshBpmn do
               node_id: next_node_id,
               status: :active
             },
-            authorize?: false
+            Scope.engine(scope)
           )
 
-        Oban.insert(AshBpmn.Runtime.AdvanceWorker, %{
-          "instance_id" => instance.id,
-          "token_id" => new_token.id,
-          "node_id" => next_node_id,
-          "task_outcome" => outcome && to_string(outcome)
-        })
+        Oban.insert(
+          AshBpmn.Runtime.AdvanceWorker,
+          Scope.to_job_args(scope, %{
+            "instance_id" => instance.id,
+            "token_id" => new_token.id,
+            "node_id" => next_node_id,
+            "task_outcome" => outcome && to_string(outcome)
+          })
+        )
       end
     end
   end
 
-  defp handle_join(resources, instance, token, graph, join_node_id, join_info, _outcome) do
+  defp handle_join(resources, instance, token, graph, join_node_id, join_info, _outcome, scope) do
     # Consume this token via direct SQL (same status validation issue)
     consume_token_sql(token)
 
@@ -646,11 +686,11 @@ defmodule AshBpmn do
       |> Ash.Query.filter(instance_id == ^instance.id)
       |> Ash.Query.filter(node_id == ^join_node_id)
       |> Ash.Query.filter(status == :consumed)
-      |> Ash.read!(authorize?: false)
+      |> Ash.read!(Scope.engine(scope))
 
     if length(waits_for) <= 1 do
       # Non-parallel join — always advance
-      advance_through_join(resources, instance, token, graph, join_node_id)
+      advance_through_join(resources, instance, token, graph, join_node_id, scope)
     else
       # Parallel join — check if remaining sibling tokens exist.
       # If any sibling still has active/executing tokens, wait. Otherwise advance.
@@ -668,18 +708,18 @@ defmodule AshBpmn do
           |> Ash.Query.filter(instance_id == ^instance.id)
           |> Ash.Query.filter(node_id == ^from_node)
           |> Ash.Query.filter(status in [:active, :executing])
-          |> Ash.read_one!(authorize?: false)
+          |> Ash.read_one!(Scope.engine(scope))
         end)
 
       if has_active_siblings do
         :ok
       else
-        advance_through_join(resources, instance, token, graph, join_node_id)
+        advance_through_join(resources, instance, token, graph, join_node_id, scope)
       end
     end
   end
 
-  defp advance_through_join(resources, instance, _token, graph, join_node_id) do
+  defp advance_through_join(resources, instance, _token, graph, join_node_id, scope) do
     outgoing =
       graph["flows"]
       |> Map.values()
@@ -696,14 +736,17 @@ defmodule AshBpmn do
               node_id: next_node_id,
               status: :active
             },
-            authorize?: false
+            Scope.engine(scope)
           )
 
-        Oban.insert(AshBpmn.Runtime.AdvanceWorker, %{
-          "instance_id" => instance.id,
-          "token_id" => new_token.id,
-          "node_id" => next_node_id
-        })
+        Oban.insert(
+          AshBpmn.Runtime.AdvanceWorker,
+          Scope.to_job_args(scope, %{
+            "instance_id" => instance.id,
+            "token_id" => new_token.id,
+            "node_id" => next_node_id
+          })
+        )
 
       _ ->
         :ok
@@ -735,16 +778,22 @@ defmodule AshBpmn do
   # the StatusIsExecuting validation from seeing the correct status.
   defp consume_token_sql(token) do
     repo = AshPostgres.DataLayer.Info.repo(token.__struct__)
-    import Ecto.Query
+    import Ecto.Query, only: [where: 3, update: 3]
 
+    # The table comes from the resource, not a literal, so a host that set
+    # `table:` on the Token macro is actually honoured -- writing "bpmn_tokens"
+    # here quietly updated nothing on a renamed table and returned a match error
+    # from the `{1, _}` below, which is a confusing way to find out.
+    #
+    # It is built by piping rather than with `from/2`: Ecto will not interpolate
+    # a source into the `in` position, so `from(t in ^table)` does not compile.
     {1, _} =
-      repo.update_all(
-        from(t in "bpmn_tokens",
-          where: t.id == type(^token.id, Ecto.UUID),
-          update: [set: [status: ^to_string("consumed"), updated_at: fragment("NOW()")]]
-        ),
-        []
-      )
+      token.__struct__
+      |> AshPostgres.DataLayer.Info.table()
+      |> Ecto.Queryable.to_query()
+      |> where([t], t.id == type(^token.id, Ecto.UUID))
+      |> update([t], set: [status: ^"consumed", updated_at: fragment("NOW()")])
+      |> repo.update_all([])
 
     :ok
   end

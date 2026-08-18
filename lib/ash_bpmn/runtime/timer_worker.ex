@@ -18,6 +18,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
 
   alias AshBpmn.Config
   alias AshBpmn.Runtime.DomainResolver
+  alias AshBpmn.Scope
 
   def queue, do: Config.queue()
 
@@ -26,24 +27,25 @@ defmodule AshBpmn.Runtime.TimerWorker do
     task_id = args["task_id"]
     kind = args["kind"]
 
-    resources = DomainResolver.resolve!()
+    scope = Scope.from_job(args, :timer)
+    resources = DomainResolver.resolve!(scope.domain)
 
     # Load the task
     task =
       resources.human_task
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(id == ^task_id)
-      |> Ash.read_one!(authorize?: false)
+      |> Ash.read_one!(Scope.engine(scope))
 
     # Skip if already completed or cancelled
     if task.status in [:completed, :cancelled] do
       {:ok, :skipped}
     else
-      fire_timer(resources, task, kind)
+      fire_timer(resources, task, kind, scope)
     end
   end
 
-  defp fire_timer(resources, task, "remind") do
+  defp fire_timer(resources, task, "remind", scope) do
     resources.process_event.create!(
       %{
         instance_id: task.instance_id,
@@ -53,20 +55,20 @@ defmodule AshBpmn.Runtime.TimerWorker do
         kind: :timer_fired,
         data: %{"timer_kind" => "remind"}
       },
-      authorize?: false
+      Scope.engine(scope)
     )
 
     {:ok, :reminded}
   end
 
-  defp fire_timer(resources, task, "escalate") do
+  defp fire_timer(resources, task, "escalate", scope) do
     resolver = Config.assignment_resolver!()
 
     ctx = %{
       task: task,
       instance: nil,
       subject: nil,
-      actor: nil,
+      actor: scope.actor,
       assigns: %{}
     }
 
@@ -81,7 +83,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
         kind: :timer_fired,
         data: %{"timer_kind" => "escalate"}
       },
-      authorize?: false
+      Scope.engine(scope)
     )
 
     {:ok, :escalated}
@@ -89,9 +91,9 @@ defmodule AshBpmn.Runtime.TimerWorker do
     _ -> {:ok, :escalated}
   end
 
-  defp fire_timer(resources, task, "expire") do
+  defp fire_timer(resources, task, "expire", scope) do
     # Force complete the task with :expired outcome
-    resources.human_task.force_complete!(task, :expired, authorize?: false)
+    resources.human_task.force_complete!(task, :expired, Scope.engine(scope))
 
     # Record the expiration event
     resources.process_event.create!(
@@ -103,7 +105,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
         kind: :task_expired,
         data: %{}
       },
-      authorize?: false
+      Scope.engine(scope)
     )
 
     # If this is a process task (has token_id), advance the token
@@ -112,7 +114,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
         resources.token
         |> Ash.Query.for_read(:read)
         |> Ash.Query.filter(id == ^task.token_id)
-        |> Ash.read_one!(authorize?: false)
+        |> Ash.read_one!(Scope.engine(scope))
 
       if token.status == :executing do
         if task.instance_id do
@@ -120,13 +122,13 @@ defmodule AshBpmn.Runtime.TimerWorker do
             resources.instance
             |> Ash.Query.for_read(:read)
             |> Ash.Query.filter(id == ^task.instance_id)
-            |> Ash.read_one!(authorize?: false)
+            |> Ash.read_one!(Scope.engine(scope))
 
           definition =
             resources.definition
             |> Ash.Query.for_read(:read)
             |> Ash.Query.filter(id == ^instance.definition_id)
-            |> Ash.read_one!(authorize?: false)
+            |> Ash.read_one!(Scope.engine(scope))
 
           graph = definition.graph
 
@@ -142,7 +144,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
               next_node_id = first_flow["to"]
 
               # Consume the executing token and create a new one
-              resources.token.consume!(token, authorize?: false)
+              resources.token.consume!(token, Scope.engine(scope))
 
               new_token =
                 resources.token.create!(
@@ -151,15 +153,18 @@ defmodule AshBpmn.Runtime.TimerWorker do
                     node_id: next_node_id,
                     status: :active
                   },
-                  authorize?: false
+                  Scope.engine(scope)
                 )
 
               # Enqueue advance for the new token
-              AshBpmn.Runtime.Oban.insert(AshBpmn.Runtime.AdvanceWorker, %{
-                "instance_id" => instance.id,
-                "token_id" => new_token.id,
-                "node_id" => next_node_id
-              })
+              AshBpmn.Runtime.Oban.insert(
+                AshBpmn.Runtime.AdvanceWorker,
+                Scope.to_job_args(scope, %{
+                  "instance_id" => instance.id,
+                  "token_id" => new_token.id,
+                  "node_id" => next_node_id
+                })
+              )
 
             [] ->
               :ok
@@ -171,7 +176,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
     {:ok, :expired}
   end
 
-  defp fire_timer(_resources, _task, kind) do
+  defp fire_timer(_resources, _task, kind, _scope) do
     {:error, "unknown timer kind: #{kind}"}
   end
 end

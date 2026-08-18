@@ -14,6 +14,14 @@ defmodule AshBpmn.Resources.Definition do
     * `:repo` — **required**.  The `AshPostgres.Repo` for this resource.
     * `:table` — table name (default `"bpmn_definitions"`).
     * `:tenant?` — set `true` to add `organization_id` multitenancy (default `false`).
+    * `:base` — the module to `use` in place of `Ash.Resource`, so the generated
+      resource inherits a host application's base resource (ownership, audit,
+      soft delete, tenancy, the policy set). See `AshBpmn.Resources.Base`.
+    * `:base_opts` — options passed to `:base` verbatim, with `:domain` filled
+      in. Ignored unless `:base` is set.
+    * `:policies?` — emit the engine bypass policy (default `true`). Setting it
+      to `false` hands the host the entire policy set, including whatever the
+      engine needs to function. See `AshBpmn.Checks.AshBpmnInteraction`.
 
   ## Code interfaces (generated on the host module)
 
@@ -30,16 +38,15 @@ defmodule AshBpmn.Resources.Definition do
   """
 
   defmacro __using__(opts) do
-    domain = Keyword.fetch!(opts, :domain)
     repo = Keyword.fetch!(opts, :repo)
     table = Keyword.get(opts, :table, "bpmn_definitions")
-    tenant? = Keyword.get(opts, :tenant?, false)
+    tenant? = AshBpmn.Resources.Base.own_tenancy?(opts)
+    policies? = Keyword.get(opts, :policies?, true)
+
+    base_use = AshBpmn.Resources.Base.use_call(opts)
 
     quote do
-      use Ash.Resource,
-        domain: unquote(domain),
-        data_layer: AshPostgres.DataLayer,
-        authorizers: [Ash.Policy.Authorizer]
+      unquote(base_use)
 
       @ash_bpmn_kind :definition
 
@@ -59,6 +66,19 @@ defmodule AshBpmn.Resources.Definition do
           strategy :attribute
           attribute :organization_id
           global? true
+        end
+      end
+
+      # The engine's own writes. Without this the resource has an authorizer and
+      # -- unless the host adds policies -- no way to satisfy it, which is why
+      # every internal call used to pass `authorize?: false`. See
+      # `AshBpmn.Checks.AshBpmnInteraction` for what this replaces and what it
+      # deliberately does not claim to be.
+      if unquote(policies?) do
+        policies do
+          bypass AshBpmn.Checks.AshBpmnInteraction do
+            authorize_if always()
+          end
         end
       end
 
@@ -212,18 +232,21 @@ defmodule AshBpmn.Resources.Definition.AssignVersion do
     if is_nil(key) do
       changeset
     else
-      max_version = fetch_max_version(resource, key)
+      max_version = fetch_max_version(resource, key, AshBpmn.Scope.from_changeset(changeset))
       Ash.Changeset.change_attribute(changeset, :version, max_version + 1)
     end
   end
 
-  defp fetch_max_version(resource, key) do
+  # Reads the resource it is changing, from inside an action the caller was
+  # already authorized for -- so it runs as engine work in the changeset's own
+  # tenant, not unauthorized and not globally.
+  defp fetch_max_version(resource, key, scope) do
     resource
     |> Ash.Query.for_read(:read)
     |> Ash.Query.filter(key == ^key)
     |> Ash.Query.sort(version: :desc)
     |> Ash.Query.limit(1)
-    |> Ash.read_one!(authorize?: false)
+    |> Ash.read_one!(AshBpmn.Scope.engine(scope))
     |> case do
       nil -> 0
       record -> record.version
@@ -307,12 +330,14 @@ defmodule AshBpmn.Resources.Definition.UniqueDraftCheck do
     if is_nil(key) do
       :ok
     else
+      scope = AshBpmn.Scope.from_changeset(changeset)
+
       exists =
         try do
           resource
           |> Ash.Query.for_read(:read)
           |> Ash.Query.filter(key == ^key and status == :draft)
-          |> Ash.read_one!(authorize?: false)
+          |> Ash.read_one!(AshBpmn.Scope.engine(scope))
           |> case do
             nil -> false
             _ -> true

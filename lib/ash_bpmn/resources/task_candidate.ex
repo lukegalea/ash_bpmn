@@ -18,20 +18,27 @@ defmodule AshBpmn.Resources.TaskCandidate do
 
     * `:table` — (default `"bpmn_task_candidates"`).
     * `:tenant?` — (default `false`).
+    * `:base` — the module to `use` in place of `Ash.Resource`, so the generated
+      resource inherits a host application's base resource (ownership, audit,
+      soft delete, tenancy, the policy set). See `AshBpmn.Resources.Base`.
+    * `:base_opts` — options passed to `:base` verbatim, with `:domain` filled
+      in. Ignored unless `:base` is set.
+    * `:policies?` — emit the engine bypass policy (default `true`). Setting it
+      to `false` hands the host the entire policy set, including whatever the
+      engine needs to function. See `AshBpmn.Checks.AshBpmnInteraction`.
   """
 
   defmacro __using__(opts) do
-    domain = Keyword.fetch!(opts, :domain)
     repo = Keyword.fetch!(opts, :repo)
     task = Keyword.fetch!(opts, :task)
     table = Keyword.get(opts, :table, "bpmn_task_candidates")
-    tenant? = Keyword.get(opts, :tenant?, false)
+    tenant? = AshBpmn.Resources.Base.own_tenancy?(opts)
+    policies? = Keyword.get(opts, :policies?, true)
+
+    base_use = AshBpmn.Resources.Base.use_call(opts)
 
     quote do
-      use Ash.Resource,
-        domain: unquote(domain),
-        data_layer: AshPostgres.DataLayer,
-        authorizers: [Ash.Policy.Authorizer]
+      unquote(base_use)
 
       @ash_bpmn_kind :task_candidate
 
@@ -47,6 +54,19 @@ defmodule AshBpmn.Resources.TaskCandidate do
           strategy :attribute
           attribute :organization_id
           global? true
+        end
+      end
+
+      # The engine's own writes. Without this the resource has an authorizer and
+      # -- unless the host adds policies -- no way to satisfy it, which is why
+      # every internal call used to pass `authorize?: false`. See
+      # `AshBpmn.Checks.AshBpmnInteraction` for what this replaces and what it
+      # deliberately does not claim to be.
+      if unquote(policies?) do
+        policies do
+          bypass AshBpmn.Checks.AshBpmnInteraction do
+            authorize_if always()
+          end
         end
       end
 

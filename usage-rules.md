@@ -58,6 +58,23 @@ gateway conditions, never in resolver specs, never in the invoker.
 10. **Actions are idempotent under redelivery.** Node execution may run twice
     (Oban redelivery). The token claim gate makes double-advance safe; your
     `ActionInvoker` callbacks must tolerate a second invocation.
+11. **Engine calls go through `AshBpmn.Scope`, never `authorize?: false`.** Every
+    internal call passes `AshBpmn.Scope.engine/2`, which carries the actor and the
+    tenant and marks the call for the bypass each generated resource declares on
+    `AshBpmn.Checks.AshBpmnInteraction`. There is exactly one exception —
+    `AshBpmn.Scope.subject/2`, for reading the *host's* subject, which no ash_bpmn
+    policy governs — and a test fails the build if a second one appears.
+12. **Pass the tenant, and pass it explicitly.** `AshBpmn.start_instance/2` takes
+    `:tenant`; operations on a record already loaded infer it from that record.
+    Background jobs carry the tenant and the domain in their args, because a job
+    outlives the process that enqueued it and has nothing else to read them from.
+13. **A work item can sit on your base resource.** Every resource macro takes
+    `:base` and `:base_opts`, so a human task inherits whatever your application
+    arranged for every other record it owns. One ordering rule comes with it: a
+    bypass in Ash short-circuits only the policies declared *after* it, and a base
+    resource's policies are emitted first — so either put
+    `AshBpmn.Checks.AshBpmnInteraction` at the top of the base's policy set or set
+    `config :ash_bpmn, engine_actor:`. See `AshBpmn.Config.engine_actor/0`.
 
 ## Testing
 

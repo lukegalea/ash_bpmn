@@ -23,7 +23,16 @@ config :ash_bpmn,
   queue: :bpmn,
   max_attempts: 5
 
-config :ash_bpmn, ash_domains: [AshBpmn.Test.Domain, AshBpmn.ApprovalTestSupport.Domain]
+# Order matters. `AshBpmn.Runtime.DomainResolver.resolve!/1` falls back to the
+# first domain here that has all six resource kinds when a caller does not name
+# one, so the tenant-scoped domain goes last: it is reached by name, from the
+# `"domain"` key its jobs carry, and never by the fallback.
+config :ash_bpmn,
+  ash_domains: [
+    AshBpmn.Test.Domain,
+    AshBpmn.ApprovalTestSupport.Domain,
+    AshBpmn.TenantTest.Domain
+  ]
 
 # The web test endpoint (test/support/web_endpoint.ex). Config lives here —
 # not in a compile-time Application.put_env in the module body — because that

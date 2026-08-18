@@ -17,6 +17,7 @@ defmodule AshBpmn.Runtime.SweepWorker do
   require Ash.Query
 
   alias AshBpmn.Config
+  alias AshBpmn.Scope
 
   def queue, do: Config.queue()
 
@@ -24,35 +25,42 @@ defmodule AshBpmn.Runtime.SweepWorker do
   def perform(_job) do
     resources = AshBpmn.Runtime.DomainResolver.resolve!()
 
+    # The sweep is deliberately cross-tenant: it recovers work stranded by a
+    # restart, and a restart does not respect tenant boundaries. The resource
+    # macros declare `global? true`, so this read is legal without a tenant --
+    # and each instance's own scope is picked up below, so every *write* the
+    # sweep makes lands in the right tenant.
+    scope = Scope.system(:sweep)
+
     # Find all running instances
     running_instances =
       resources.instance
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(status == :running)
-      |> Ash.read!(authorize?: false)
+      |> Ash.read!(Scope.engine(scope))
 
     Enum.each(running_instances, fn instance ->
-      sweep_instance(resources, instance)
+      sweep_instance(resources, instance, Scope.from_record(instance, actor: scope.actor))
     end)
 
     {:ok, :swept}
   end
 
-  defp sweep_instance(resources, instance) do
+  defp sweep_instance(resources, instance, scope) do
     # Find active tokens for this instance
     active_tokens =
       resources.token
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(instance_id == ^instance.id)
       |> Ash.Query.filter(status == :active)
-      |> Ash.read!(authorize?: false)
+      |> Ash.read!(Scope.engine(scope))
 
     Enum.each(active_tokens, fn token ->
-      re_enqueue_token(resources, token, instance)
+      re_enqueue_token(resources, token, instance, scope)
     end)
   end
 
-  defp re_enqueue_token(resources, token, instance) do
+  defp re_enqueue_token(resources, token, instance, scope) do
     # Record sweep recovery event
     resources.process_event.create!(
       %{
@@ -62,14 +70,17 @@ defmodule AshBpmn.Runtime.SweepWorker do
         kind: :sweep_recovered,
         data: %{}
       },
-      authorize?: false
+      Scope.engine(scope)
     )
 
     # Re-enqueue advance
-    AshBpmn.Runtime.Oban.insert(AshBpmn.Runtime.AdvanceWorker, %{
-      "instance_id" => instance.id,
-      "token_id" => token.id,
-      "node_id" => token.node_id
-    })
+    AshBpmn.Runtime.Oban.insert(
+      AshBpmn.Runtime.AdvanceWorker,
+      Scope.to_job_args(scope, %{
+        "instance_id" => instance.id,
+        "token_id" => token.id,
+        "node_id" => token.node_id
+      })
+    )
   end
 end

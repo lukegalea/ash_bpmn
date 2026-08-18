@@ -74,6 +74,15 @@ defmodule AshBpmn.Changes.RequireApproval do
     subject = result
     actor = changeset.context[:actor]
 
+    # The approval belongs to whichever tenant the subject's own action was
+    # running in. Taking it off the changeset rather than off `result` means a
+    # host resource that scopes by something other than `organization_id` still
+    # lands its approval in the right place.
+    scope = %{
+      AshBpmn.Scope.from_changeset(changeset)
+      | domain: Ash.Resource.Info.domain(resources.human_task)
+    }
+
     # Build resolver context
     resolver_ctx = %{
       subject: subject,
@@ -117,14 +126,14 @@ defmodule AshBpmn.Changes.RequireApproval do
     # still the real guard, but it can only report itself by aborting the
     # transaction — which unwinds past the rescue below rather than raising —
     # so the friendly error has to come from a read.
-    if pending_approval?(resources, subject_type, subject_id, key) do
+    if pending_approval?(resources, subject_type, subject_id, key, scope) do
       {:error,
        Ash.Error.Changes.InvalidChanges.exception(
          fields: [:__approval__],
          message: "an approval for this action is already pending (key: #{key})"
        )}
     else
-      insert_approval(resources, %{
+      insert_approval(resources, scope, %{
         key: key,
         name: name,
         on_complete: on_complete,
@@ -139,18 +148,18 @@ defmodule AshBpmn.Changes.RequireApproval do
     end
   end
 
-  defp pending_approval?(resources, subject_type, subject_id, key) do
+  defp pending_approval?(resources, subject_type, subject_id, key, scope) do
     resources.human_task
     |> Ash.Query.for_read(:read)
     |> Ash.Query.filter(subject_type == ^subject_type)
     |> Ash.Query.filter(subject_id == ^subject_id)
     |> Ash.Query.filter(node_id == ^key)
     |> Ash.Query.filter(status in [:open, :claimed])
-    |> Ash.read!(authorize?: false)
+    |> Ash.read!(AshBpmn.Scope.engine(scope))
     |> Enum.any?()
   end
 
-  defp insert_approval(resources, spec) do
+  defp insert_approval(resources, scope, spec) do
     %{
       key: key,
       name: name,
@@ -177,7 +186,7 @@ defmodule AshBpmn.Changes.RequireApproval do
             subject_id: subject_id,
             due_at: due_at
           },
-          authorize?: false
+          AshBpmn.Scope.engine(scope)
         )
 
       # Materialize candidates
@@ -188,15 +197,15 @@ defmodule AshBpmn.Changes.RequireApproval do
             principal_type: c.type,
             principal_id: c.id
           },
-          authorize?: false
+          AshBpmn.Scope.engine(scope)
         )
       end)
 
       # Schedule timers
-      timer_job_ids = schedule_approval_timers(task.id, escalate_in, expire_in)
+      timer_job_ids = schedule_approval_timers(task.id, escalate_in, expire_in, scope)
 
       if timer_job_ids != [] do
-        resources.human_task.attach_timers!(task, timer_job_ids, authorize?: false)
+        resources.human_task.attach_timers!(task, timer_job_ids, AshBpmn.Scope.engine(scope))
       end
 
       # Record event
@@ -210,7 +219,7 @@ defmodule AshBpmn.Changes.RequireApproval do
             "subject_id" => subject_id
           }
         },
-        authorize?: false
+        AshBpmn.Scope.engine(scope)
       )
 
       {:ok, result}
@@ -250,7 +259,7 @@ defmodule AshBpmn.Changes.RequireApproval do
 
   defp friendly_constraint_error(_error, _key), do: nil
 
-  defp schedule_approval_timers(task_id, escalate_in, expire_in) do
+  defp schedule_approval_timers(task_id, escalate_in, expire_in, scope) do
     ids = []
 
     ids =
@@ -261,10 +270,10 @@ defmodule AshBpmn.Changes.RequireApproval do
         {:ok, job} =
           AshBpmn.Runtime.Oban.insert(
             AshBpmn.Runtime.TimerWorker,
-            %{
+            AshBpmn.Scope.to_job_args(scope, %{
               "task_id" => task_id,
               "kind" => "escalate"
-            },
+            }),
             scheduled_at: scheduled_at
           )
 
@@ -280,10 +289,10 @@ defmodule AshBpmn.Changes.RequireApproval do
       {:ok, job} =
         AshBpmn.Runtime.Oban.insert(
           AshBpmn.Runtime.TimerWorker,
-          %{
+          AshBpmn.Scope.to_job_args(scope, %{
             "task_id" => task_id,
             "kind" => "expire"
-          },
+          }),
           scheduled_at: scheduled_at
         )
 

@@ -63,32 +63,47 @@ defmodule AshBpmn.Web.DefaultTaskActions do
 
   ## Note on authorization
 
-  These handlers use `authorize?: false` by design. The host's `TaskActions`
-  swap point is where policy enforcement belongs. The web layer only provides
-  the generic UI; hosts wrap it with their own auth context.
+  These handlers used to pass `Scope.engine(scope)`, on the argument that the
+  host's `TaskActions` swap point is where enforcement belongs. That argument is
+  still true about *host* policy, and it was never true about the default
+  implementation shipping an unauthenticated path into the task table.
+
+  They now run through `AshBpmn.Scope`, which carries the `:actor` and `:tenant`
+  from the web layer's `opts` and marks the call as engine work. So a host that
+  adds policies to its HumanTask resource gets them enforced here, and a host
+  that does not is exactly where it was.
+
+  Pass `actor:` in `opts` from the LiveView's `current_user`. Without one these
+  handlers still work — the engine bypass is what authorizes them — but nothing
+  downstream can tell who claimed the task, which is the thing a work queue
+  exists to record.
   """
 
   @behaviour AshBpmn.Web.TaskActions
 
   require Ash.Query
 
+  alias AshBpmn.Scope
+
   @impl true
   def claim(task_id, principal, opts) do
     {:ok, %{human_task: human_task_mod, task_candidate: task_candidate_mod}} =
       AshBpmn.Resources.for_domain(Keyword.fetch!(opts, :domain))
+
+    scope = Scope.from_opts(opts)
 
     # Verify candidacy before claiming
     task =
       human_task_mod
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(id == ^task_id)
-      |> Ash.read_one!(authorize?: false)
+      |> Ash.read_one!(Scope.engine(scope))
 
     candidates =
       task_candidate_mod
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(task_id == ^task_id)
-      |> Ash.read!(authorize?: false)
+      |> Ash.read!(Scope.engine(scope))
 
     is_candidate =
       Enum.any?(candidates, fn c ->
@@ -102,7 +117,7 @@ defmodule AshBpmn.Web.DefaultTaskActions do
           assignee_type: principal[:type],
           assignee_id: principal[:id]
         },
-        authorize?: false
+        Scope.engine(scope)
       )
     else
       {:error, "not a candidate for this task"}
@@ -114,11 +129,13 @@ defmodule AshBpmn.Web.DefaultTaskActions do
     {:ok, %{human_task: human_task_mod}} =
       AshBpmn.Resources.for_domain(Keyword.fetch!(opts, :domain))
 
+    scope = Scope.from_opts(opts)
+
     task =
       human_task_mod
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(id == ^task_id)
-      |> Ash.read_one!(authorize?: false)
+      |> Ash.read_one!(Scope.engine(scope))
 
     outcome_atom =
       if is_atom(outcome), do: outcome, else: String.to_atom(outcome)
@@ -129,7 +146,7 @@ defmodule AshBpmn.Web.DefaultTaskActions do
         outcome: outcome_atom,
         comment: comment
       },
-      authorize?: false
+      Scope.engine(scope)
     )
   end
 
@@ -138,12 +155,14 @@ defmodule AshBpmn.Web.DefaultTaskActions do
     {:ok, %{human_task: human_task_mod}} =
       AshBpmn.Resources.for_domain(Keyword.fetch!(opts, :domain))
 
+    scope = Scope.from_opts(opts)
+
     task =
       human_task_mod
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(id == ^task_id)
-      |> Ash.read_one!(authorize?: false)
+      |> Ash.read_one!(Scope.engine(scope))
 
-    human_task_mod.delegate(task, :user, principal_id, authorize?: false)
+    human_task_mod.delegate(task, :user, principal_id, Scope.engine(scope))
   end
 end
