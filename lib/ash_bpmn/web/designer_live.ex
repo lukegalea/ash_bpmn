@@ -253,16 +253,20 @@ defmodule AshBpmn.Web.DesignerLive do
         {:ok, %{definition: definition_mod}} =
           AshBpmn.Resources.for_domain(@ash_bpmn_designer_domain)
 
-        opts = [authorize?: false]
+        opts = AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
 
         # A draft is edited in place until published; find it by key+status.
         # `do_filter/2` (not the filter macro) because the resource module is
         # only known at runtime — the macro resolves bare fields statically.
         definition =
           definition_mod
-          |> Ash.Query.for_read(:read, %{}, authorize?: false)
+          |> Ash.Query.for_read(
+            :read,
+            %{},
+            AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
+          )
           |> Ash.Query.do_filter(key: @ash_bpmn_designer_process_key, status: :draft)
-          |> Ash.read_one!(authorize?: false)
+          |> Ash.read_one!(AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns)))
           |> case do
             nil ->
               definition_mod.create!(
@@ -279,7 +283,10 @@ defmodule AshBpmn.Web.DesignerLive do
           end
 
         latest_published =
-          case definition_mod.latest_published(@ash_bpmn_designer_process_key, authorize?: false) do
+          case definition_mod.latest_published(
+                 @ash_bpmn_designer_process_key,
+                 AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
+               ) do
             {:ok, []} -> nil
             {:ok, [pub | _]} -> pub
             [] -> nil
@@ -300,7 +307,7 @@ defmodule AshBpmn.Web.DesignerLive do
 
         definition = socket.assigns.definition
 
-        opts = [authorize?: false]
+        opts = AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
 
         case definition_mod.save_xml(definition, xml, opts) do
           {:ok, updated} ->
@@ -324,7 +331,7 @@ defmodule AshBpmn.Web.DesignerLive do
           AshBpmn.Resources.for_domain(@ash_bpmn_designer_domain)
 
         definition = socket.assigns.definition
-        opts = [authorize?: false]
+        opts = AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
 
         case definition_mod.publish(definition, opts) do
           {:ok, published} ->

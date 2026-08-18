@@ -65,6 +65,54 @@ defmodule AshBpmn.Config do
   end
 
   @doc """
+  Returns the actor the engine acts as, or `nil` to keep the caller's own.
+
+  By default the engine keeps whoever was really acting — the person who
+  completed the task, or an `AshBpmn.SystemActor` for background work — and its
+  authority to write travels separately, in the private context flag
+  `AshBpmn.Checks.AshBpmnInteraction` recognises. That is the right default,
+  because it is what lets a host's ownership, provenance and audit derive from
+  the person rather than from the engine.
+
+  It stops working in one specific case, and it is worth stating precisely. Ash
+  builds one expression over a resource's policies in which a bypass
+  short-circuits only the policies declared **after** it. A host base resource
+  emits its policy set from `use`, which runs before anything the ash_bpmn
+  resource macro adds — so on a based resource, the host's policies come first
+  and the engine's bypass never gets the chance to skip them.
+
+  A host in that position has two ways out. Either put the engine's bypass at the
+  top of the base's own policy set:
+
+      policies do
+        bypass AshBpmn.Checks.AshBpmnInteraction do
+          authorize_if always()
+        end
+
+        # … the rest of the base's policies
+      end
+
+  or, if changing the base is not an option, tell the engine to act as an actor
+  the base already admits:
+
+      config :ash_bpmn,
+        engine_actor: {MyApp.Platform.SystemActor, :system, []}
+
+  The MFA is evaluated per call. The cost of the second option is the reason it
+  is not the default: every engine write is then attributed to that system actor,
+  and the human survives only in the columns the engine writes explicitly —
+  `started_by_id`, `decided_by_id`, `assignee_id`.
+  """
+  @spec engine_actor() :: term() | nil
+  def engine_actor do
+    case Application.get_env(:ash_bpmn, :engine_actor) do
+      nil -> nil
+      {m, f, a} -> apply(m, f, a)
+      actor -> actor
+    end
+  end
+
+  @doc """
   Returns the Oban testing mode: `nil` (production) or `:inline`.
 
   When `:inline`, the runtime's Oban shim executes workers synchronously

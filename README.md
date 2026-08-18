@@ -222,6 +222,9 @@ node dev/screenshots/capture.mjs
   workers, timers, joins, the reconciliation sweep, failure semantics.
 - [Assignment and maker-checker](documentation/topics/assignment-and-maker-checker.md)
   — candidates as rows, exclusion at resolution, delegation with accountability.
+- [Authorization and tenancy](documentation/topics/authorization-and-tenancy.md)
+  — the engine's own authority as one named policy, the tenant through jobs, and
+  sitting a work item on your base resource.
 - [What it refuses](documentation/topics/what-it-refuses.md) — the compile-time
   rejections, and the features deliberately absent.
 
@@ -231,6 +234,13 @@ node dev/screenshots/capture.mjs
 real Postgres; the designer is exercised through its LiveView contracts and, in
 a browser, through the `dev/` app. The reference integration lives in
 `ash_enterprise` (privileged access request approval).
+
+Authorization and tenancy are wired rather than declared-and-forgotten: the
+engine's own writes go through one named policy bypass instead of ninety
+`authorize?: false` options, `:tenant` reaches the rows it names, and a work item
+can sit on a host's base resource. See
+[authorization and tenancy](documentation/topics/authorization-and-tenancy.md),
+which also states the one ordering rule that comes with `:base`.
 
 The assignment resolver is the interface most likely to move on contact with a
 real org chart. Both callers now hand it one normalized spec shape — see

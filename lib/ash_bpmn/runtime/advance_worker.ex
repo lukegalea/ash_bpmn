@@ -21,6 +21,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
   alias AshBpmn.Config
   alias AshBpmn.Runtime.{DomainResolver, Interpreter}
+  alias AshBpmn.Scope
 
   def queue, do: Config.queue()
 
@@ -30,14 +31,21 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     node_id = args["node_id"]
     task_outcome = args["task_outcome"]
 
-    resources = DomainResolver.resolve!()
+    scope = Scope.from_job(args, :advance)
+    resources = DomainResolver.resolve!(scope.domain)
+
+    # Nobody is waiting on this: the request that enqueued the job returned long
+    # ago. The tenant and the domain travelled in the args because there is
+    # nothing else left to read them from, and the actor is a named system actor
+    # rather than nil so the trail says "the advance worker did this" instead of
+    # saying nothing.
 
     # 1. Load instance and token
     instance =
       resources.instance
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(id == ^instance_id)
-      |> Ash.read_one!(authorize?: false)
+      |> Ash.read_one!(Scope.engine(scope))
 
     # Find the active token at this node. We look by instance+node+status
     # rather than by token_id because the token_id in job args may reference
@@ -48,20 +56,20 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       |> Ash.Query.filter(instance_id == ^instance_id)
       |> Ash.Query.filter(node_id == ^node_id)
       |> Ash.Query.filter(status == :active)
-      |> Ash.read_one!(authorize?: false)
+      |> Ash.read_one!(Scope.engine(scope))
 
     # Idempotent: skip if token is not active
     if token.status != :active do
       {:ok, :skipped}
     else
       # 2. Claim token
-      case claim_token(resources, resources.token, token) do
+      case claim_token(resources, resources.token, token, scope) do
         {:ok, claimed_token} ->
           # Check max attempts before proceeding
           max = Config.max_attempts()
 
           if claimed_token.attempts > max do
-            mark_instance_failed(resources, instance, node_id, :action_failed)
+            mark_instance_failed(resources, instance, node_id, :action_failed, scope)
             {:ok, :failed_permanently}
           else
             # 3. Load graph and dispatch
@@ -69,7 +77,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
               resources.definition
               |> Ash.Query.for_read(:read)
               |> Ash.Query.filter(id == ^instance.definition_id)
-              |> Ash.read_one!(authorize?: false)
+              |> Ash.read_one!(Scope.engine(scope))
 
             graph = definition.graph
 
@@ -86,10 +94,11 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
                   instance,
                   claimed_token,
                   node_id,
-                  join_info
+                  join_info,
+                  scope
                 )
               else
-                ctx = build_context(instance, claimed_token, task_outcome)
+                ctx = build_context(instance, claimed_token, scope, task_outcome)
 
                 case Interpreter.dispatch(graph, node_id, node, ctx) do
                   {:ok, effects} ->
@@ -122,8 +131,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   # The :claim action's EnsureActiveInDb change re-reads the row inside the
   # transaction, so a token claimed by a concurrent worker fails here rather
   # than being executed twice.
-  defp claim_token(resources, _token_module, token) do
-    case resources.token.claim(token, authorize?: false) do
+  defp claim_token(resources, _token_module, token, scope) do
+    case resources.token.claim(token, Scope.engine(scope)) do
       {:ok, claimed} -> {:ok, claimed}
       {:error, _} -> {:error, :lost_race}
     end
@@ -131,10 +140,10 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
   # ── Parallel join handling ──────────────────────────────────────────────
 
-  defp handle_parallel_join(resources, graph, instance, token, join_node_id, join_info) do
+  defp handle_parallel_join(resources, graph, instance, token, join_node_id, join_info, scope) do
     # The arriving branch's token dies at the join; a single fresh token is
     # minted on the far side once every branch has arrived.
-    resources.token.kill!(token, authorize?: false)
+    resources.token.kill!(token, Scope.engine(scope))
 
     # Record node_entered event
     resources.process_event.create!(
@@ -145,7 +154,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         kind: :node_entered,
         data: %{}
       },
-      authorize?: false
+      Scope.engine(scope)
     )
 
     # Count how many tokens at this join node have been consumed/dead
@@ -157,12 +166,12 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       |> Ash.Query.filter(instance_id == ^instance.id)
       |> Ash.Query.filter(node_id == ^join_node_id)
       |> Ash.Query.filter(status in [:consumed, :dead])
-      |> Ash.read!(authorize?: false)
+      |> Ash.read!(Scope.engine(scope))
       |> length()
 
     if all_arrived >= length(waits_for) do
       # All siblings arrived — advance through the join
-      advance_from_join(resources, graph, instance, join_node_id)
+      advance_from_join(resources, graph, instance, join_node_id, scope)
     else
       # Not all siblings have arrived yet — check if remaining siblings
       # will ever arrive (i.e., are there active tokens on their source nodes?)
@@ -180,7 +189,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
           |> Ash.Query.filter(instance_id == ^instance.id)
           |> Ash.Query.filter(node_id == ^from_node)
           |> Ash.Query.filter(status in [:active, :executing])
-          |> Ash.read_one!(authorize?: false)
+          |> Ash.read_one!(Scope.engine(scope))
         end)
 
       if has_active_siblings do
@@ -188,12 +197,12 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       else
         # Remaining siblings will never arrive (exclusive gateway chose
         # a different path) — advance through the join now.
-        advance_from_join(resources, graph, instance, join_node_id)
+        advance_from_join(resources, graph, instance, join_node_id, scope)
       end
     end
   end
 
-  defp advance_from_join(resources, graph, instance, join_node_id) do
+  defp advance_from_join(resources, graph, instance, join_node_id, scope) do
     outgoing =
       graph["flows"]
       |> Map.values()
@@ -212,11 +221,11 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
               node_id: next_node_id,
               status: :active
             },
-            authorize?: false
+            Scope.engine(scope)
           )
-          |> resources.token.claim!(authorize?: false)
+          |> resources.token.claim!(Scope.engine(scope))
 
-        ctx = build_context(instance, new_token)
+        ctx = build_context(instance, new_token, scope)
 
         node = graph["nodes"][next_node_id]
 
@@ -240,8 +249,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
   # ── Context building ───────────────────────────────────────────────────
 
-  defp build_context(instance, token, task_outcome \\ nil) do
-    subject = load_subject(instance)
+  defp build_context(instance, token, scope, task_outcome \\ nil) do
+    subject = load_subject(instance, scope)
 
     assigns =
       if task_outcome do
@@ -254,11 +263,12 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       instance: instance,
       token: token,
       subject: subject,
-      assigns: assigns
+      assigns: assigns,
+      scope: scope
     }
   end
 
-  defp load_subject(instance) do
+  defp load_subject(instance, scope) do
     if instance.subject_type && instance.subject_id do
       try do
         # subject_type already includes "Elixir." prefix from to_string/1
@@ -267,7 +277,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         mod
         |> Ash.Query.for_read(:read)
         |> Ash.Query.filter(id == ^instance.subject_id)
-        |> Ash.read_one!(authorize?: false)
+        |> Ash.read_one!(Scope.subject(scope))
       rescue
         _ -> nil
       end
@@ -279,6 +289,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   # ── Effect application ───────────────────────────────────────────────────
 
   defp apply_effects(resources, effects, ctx) do
+    scope = ctx[:scope]
+
     # Phase 1: create tokens and tasks first, so later effects can reference
     # the ids the data layer assigned them.
     new_token_map =
@@ -286,7 +298,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       |> Enum.flat_map(fn
         {:tokens, token_attrs_list} ->
           Enum.map(token_attrs_list, fn attrs ->
-            token = resources.token.create!(attrs, authorize?: false)
+            token = resources.token.create!(attrs, Scope.engine(scope))
             {attrs[:node_id], token.id}
           end)
 
@@ -300,7 +312,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       |> Enum.flat_map(fn
         {:tasks, task_specs} ->
           Enum.map(task_specs, fn {task_ref, attrs} ->
-            task = resources.human_task.create!(attrs, authorize?: false)
+            task = resources.human_task.create!(attrs, Scope.engine(scope))
             {task_ref, task.id}
           end)
 
@@ -312,7 +324,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     # Phase 2: Apply remaining effects
     Enum.each(effects, fn
       {:consume_token, true} ->
-        resources.token.consume!(ctx[:token], authorize?: false)
+        resources.token.consume!(ctx[:token], Scope.engine(scope))
 
       {:park_token, true} ->
         :ok
@@ -323,7 +335,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
       {:events, event_attrs_list} ->
         Enum.each(event_attrs_list, fn attrs ->
-          resources.process_event.create!(attrs, authorize?: false)
+          resources.process_event.create!(attrs, Scope.engine(scope))
         end)
 
       {:jobs, job_list} ->
@@ -339,11 +351,11 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
               args
             end
 
-          AshBpmn.Runtime.Oban.insert(worker, args, opts)
+          AshBpmn.Runtime.Oban.insert(worker, Scope.to_job_args(scope, args), opts)
         end)
 
       {:complete_instance, outcome} ->
-        resources.instance.mark_completed!(ctx[:instance], outcome, authorize?: false)
+        resources.instance.mark_completed!(ctx[:instance], outcome, Scope.engine(scope))
         record_event(resources, ctx, :instance_completed, %{"outcome" => outcome})
 
       {:tasks, _task_specs} ->
@@ -356,25 +368,29 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         Enum.each(candidate_attrs_list, fn attrs ->
           resources.task_candidate.create!(
             Map.put(attrs, :task_id, task_id),
-            authorize?: false
+            Scope.engine(scope)
           )
         end)
 
       {:timers, {task_ref, timer_specs}} ->
-        attach_timers(resources, Map.fetch!(task_id_map, task_ref), timer_specs)
+        attach_timers(resources, Map.fetch!(task_id_map, task_ref), timer_specs, scope)
     end)
   end
 
   # Enqueues a task's timers and records the resulting job ids on the task, so
   # completing the task early can cancel them. Without the ids on the row there
   # is nothing to cancel and a decided task still fires its escalation.
-  defp attach_timers(_resources, _task_id, []), do: :ok
+  defp attach_timers(_resources, _task_id, [], _scope), do: :ok
 
-  defp attach_timers(resources, task_id, timer_specs) do
+  defp attach_timers(resources, task_id, timer_specs, scope) do
     job_ids =
       Enum.map(timer_specs, fn {worker, args, opts} ->
         {:ok, job} =
-          AshBpmn.Runtime.Oban.insert(worker, Map.put(args, "task_id", task_id), opts)
+          AshBpmn.Runtime.Oban.insert(
+            worker,
+            Scope.to_job_args(scope, Map.put(args, "task_id", task_id)),
+            opts
+          )
 
         job.id
       end)
@@ -383,17 +399,17 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       resources.human_task
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(id == ^task_id)
-      |> Ash.read_one!(authorize?: false)
+      |> Ash.read_one!(Scope.engine(scope))
 
-    resources.human_task.attach_timers!(task, job_ids, authorize?: false)
+    resources.human_task.attach_timers!(task, job_ids, Scope.engine(scope))
 
     :ok
   end
 
   # ── Instance failure ─────────────────────────────────────────────────────
 
-  defp mark_instance_failed(resources, instance, node_id, kind) do
-    resources.instance.mark_failed!(instance, authorize?: false)
+  defp mark_instance_failed(resources, instance, node_id, kind, scope) do
+    resources.instance.mark_failed!(instance, Scope.engine(scope))
 
     resources.process_event.create!(
       %{
@@ -402,11 +418,13 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         node_id: node_id,
         data: %{"reason" => "max_attempts_exceeded"}
       },
-      authorize?: false
+      Scope.engine(scope)
     )
   end
 
   defp record_event(resources, ctx, kind, extra) do
+    scope = ctx[:scope]
+
     attrs = %{
       instance_id: ctx[:instance].id,
       kind: kind,
@@ -420,6 +438,6 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         attrs
       end
 
-    resources.process_event.create!(attrs, authorize?: false)
+    resources.process_event.create!(attrs, Scope.engine(scope))
   end
 end

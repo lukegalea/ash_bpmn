@@ -115,6 +115,7 @@ defmodule AshBpmn.MixProject do
         "documentation/topics/the-designer.md",
         "documentation/topics/running-processes.md",
         "documentation/topics/assignment-and-maker-checker.md",
+        "documentation/topics/authorization-and-tenancy.md",
         "documentation/topics/what-it-refuses.md",
         "CHANGELOG.md"
       ],
@@ -125,6 +126,12 @@ defmodule AshBpmn.MixProject do
       groups_for_modules: [
         Resources: [~r/AshBpmn\.Resources/],
         Runtime: [~r/AshBpmn\.Runtime/, AshBpmn],
+        Authorization: [
+          AshBpmn.Scope,
+          AshBpmn.SystemActor,
+          AshBpmn.Config,
+          ~r/AshBpmn\.Checks/
+        ],
         Compiler: [AshBpmn.Compiler, AshBpmn.Expr],
         Web: [~r/AshBpmn\.Web/, AshBpmn.DesignerHook],
         Internals: ~r/.*/

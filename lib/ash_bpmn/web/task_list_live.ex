@@ -191,7 +191,7 @@ defmodule AshBpmn.Web.TaskListLive do
           AshBpmn.Resources.for_domain(@ash_bpmn_tasklist_domain)
 
         principal_ids = socket.assigns.principal_ids
-        opts = [authorize?: false]
+        opts = AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
 
         all_tasks =
           human_task_mod

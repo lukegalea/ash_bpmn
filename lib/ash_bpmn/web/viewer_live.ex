@@ -105,7 +105,7 @@ defmodule AshBpmn.Web.ViewerLive do
         if is_nil(instance_id) do
           socket
         else
-          opts = [authorize?: false]
+          opts = AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
 
           instance =
             instance_mod
