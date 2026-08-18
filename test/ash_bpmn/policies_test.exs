@@ -74,6 +74,18 @@ defmodule AshBpmn.PoliciesTest do
       end
     end
 
+    test "a tenant on a resource that is not tenant-scoped is harmless" do
+      # The LiveViews now always pass `tenant: assigns[:current_tenant]`, so a
+      # host with tenancy of its own but untenanted BPMN tables sends a tenant to
+      # a resource that has no strategy for one. Ash stores it and the data layer
+      # ignores it -- worth pinning, because the alternative would be a break in
+      # every task list of every such host.
+      assert {:ok, _} =
+               AshBpmn.Test.HumanTask
+               |> Ash.Query.for_read(:read)
+               |> Ash.read(Scope.engine(%Scope{tenant: Ecto.UUID.generate()}))
+    end
+
     test "the check describes itself, so a policy breakdown reads" do
       assert AshBpmn.Checks.AshBpmnInteraction.describe([]) =~ "ash_bpmn"
     end
