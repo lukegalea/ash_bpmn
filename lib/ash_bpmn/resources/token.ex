@@ -97,6 +97,20 @@ defmodule AshBpmn.Resources.Token do
           public? true
         end
 
+        # Routing signals promoted by a business rule task, and read by the gateways after it
+        # as `routing.<name>` in FEEL.
+        #
+        # This is the one place a token carries anything beyond node ids and status, and the
+        # exception is deliberately narrow. Usage rule 5 says tokens carry routing, not
+        # business data, and a free-form map on the token is exactly how that rule gets eroded
+        # -- so the interpreter enforces the shape rather than the documentation asking for it:
+        # scalars only, short names, short values, and few of them. A decision's full output
+        # never lands here; it goes to the host's own record and to a process event.
+        attribute :routing, :map do
+          default %{}
+          public? true
+        end
+
         if unquote(tenant?) do
           attribute :organization_id, :uuid do
             allow_nil? false
@@ -121,7 +135,14 @@ defmodule AshBpmn.Resources.Token do
         end
 
         create :create do
-          accept [:node_id, :status, :parent_token_id, :fork_id, :attempts, :instance_id]
+          accept [:node_id, :status, :parent_token_id, :fork_id, :attempts, :instance_id, :routing]
+        end
+
+        # Promotion is its own action rather than part of `:consume`, because it happens on a
+        # token that is still executing and because the audit log records action names:
+        # "promote_routing" says what happened where a generic `:update` would not.
+        update :promote_routing do
+          accept [:routing]
         end
 
         update :claim do
@@ -162,6 +183,7 @@ defmodule AshBpmn.Resources.Token do
         define :consume, action: :consume
         define :kill, action: :kill
         define :reactivate, action: :reactivate
+        define :promote_routing, action: :promote_routing
       end
     end
   end

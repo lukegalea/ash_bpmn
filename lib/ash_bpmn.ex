@@ -31,8 +31,16 @@ defmodule AshBpmn do
   """
   @spec start_instance!(module(), keyword()) :: map()
   def start_instance!(domain, opts) do
-    {:ok, instance} = start_instance(domain, opts)
-    instance
+    # Re-raise the original exception rather than letting a `{:ok, _} =` match turn it into a
+    # MatchError. The README says the bang variants do this; they did not, and the difference
+    # matters -- a MatchError wrapping a RuntimeError hides both the message and the
+    # stacktrace of the thing that actually went wrong, which for a failing node is the only
+    # information anyone wants.
+    case start_instance(domain, opts) do
+      {:ok, instance} -> instance
+      {:error, %{__exception__: true} = exception} -> raise exception
+      {:error, reason} -> raise "AshBpmn.start_instance! failed: #{inspect(reason)}"
+    end
   end
 
   @spec start_instance(module(), keyword()) :: {:ok, map()} | {:error, term()}

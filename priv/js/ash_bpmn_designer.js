@@ -62,6 +62,51 @@ export const ashBpmnModdle = {
         { name: 'timers', type: 'Timers' }
       ]
     },
+    // --- businessRuleTask -------------------------------------------------
+    // A decision reference, its declared inputs, and the signals it promotes onto the token.
+    // These must be registered here or bpmn-js drops them on save: moddle only round-trips
+    // extension elements it has a descriptor for, and the loss is silent.
+    {
+      name: 'Decision',
+      superClass: ['Element'],
+      properties: [
+        { name: 'ref', type: 'String', isAttr: true },
+        { name: 'binding', type: 'String', isAttr: true },
+        { name: 'version', type: 'String', isAttr: true }
+      ]
+    },
+    {
+      name: 'Inputs',
+      superClass: ['Element'],
+      properties: [
+        { name: 'input', type: 'Input', isMany: true }
+      ]
+    },
+    {
+      name: 'Input',
+      superClass: ['Element'],
+      properties: [
+        { name: 'name', type: 'String', isAttr: true },
+        // A FEEL expression over the process context, evaluated by the engine before the
+        // decision is called -- the host is never asked to evaluate anything.
+        { name: 'from', type: 'String', isAttr: true }
+      ]
+    },
+    {
+      name: 'Promote',
+      superClass: ['Element'],
+      properties: [
+        { name: 'signal', type: 'Signal', isMany: true }
+      ]
+    },
+    {
+      name: 'Signal',
+      superClass: ['Element'],
+      properties: [
+        { name: 'name', type: 'String', isAttr: true },
+        { name: 'required', type: 'String', isAttr: true }
+      ]
+    },
     {
       name: 'Candidates',
       superClass: ['Element'],

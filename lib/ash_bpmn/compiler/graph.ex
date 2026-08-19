@@ -73,7 +73,7 @@ defmodule AshBpmn.Compiler.Graph do
 
         Errors.error(
           id,
-          "Node '#{id}' of type '#{type}' is not supported; the executable subset is: startEvent, endEvent, userTask, serviceTask, exclusiveGateway, parallelGateway, sequenceFlow"
+          "Node '#{id}' of type '#{type}' is not supported; the executable subset is: #{Xml.supported_subset_message()}"
         )
       end)
 
@@ -85,16 +85,7 @@ defmodule AshBpmn.Compiler.Graph do
     all_children = Xml.get_element_children(process_xml)
 
     supported_local_names =
-      MapSet.new([
-        "startEvent",
-        "endEvent",
-        "userTask",
-        "serviceTask",
-        "exclusiveGateway",
-        "parallelGateway",
-        "sequenceFlow",
-        "extensionElements"
-      ])
+      MapSet.new(Xml.supported_node_types() ++ ["sequenceFlow", "extensionElements"])
 
     Enum.flat_map(all_children, fn child ->
       type = Xml.local_name(child)
@@ -115,7 +106,7 @@ defmodule AshBpmn.Compiler.Graph do
             [
               Errors.error(
                 id,
-                "Node '#{id}' of type '#{type}' is not supported; the executable subset is: startEvent, endEvent, userTask, serviceTask, exclusiveGateway, parallelGateway, sequenceFlow"
+                "Node '#{id}' of type '#{type}' is not supported; the executable subset is: #{Xml.supported_subset_message()}"
               )
             ]
           end
@@ -167,6 +158,33 @@ defmodule AshBpmn.Compiler.Graph do
         {:error, error} ->
           {:error, error}
       end
+    end
+  end
+
+  # A business rule task references a decision by name and declares, explicitly, what goes in
+  # and what comes back out into routing. Both halves are deliberate.
+  #
+  # Inputs are declared rather than "the whole subject" so a decision cannot quietly start
+  # depending on a field nobody meant to expose to it, and so the engine -- not the host --
+  # evaluates the expressions.
+  #
+  # Outputs are *promoted* one named scalar at a time rather than merged wholesale, because a
+  # token carries routing and not business data. The decision's full result goes to the host's
+  # own record and to a process event; only the declared signals reach the token.
+  defp build_node_config(node, "businessRuleTask") do
+    id = Xml.element_attr(node, "id")
+    ext = Xml.find_extension_elements(node)
+
+    case Xml.find_ash_elements(ext, "decision") do
+      [] ->
+        {:error,
+         Errors.error(
+           id,
+           "businessRuleTask '#{id}' must have an ash:decision element with a non-empty ref attribute"
+         )}
+
+      [decision | _] ->
+        build_business_rule_config(id, ext, decision)
     end
   end
 
@@ -309,6 +327,122 @@ defmodule AshBpmn.Compiler.Graph do
 
   defp build_node_config(_node, type) when type in ["startEvent", "parallelGateway"] do
     {:ok, %{}}
+  end
+
+
+  defp build_business_rule_config(id, ext, decision) do
+    ref = Xml.element_attr(decision, "ref")
+    binding = Xml.element_attr(decision, "binding") || "latest"
+    version = Xml.element_attr(decision, "version")
+
+    cond do
+      ref == nil or String.trim(ref) == "" ->
+        {:error,
+         Errors.error(id, "businessRuleTask '#{id}' ash:decision must have a non-empty ref attribute")}
+
+      binding not in ["latest", "pinned"] ->
+        {:error,
+         Errors.error(
+           id,
+           "businessRuleTask '#{id}' ash:decision binding must be \"latest\" or \"pinned\", got #{inspect(binding)}"
+         )}
+
+      # A pinned binding without a version is the dangerous default: it reads as "this will not
+      # move under me" and behaves as "latest".
+      binding == "pinned" and (version == nil or String.trim(version) == "") ->
+        {:error,
+         Errors.error(id, "businessRuleTask '#{id}' ash:decision binding=\"pinned\" requires a version")}
+
+      true ->
+        with {:ok, inputs} <- build_decision_inputs(id, ext),
+             {:ok, promote} <- build_decision_promotions(id, ext) do
+          {:ok,
+           %{
+             "decision" => %{"ref" => String.trim(ref), "binding" => binding, "version" => version},
+             "inputs" => inputs,
+             "promote" => promote
+           }}
+        end
+    end
+  end
+
+  defp build_decision_inputs(node_id, ext) do
+    ext
+    |> Xml.find_ash_elements("inputs")
+    |> Enum.flat_map(&Xml.find_ash_elements([&1], "input"))
+    |> Enum.reduce_while({:ok, []}, fn input, {:ok, acc} ->
+      name = Xml.element_attr(input, "name")
+      from = Xml.element_attr(input, "from")
+
+      cond do
+        name == nil or String.trim(name) == "" ->
+          {:halt,
+           {:error, Errors.error(node_id, "businessRuleTask '#{node_id}' ash:input needs a name")}}
+
+        from == nil or String.trim(from) == "" ->
+          {:halt,
+           {:error,
+            Errors.error(node_id, "businessRuleTask '#{node_id}' ash:input '#{name}' needs a from expression")}}
+
+        true ->
+          # The `from` expression is validated here, at publish time, for the same reason a
+          # gateway condition is: a decision node that cannot build its inputs should fail
+          # when someone publishes it, not when an instance reaches it.
+          case AshBpmn.Feel.compile(from) do
+            {:ok, stored} ->
+              {:cont, {:ok, [%{"name" => String.trim(name), "from" => stored} | acc]}}
+
+            {:error, message} ->
+              {:halt,
+               {:error,
+                Errors.error(
+                  node_id,
+                  "businessRuleTask '#{node_id}' ash:input '#{name}' from expression is not valid FEEL: #{message}"
+                )}}
+          end
+      end
+    end)
+    |> case do
+      {:ok, inputs} -> {:ok, Enum.reverse(inputs)}
+      error -> error
+    end
+  end
+
+  @max_promoted_signals 8
+
+  defp build_decision_promotions(node_id, ext) do
+    signals =
+      ext
+      |> Xml.find_ash_elements("promote")
+      |> Enum.flat_map(&Xml.find_ash_elements([&1], "signal"))
+
+    names = Enum.map(signals, &(Xml.element_attr(&1, "name") || ""))
+
+    cond do
+      Enum.any?(names, &(String.trim(&1) == "")) ->
+        {:error, Errors.error(node_id, "businessRuleTask '#{node_id}' ash:signal needs a name")}
+
+      length(Enum.uniq(names)) != length(names) ->
+        {:error,
+         Errors.error(node_id, "businessRuleTask '#{node_id}' promotes the same signal name twice")}
+
+      length(signals) > @max_promoted_signals ->
+        {:error,
+         Errors.error(
+           node_id,
+           "businessRuleTask '#{node_id}' promotes #{length(signals)} signals; at most " <>
+             "#{@max_promoted_signals} are allowed -- a token carries routing, not business data"
+         )}
+
+      true ->
+        {:ok,
+         Enum.map(signals, fn signal ->
+           %{
+             "name" => signal |> Xml.element_attr("name") |> String.trim(),
+             "required" => Xml.element_attr(signal, "required") in ["true", "1"]
+           }
+         end)}
+    end
   end
 
   defp build_user_task_config(config, node) do

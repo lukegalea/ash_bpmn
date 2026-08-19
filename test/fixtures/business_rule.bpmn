@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_business_rule">
+  <bpmn2:process id="Process_business_rule" isExecutable="true">
+    <bpmn2:startEvent id="Start">
+      <bpmn2:outgoing>F_start</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <!-- Ask the decision what tier this is, and promote only that one answer onto the token. -->
+    <bpmn2:businessRuleTask id="AssessRisk" name="Assess risk">
+      <bpmn2:extensionElements>
+        <ash:decision ref="risk.tier" binding="latest"/>
+        <ash:inputs>
+          <ash:input name="amount" from="subject.amount"/>
+        </ash:inputs>
+        <ash:promote>
+          <ash:signal name="tier" required="true"/>
+        </ash:promote>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_start</bpmn2:incoming>
+      <bpmn2:outgoing>F_assessed</bpmn2:outgoing>
+    </bpmn2:businessRuleTask>
+
+    <bpmn2:exclusiveGateway id="Route" default="F_low">
+      <bpmn2:incoming>F_assessed</bpmn2:incoming>
+      <bpmn2:outgoing>F_high</bpmn2:outgoing>
+      <bpmn2:outgoing>F_low</bpmn2:outgoing>
+    </bpmn2:exclusiveGateway>
+
+    <bpmn2:serviceTask id="Escalate">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="escalate"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_high</bpmn2:incoming>
+      <bpmn2:outgoing>F_escalated</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:serviceTask id="AutoApprove">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="auto_approve"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_low</bpmn2:incoming>
+      <bpmn2:outgoing>F_approved</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="EndHigh">
+      <bpmn2:extensionElements><ash:taskConfig outcome="escalated"/></bpmn2:extensionElements>
+      <bpmn2:incoming>F_escalated</bpmn2:incoming>
+    </bpmn2:endEvent>
+    <bpmn2:endEvent id="EndLow">
+      <bpmn2:extensionElements><ash:taskConfig outcome="approved"/></bpmn2:extensionElements>
+      <bpmn2:incoming>F_approved</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F_start" sourceRef="Start" targetRef="AssessRisk"/>
+    <bpmn2:sequenceFlow id="F_assessed" sourceRef="AssessRisk" targetRef="Route"/>
+    <bpmn2:sequenceFlow id="F_high" sourceRef="Route" targetRef="Escalate">
+      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression"
+        language="feel">routing.tier = "high"</bpmn2:conditionExpression>
+    </bpmn2:sequenceFlow>
+    <bpmn2:sequenceFlow id="F_low" sourceRef="Route" targetRef="AutoApprove"/>
+    <bpmn2:sequenceFlow id="F_escalated" sourceRef="Escalate" targetRef="EndHigh"/>
+    <bpmn2:sequenceFlow id="F_approved" sourceRef="AutoApprove" targetRef="EndLow"/>
+  </bpmn2:process>
+</bpmn2:definitions>

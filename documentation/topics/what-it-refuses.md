@@ -76,6 +76,31 @@ The compiler rejects, each with the offending element's id in the error:
   documented in the source plan; owning the small subset we actually execute was
   cheaper than the bridge alone would have been.
 
+## Refused in the decision seam
+
+- **A decision reference inside a gateway condition.** It looks like a small
+  convenience and it is not one. A `conditionExpression` is evaluated in-process
+  and is pure; dereferencing a decision there puts a database read, a possible
+  failure and a possible timeout inside the one code path that has none of them,
+  and it puts the decision back *inside* the graph, which is the line this package
+  exists to hold. The BPMN and DMN specifications agree, and so does the
+  composition that replaces it: a business rule task promotes a signal and the
+  gateway reads `routing.<name>` in ordinary FEEL. One more box on the diagram, and
+  the decision is visible on it rather than hidden in a condition.
+- **A rule table in the diagram.** The graph carries a decision *reference*. What a
+  decision is, where it lives, how it is versioned and who may change it belong to
+  the host's `AshBpmn.DecisionResolver`. A rule expressed in the graph is a rule
+  every non-process caller bypasses.
+- **Promoting anything but declared scalars.** Only signals named in `ash:promote`
+  reach the token, each must be a scalar, and names and values are length-bounded.
+  A decision's full output goes to the host's own record and to a
+  `:decision_evaluated` event. This is what keeps "tokens carry routing, not
+  business data" a checkable property rather than a request — a free-form map on
+  the token is precisely how that rule erodes.
+- **`binding="pinned"` without a version.** It reads as "this will not move under
+  me" and would behave as "latest". Refusing it is cheaper than explaining it after
+  an incident.
+
 ## Refused in the editor
 
 - **Hiding the bpmn.io watermark.** Licence, not styling. See

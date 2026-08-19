@@ -52,6 +52,41 @@ defmodule AshBpmn.Config do
     end
   end
 
+  @doc """
+  The configured `AshBpmn.DecisionResolver`, or a raise explaining what to set.
+
+  Unlike the invoker and the assignment resolver, this one is only needed by documents that
+  contain a `businessRuleTask` — so it is looked up lazily and, more importantly, checked at
+  **publish** time by the compiler. A process with a decision node and no resolver is a compile
+  error naming this key, rather than an instance that fails when it first reaches the node.
+  """
+  @spec decision_resolver!() :: module()
+  def decision_resolver! do
+    case decision_resolver() do
+      nil ->
+        raise """
+        ash_bpmn: :decision_resolver is not configured, but this process contains a
+        businessRuleTask.
+
+        Add to your config:
+
+            config :ash_bpmn,
+              decision_resolver: MyApp.Bpmn.Decisions
+
+        The module must implement the `AshBpmn.DecisionResolver` behaviour. `ash_decisions` is
+        the intended implementation, but any module answering `decide/3` and `exists?/1` will
+        do -- the engine deliberately does not know what a decision is.
+        """
+
+      module ->
+        module
+    end
+  end
+
+  @doc "The configured decision resolver, or nil. Use when absence is a legitimate state."
+  @spec decision_resolver() :: module() | nil
+  def decision_resolver, do: Application.get_env(:ash_bpmn, :decision_resolver)
+
   @doc "Returns the Oban queue name for BPMN jobs (default `:bpmn`)."
   @spec queue() :: atom()
   def queue do

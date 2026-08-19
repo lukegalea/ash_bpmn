@@ -10,7 +10,7 @@ defmodule AshBpmn.Compiler.Xml do
   # The ash: namespace URI is https://github.com/lukegalea/ash_bpmn/ns, but it
   # is never compared against: xmerl scans without :namespace_conform, so
   # extension attributes arrive as prefixed atoms and are matched by prefix.
-  @supported_node_types ~w(startEvent endEvent userTask serviceTask exclusiveGateway parallelGateway)
+  @supported_node_types ~w(startEvent endEvent userTask serviceTask businessRuleTask exclusiveGateway parallelGateway)
   @supported_node_types_with_prefix Enum.map(@supported_node_types, &"bpmn2:#{&1}")
 
   @spec parse(String.t()) :: {:ok, tuple()} | {:error, String.t()}
@@ -257,6 +257,20 @@ defmodule AshBpmn.Compiler.Xml do
 
   @spec supported_node_type?(String.t()) :: boolean()
   def supported_node_type?(type), do: type in @supported_node_types
+
+  @doc """
+  The executable subset, as node type names.
+
+  Exposed because the same list was previously written out by hand in four places -- two
+  membership checks and two error messages -- and adding a node type meant finding all four.
+  """
+  @spec supported_node_types() :: [String.t()]
+  def supported_node_types, do: @supported_node_types
+
+  @doc "The subset, phrased for an error message a modeller will read."
+  @spec supported_subset_message() :: String.t()
+  def supported_subset_message,
+    do: Enum.join(@supported_node_types ++ ["sequenceFlow"], ", ")
 
   @spec flow_type?(String.t()) :: boolean()
   def flow_type?("sequenceFlow"), do: true

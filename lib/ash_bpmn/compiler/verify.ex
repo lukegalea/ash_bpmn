@@ -29,7 +29,67 @@ defmodule AshBpmn.Compiler.Verify do
     # 6. Parallel gateway mixed mode rejection
     errors = errors ++ verify_parallel_gateways(nodes, flows, joins)
 
+    # 7. Business rule tasks: a configured resolver, and a decision that exists
+    errors = errors ++ verify_business_rule_tasks(nodes)
+
     errors
+  end
+
+  # Publishing a `businessRuleTask` against a decision that does not exist should fail here,
+  # where a person is looking at the diagram, rather than at three in the morning on the first
+  # instance that reaches the node.
+  #
+  # This asks the host a question and the host will answer it with a query. That is fine and
+  # worth stating plainly, because the surrounding project has a rule that policy checks must
+  # never query: the rule is about the per-request authorization path, and publishing is
+  # neither per-request nor authorization.
+  defp verify_business_rule_tasks(nodes) do
+    decision_nodes =
+      Enum.filter(nodes, fn {_id, node} -> node["type"] == "businessRuleTask" end)
+
+    case {decision_nodes, AshBpmn.Config.decision_resolver()} do
+      {[], _} ->
+        []
+
+      {[{id, _node} | _], nil} ->
+        [
+          Errors.error(
+            id,
+            "businessRuleTask '#{id}' needs a decision resolver, but none is configured. " <>
+              "Set `config :ash_bpmn, decision_resolver: MyApp.Bpmn.Decisions`."
+          )
+        ]
+
+      {decision_nodes, resolver} ->
+        Enum.flat_map(decision_nodes, fn {id, node} ->
+          ref = get_in(node, ["decision", "ref"])
+
+          # A resolver that cannot answer `exists?/1` -- because it is unreachable, or the
+          # host has not implemented it -- must not silently pass. Publishing an unverifiable
+          # reference is the thing this check exists to prevent.
+          case safe_exists?(resolver, ref) do
+            :ok ->
+              []
+
+            {:error, :missing} ->
+              [Errors.error(id, "businessRuleTask '#{id}' references decision '#{ref}', which does not exist")]
+
+            {:error, reason} ->
+              [
+                Errors.error(
+                  id,
+                  "businessRuleTask '#{id}': could not verify decision '#{ref}': #{inspect(reason)}"
+                )
+              ]
+          end
+        end)
+    end
+  end
+
+  defp safe_exists?(resolver, ref) do
+    if resolver.exists?(ref), do: :ok, else: {:error, :missing}
+  rescue
+    e -> {:error, Exception.message(e)}
   end
 
   defp verify_start_end(nodes) do

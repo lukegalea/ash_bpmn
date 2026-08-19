@@ -156,7 +156,8 @@ candidate list that silently disagrees with the role model is a bug you want
 
 The [Common Executable] subset that the 39,695-model corpus study says is what
 real processes actually use: start and end events, user and service tasks,
-exclusive gateways (with default flows), parallel fork and join. Gateway conditions
+**business rule tasks**, exclusive gateways (with default flows), parallel fork
+and join. Gateway conditions
 are written in **FEEL**, the DMN expression language (`subject.amount > 50000`,
 `task.outcome = "approved"`), validated at publish time and stored in the snapshot as source
 text. One language serves gateway conditions and DMN decision tables alike, which is why this

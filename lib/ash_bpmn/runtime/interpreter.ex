@@ -42,6 +42,9 @@ defmodule AshBpmn.Runtime.Interpreter do
       "serviceTask" ->
         service_task(graph, node_id, node, ctx)
 
+      "businessRuleTask" ->
+        business_rule_task(graph, node_id, node, ctx)
+
       "userTask" ->
         user_task(graph, node_id, node, ctx)
 
@@ -88,6 +91,177 @@ defmodule AshBpmn.Runtime.Interpreter do
   end
 
   # ── serviceTask ─────────────────────────────────────────────────────────
+
+  # ── businessRuleTask ─────────────────────────────────────────────────────
+
+  # The graph asks a question and routes on the answer; it does not know how the answer was
+  # reached. Everything about *what* a decision is belongs to the host's
+  # `AshBpmn.DecisionResolver`, which is the same arrangement service tasks and human tasks
+  # already have, and for the same reason: a rule inside the graph is a rule every other caller
+  # bypasses.
+  defp business_rule_task(graph, node_id, node, ctx) do
+    resolver = AshBpmn.Config.decision_resolver!()
+    decision = node["decision"] || %{}
+    ref = decision["ref"]
+
+    with {:ok, inputs} <- resolve_decision_inputs(node["inputs"] || [], ctx, node_id),
+         {:ok, raw} <- invoke_decision(resolver, ref, inputs, ctx, node_id),
+         {:ok, result} <- AshBpmn.DecisionResolver.normalize_result(raw),
+         {:ok, routing} <- promoted_signals(node["promote"] || [], result.outputs, node_id) do
+      outgoing = find_outgoing_flows(graph, node_id)
+
+      # Merged over what this token already carried, so a chain of decision nodes accumulates
+      # rather than overwrites. `follow_flows/3` reads it back out of the context and puts it
+      # on every child token it creates.
+      ctx = Map.put(ctx, :routing_override, Map.merge(current_routing(ctx), routing))
+
+      effects =
+        [
+          consume_token: true,
+          events: [
+            event_attrs(ctx, node_id, :node_completed),
+            event_attrs(ctx, node_id, :decision_evaluated, %{
+              "decision_ref" => ref,
+              "decision_version" => normalize_version(result[:version]),
+              "rule_ids" => result[:rule_ids] || [],
+              # The inputs, and only the *promoted* outputs. A decision's full result is the
+              # decision layer's record to keep, and duplicating it here would produce two logs
+              # that can disagree.
+              "inputs" => Map.new(inputs, fn {k, v} -> {k, inspect_value(v)} end),
+              "promoted" => routing
+            })
+          ]
+        ] ++ follow_flows(graph, outgoing, ctx)
+
+      {:ok, effects}
+    else
+      {:error, reason} ->
+        # Same convention as a service task: raise, so Oban retries and the instance fails
+        # after max_attempts rather than routing itself down a branch nobody chose.
+        raise "business rule task '#{node_id}' failed: #{inspect(reason)}"
+    end
+  end
+
+  defp resolve_decision_inputs(inputs, ctx, node_id) do
+    expr_ctx = build_expr_ctx(ctx)
+
+    Enum.reduce_while(inputs, {:ok, %{}}, fn input, {:ok, acc} ->
+      case AshBpmn.Feel.evaluate(AshBpmn.Feel.print(input["from"]), expr_ctx) do
+        {:ok, value} ->
+          {:cont, {:ok, Map.put(acc, input["name"], value)}}
+
+        {:error, reason} ->
+          {:halt,
+           {:error, "node #{node_id}: input '#{input["name"]}' could not be evaluated: #{reason}"}}
+      end
+    end)
+  end
+
+  defp invoke_decision(resolver, ref, inputs, ctx, node_id) do
+    case resolver.decide(ref, inputs, decision_context(ctx, node_id)) do
+      {:ok, result} -> {:ok, result}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, "decision resolver returned #{inspect(other)}"}
+    end
+  end
+
+  defp decision_context(ctx, node_id) do
+    %{
+      subject: ctx[:subject],
+      actor: ctx[:actor],
+      tenant: ctx[:tenant],
+      instance: ctx[:instance],
+      token: ctx[:token],
+      node_id: node_id
+    }
+  end
+
+  # A token carries routing, not business data, and this is where that stops being a
+  # convention and becomes a check. Only declared signals are promoted; each must be a scalar;
+  # names and values are length-bounded. A decision that hands back a nested map does not get
+  # to put it on the token.
+  @max_signal_name_bytes 64
+  @max_signal_value_bytes 256
+
+  defp promoted_signals(promote, outputs, node_id) do
+    Enum.reduce_while(promote, {:ok, %{}}, fn signal, {:ok, acc} ->
+      name = signal["name"]
+      # Look the signal up by string key, and fall back to scanning for an equivalent atom key
+      # rather than calling `String.to_atom/1` on it. The name comes out of tenant-authored
+      # BPMN XML, and creating an uncollectable atom from that is the exact defect the old
+      # expression language shipped with.
+      value = fetch_output(outputs, name)
+
+      cond do
+        value == :__absent__ and signal["required"] ->
+          {:halt,
+           {:error, "node #{node_id}: decision did not return required signal '#{name}'"}}
+
+        value == :__absent__ ->
+          {:cont, {:ok, acc}}
+
+        not scalar?(value) ->
+          {:halt,
+           {:error,
+            "node #{node_id}: signal '#{name}' is #{inspect(value, limit: 3)}, which is not a scalar; " <>
+              "a token carries routing, not business data"}}
+
+        byte_size(name) > @max_signal_name_bytes ->
+          {:halt, {:error, "node #{node_id}: signal name '#{name}' is too long"}}
+
+        byte_size(to_string_value(value)) > @max_signal_value_bytes ->
+          {:halt, {:error, "node #{node_id}: signal '#{name}' has an over-long value"}}
+
+        true ->
+          {:cont, {:ok, Map.put(acc, name, to_string_value(value))}}
+      end
+    end)
+  end
+
+  defp fetch_output(outputs, name) do
+    case Map.fetch(outputs, name) do
+      {:ok, value} ->
+        value
+
+      :error ->
+        Enum.find_value(outputs, :__absent__, fn {key, value} ->
+          if is_atom(key) and Atom.to_string(key) == name, do: value
+        end)
+    end
+  end
+
+  defp scalar?(value),
+    do: is_binary(value) or is_number(value) or is_boolean(value) or is_nil(value) or
+          is_struct(value, Decimal) or is_atom(value)
+
+  # Stored as strings so the token's jsonb round-trips to exactly what FEEL will compare
+  # against, rather than to whatever the JSON encoder chose.
+  defp to_string_value(nil), do: ""
+  defp to_string_value(value) when is_boolean(value), do: to_string(value)
+  defp to_string_value(%Decimal{} = value), do: Decimal.to_string(value, :normal)
+  defp to_string_value(value) when is_binary(value), do: value
+  defp to_string_value(value), do: to_string(value)
+
+  defp current_routing(ctx) do
+    cond do
+      is_map(ctx[:routing_override]) ->
+        ctx[:routing_override]
+
+      match?(%{routing: routing} when is_map(routing), ctx[:token]) ->
+        ctx[:token].routing
+
+      true ->
+        %{}
+    end
+  end
+
+  defp normalize_version(nil), do: nil
+  defp normalize_version(version) when is_binary(version), do: version
+  defp normalize_version(version), do: to_string(version)
+
+  defp inspect_value(%Decimal{} = value), do: Decimal.to_string(value, :normal)
+  defp inspect_value(value) when is_binary(value) or is_number(value) or is_boolean(value), do: value
+  defp inspect_value(value), do: inspect(value, limit: 5)
 
   defp service_task(graph, node_id, node, ctx) do
     action = node["action"]
@@ -332,7 +506,11 @@ defmodule AshBpmn.Runtime.Interpreter do
            %{
              instance_id: ctx[:instance].id,
              node_id: target_node_id,
-             status: :active
+             status: :active,
+             # Routing travels down the graph with the tokens. A signal promoted by a decision
+             # node is read by a gateway further on, and there is nowhere else for it to live:
+             # the token is the only thing that exists per-branch.
+             routing: current_routing(ctx)
            }
          ]},
         {:jobs, [{AshBpmn.Runtime.AdvanceWorker, build_advance_args(ctx, target_node_id), []}]}
@@ -375,7 +553,9 @@ defmodule AshBpmn.Runtime.Interpreter do
     %{
       "subject" => AshBpmn.Feel.to_feel_value(ctx[:subject]),
       "task" => Map.get(assigns, "task") || %{},
-      "routing" => Map.get(assigns, "routing") || %{}
+      # Routing comes off the token, not out of assigns: it is per-branch state that a
+      # business rule task promoted onto this token's ancestors, and assigns is per-call.
+      "routing" => AshBpmn.Feel.to_feel_value(current_routing(ctx))
     }
     |> Map.merge(assigns)
   end

@@ -64,20 +64,32 @@ gateway conditions, never in resolver specs, never in the invoker.
    FEEL numbers are decimal, so a plain Elixir integer in the context makes every
    numeric comparison a type error, which becomes `null`, which becomes a silently
    wrong branch.
-10. **Actions are idempotent under redelivery.** Node execution may run twice
+10. **A business rule task asks; it never decides.** `businessRuleTask` resolves to
+    the host's `AshBpmn.DecisionResolver`, the third seam beside `ActionInvoker` and
+    `AssignmentResolver`. The graph carries a decision *reference*, declared FEEL
+    inputs, and the named scalar signals to promote onto the token -- and nothing
+    else. Never put a rule table in the diagram: a rule in the graph is a rule every
+    other caller bypasses, which is the defect the architectural line exists to
+    prevent. The reference is verified at publish time, so a diagram cannot ship
+    against a decision that does not exist.
+11. **A gateway condition is FEEL, never a decision reference.** The composition is
+    business rule task -> promote a signal -> gateway reads `routing.<name>`. A
+    gateway that dereferenced a decision would do I/O inside a code path that is
+    otherwise pure and in-process, and would put the decision back inside the graph.
+12. **Actions are idempotent under redelivery.** Node execution may run twice
     (Oban redelivery). The token claim gate makes double-advance safe; your
     `ActionInvoker` callbacks must tolerate a second invocation.
-11. **Engine calls go through `AshBpmn.Scope`, never `authorize?: false`.** Every
+13. **Engine calls go through `AshBpmn.Scope`, never `authorize?: false`.** Every
     internal call passes `AshBpmn.Scope.engine/2`, which carries the actor and the
     tenant and marks the call for the bypass each generated resource declares on
     `AshBpmn.Checks.AshBpmnInteraction`. There is exactly one exception —
     `AshBpmn.Scope.subject/2`, for reading the *host's* subject, which no ash_bpmn
     policy governs — and a test fails the build if a second one appears.
-12. **Pass the tenant, and pass it explicitly.** `AshBpmn.start_instance/2` takes
+14. **Pass the tenant, and pass it explicitly.** `AshBpmn.start_instance/2` takes
     `:tenant`; operations on a record already loaded infer it from that record.
     Background jobs carry the tenant and the domain in their args, because a job
     outlives the process that enqueued it and has nothing else to read them from.
-13. **A work item can sit on your base resource.** Every resource macro takes
+15. **A work item can sit on your base resource.** Every resource macro takes
     `:base` and `:base_opts`, so a human task inherits whatever your application
     arranged for every other record it owns. One ordering rule comes with it: a
     bypass in Ash short-circuits only the policies declared *after* it, and a base
