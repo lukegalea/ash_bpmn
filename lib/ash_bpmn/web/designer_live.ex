@@ -74,7 +74,9 @@ defmodule AshBpmn.Web.DesignerLive do
 
       @ash_bpmn_designer_domain unquote(domain)
       @ash_bpmn_designer_process_key unquote(process_key)
-      @ash_bpmn_designer_actor_mfa unquote(Macro.escape(actor_mfa))
+      # See the note in task_list_live.ex: escaping an option that is already AST stores
+      # the alias unexpanded, and it reaches `apply/3` as a tuple rather than a module.
+      @ash_bpmn_designer_actor_mfa unquote(actor_mfa)
 
       # ── Minimal template XML for new drafts ───────────────────────────────
 

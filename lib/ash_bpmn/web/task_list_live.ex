@@ -48,7 +48,14 @@ defmodule AshBpmn.Web.TaskListLive do
       import Phoenix.LiveView.Helpers
 
       @ash_bpmn_tasklist_domain unquote(domain)
-      @ash_bpmn_tasklist_principal_ids unquote(Macro.escape(principal_ids))
+      # NOT `Macro.escape/1`. The option arrives as AST -- `{{:__aliases__, _, [...]}, :fun,
+      # []}` -- and escaping it stores the AST *of that AST*, so the module reaches
+      # `apply/3` as an unexpanded alias tuple rather than an atom. Unquoting injects the AST
+      # where it is evaluated, which resolves the alias against the using module's context.
+      #
+      # The failure is `ArgumentError: 2nd argument: not an atom`, from `:erlang.apply/3`,
+      # with nothing pointing at the option that caused it.
+      @ash_bpmn_tasklist_principal_ids unquote(principal_ids)
       @ash_bpmn_tasklist_actions_mod unquote(task_actions_mod)
 
       @impl true
