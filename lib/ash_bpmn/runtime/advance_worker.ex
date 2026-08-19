@@ -268,23 +268,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     }
   end
 
-  defp load_subject(instance, scope) do
-    if instance.subject_type && instance.subject_id do
-      try do
-        # subject_type already includes "Elixir." prefix from to_string/1
-        mod = String.to_atom(instance.subject_type)
-
-        mod
-        |> Ash.Query.for_read(:read)
-        |> Ash.Query.filter(id == ^instance.subject_id)
-        |> Ash.read_one!(Scope.subject(scope))
-      rescue
-        _ -> nil
-      end
-    else
-      nil
-    end
-  end
+  defp load_subject(instance, scope), do: AshBpmn.Subject.load(instance, scope)
 
   # ── Effect application ───────────────────────────────────────────────────
 

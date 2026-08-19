@@ -52,9 +52,18 @@ gateway conditions, never in resolver specs, never in the invoker.
 8. **Keep the bpmn.io watermark.** The embedded bpmn-js designer renders a
    "Powered by bpmn.io" logo. The bpmn.io licence requires it to stay visible and
    unmodified. Do not hide, move or restyle it.
-9. **Expressions are data.** Gateway conditions use `AshBpmn.Expr` (parsed at
-   compile time, stored in the snapshot, JSON-able). Missing paths compare false.
-   Do not invent a second expression language in gateway conditions or resolvers.
+9. **Conditions are FEEL, and there is only one expression language.** Gateway
+   conditions are FEEL — the DMN expression language — validated at publish time and
+   stored in the snapshot as **source text**, not as a parsed tree, so an in-flight
+   instance keeps evaluating across engine upgrades. Equality is `=`, not `==`.
+   A missing path under an ordering comparison is `null`, not `false`, and a gateway
+   records it as a `:condition_null` event; a missing path under `=` is plain `false`
+   and is *not* recorded — that asymmetry is FEEL to spec and is a real diagnostic gap
+   worth knowing about. Go through `AshBpmn.Feel` and never call the engine directly,
+   and in particular put every context value through `AshBpmn.Feel.to_feel_value/2`:
+   FEEL numbers are decimal, so a plain Elixir integer in the context makes every
+   numeric comparison a type error, which becomes `null`, which becomes a silently
+   wrong branch.
 10. **Actions are idempotent under redelivery.** Node execution may run twice
     (Oban redelivery). The token claim gate makes double-advance safe; your
     `ActionInvoker` callbacks must tolerate a second invocation.

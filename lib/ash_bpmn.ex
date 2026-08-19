@@ -237,23 +237,7 @@ defmodule AshBpmn do
             invoker = Config.action_invoker!()
             scope = Scope.from_record(completed, opts)
 
-            # Load subject
-            subject =
-              if completed.subject_type && completed.subject_id do
-                try do
-                  # subject_type already includes "Elixir." prefix from to_string/1
-                  mod = String.to_atom(completed.subject_type)
-
-                  mod
-                  |> Ash.Query.for_read(:read)
-                  |> Ash.Query.filter(id == ^completed.subject_id)
-                  |> Ash.read_one!(Scope.subject(scope))
-                rescue
-                  _ -> nil
-                end
-              else
-                nil
-              end
+            subject = AshBpmn.Subject.load(completed, scope)
 
             ctx = %{
               subject: subject,
@@ -613,20 +597,22 @@ defmodule AshBpmn do
           node_config = graph["nodes"][task.node_id]
           default_flow = Enum.find(flows, fn f -> f["id"] == node_config["default_flow"] end)
 
+          # Routing after a human task. The subject is loaded rather than left nil so a
+          # post-approval gateway can route on the record as well as on the outcome --
+          # `subject.amount > 50000 and task.outcome = "approved"` is the shape every approval
+          # chain reaches for eventually, and it silently took the wrong branch while the
+          # subject here was hardcoded to nil.
+          expr_ctx = %{
+            "task" => %{"outcome" => to_string(outcome)},
+            "subject" => AshBpmn.Feel.to_feel_value(AshBpmn.Subject.load(instance, scope)),
+            "routing" => AshBpmn.Feel.to_feel_value(token.routing || %{})
+          }
+
           chosen =
             Enum.find(flows, fn flow ->
-              cond = flow["condition"]
-
-              if cond do
-                {:ok, result} =
-                  AshBpmn.Expr.eval(cond, %{
-                    "task" => %{"outcome" => to_string(outcome)},
-                    "subject" => nil
-                  })
-
-                result
-              else
-                false
+              case AshBpmn.Feel.evaluate_condition(flow["condition"], expr_ctx) do
+                {:ok, true} -> true
+                _ -> false
               end
             end)
 

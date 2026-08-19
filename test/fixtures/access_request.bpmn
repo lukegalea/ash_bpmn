@@ -104,13 +104,13 @@ SPDX-License-Identifier: MIT
       <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Validate"/>
     <bpmn2:sequenceFlow id="Flow_2" sourceRef="Validate" targetRef="PrivilegedGateway"/>
     <bpmn2:sequenceFlow id="Flow_Sec" sourceRef="PrivilegedGateway" targetRef="SecurityApproval">
-      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression">subject.is_privileged == true</bpmn2:conditionExpression>
+      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression" language="feel">subject.is_privileged = true</bpmn2:conditionExpression>
     </bpmn2:sequenceFlow>
     <bpmn2:sequenceFlow id="Flow_NotPriv" sourceRef="PrivilegedGateway" targetRef="ManagerApproval"/>
     <bpmn2:sequenceFlow id="Flow_SecOut" sourceRef="SecurityApproval" targetRef="Join_1"/>
     <bpmn2:sequenceFlow id="Flow_MgrOut" sourceRef="ManagerApproval" targetRef="MgrDecision"/>
     <bpmn2:sequenceFlow id="Flow_MgrApp" sourceRef="MgrDecision" targetRef="Join_1">
-      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression">task.outcome == "approved"</bpmn2:conditionExpression>
+      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression" language="feel">task.outcome = "approved"</bpmn2:conditionExpression>
     </bpmn2:sequenceFlow>
     <bpmn2:sequenceFlow id="Flow_MgrRej" sourceRef="MgrDecision" targetRef="End_rejected"/>
     <bpmn2:sequenceFlow id="Flow_JoinOut" sourceRef="Join_1" targetRef="Provision"/>

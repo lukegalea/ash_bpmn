@@ -494,15 +494,31 @@ defmodule AshBpmn.Compiler.Graph do
               nil
 
             expr_el ->
+              # BPMN lets a formal expression declare its language. We accept FEEL and
+              # nothing else -- and say so rather than ignoring the attribute, because a
+              # document written against JUEL or Groovy would otherwise be published and
+              # then quietly evaluated as FEEL, which is how a diagram and a system come to
+              # mean different things.
+              case Xml.element_attr(expr_el, "language") do
+                lang when lang in [nil, "", "feel", "FEEL"] ->
+                  :ok
+
+                lang ->
+                  throw(
+                    {:flow_parse_error, id,
+                     "conditionExpression language #{inspect(lang)} is not supported; " <>
+                       "conditions are FEEL"}
+                  )
+              end
+
               body = Xml.element_text(expr_el)
 
               if body != nil and String.trim(body) != "" do
-                case AshBpmn.Expr.parse(String.trim(body)) do
-                  {:ok, ast} ->
-                    ast
+                case AshBpmn.Feel.compile(body) do
+                  {:ok, stored} ->
+                    stored
 
                   {:error, msg} ->
-                    # Return error instead
                     throw({:flow_parse_error, id, msg})
                 end
               else

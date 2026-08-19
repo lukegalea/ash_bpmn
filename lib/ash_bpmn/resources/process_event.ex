@@ -113,7 +113,17 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         :instance_completed,
                         :instance_failed,
                         :instance_cancelled,
-                        :sweep_recovered
+                        :sweep_recovered,
+                        # A gateway condition that produced FEEL's `null` rather than a
+                        # boolean -- a path the subject does not have, a type mismatch. The
+                        # branch is not taken, exactly as for `false`, but the two are recorded
+                        # differently because a condition that is silently never true looks
+                        # identical to one that is legitimately false and is a far worse bug.
+                        :condition_null,
+                        # A business rule task invoked a decision. Carries the decision
+                        # reference, its version and which rules fired -- never the decision's
+                        # full output, which belongs to the decision layer's own record.
+                        :decision_evaluated
                       ]
 
           public? true

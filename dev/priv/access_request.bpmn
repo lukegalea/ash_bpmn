@@ -140,7 +140,7 @@ SPDX-License-Identifier: MIT
     <bpmn2:sequenceFlow id="Flow_2" sourceRef="Validate" targetRef="PrivilegedGateway"/>
     <bpmn2:sequenceFlow id="Flow_Priv" name="privileged" sourceRef="PrivilegedGateway" targetRef="Fork">
       <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression"
-                                 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">subject.is_privileged == true</bpmn2:conditionExpression>
+                                 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">subject.is_privileged = true</bpmn2:conditionExpression>
     </bpmn2:sequenceFlow>
     <bpmn2:sequenceFlow id="Flow_NotPriv" name="standard" sourceRef="PrivilegedGateway" targetRef="ManagerApproval"/>
     <bpmn2:sequenceFlow id="Flow_ForkMgr" sourceRef="Fork" targetRef="PrivilegedManagerApproval"/>
@@ -151,7 +151,7 @@ SPDX-License-Identifier: MIT
     <bpmn2:sequenceFlow id="Flow_MgrDecision" sourceRef="ManagerApproval" targetRef="DecisionGateway"/>
     <bpmn2:sequenceFlow id="Flow_Approved" name="approved" sourceRef="DecisionGateway" targetRef="Provision">
       <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression"
-                                 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">task.outcome == "approved"</bpmn2:conditionExpression>
+                                 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">task.outcome = "approved"</bpmn2:conditionExpression>
     </bpmn2:sequenceFlow>
     <bpmn2:sequenceFlow id="Flow_Rejected" name="rejected" sourceRef="DecisionGateway" targetRef="End_rejected"/>
     <bpmn2:sequenceFlow id="Flow_Granted" sourceRef="Provision" targetRef="End_granted"/>

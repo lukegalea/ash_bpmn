@@ -157,8 +157,10 @@ candidate list that silently disagrees with the role model is a bug you want
 The [Common Executable] subset that the 39,695-model corpus study says is what
 real processes actually use: start and end events, user and service tasks,
 exclusive gateways (with default flows), parallel fork and join. Gateway conditions
-are a small expression language over the subject (`subject.amount > 50000`,
-`task.outcome == "approved"`) parsed at compile time and stored in the snapshot.
+are written in **FEEL**, the DMN expression language (`subject.amount > 50000`,
+`task.outcome = "approved"`), validated at publish time and stored in the snapshot as source
+text. One language serves gateway conditions and DMN decision tables alike, which is why this
+package no longer carries an expression language of its own.
 Everything else in BPMN's 244 collaboration-relevant elements — call activities,
 ad-hoc sub-processes, the event taxonomy, compensation markers — is rejected at
 compile time with the element's id in the error, because silently ignoring an

@@ -43,7 +43,7 @@ SPDX-License-Identifier: MIT
 
       <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Gateway_1"/>
     <bpmn2:sequenceFlow id="Flow_cond" sourceRef="Gateway_1" targetRef="Task_A">
-      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression">subject.amount > 100</bpmn2:conditionExpression>
+      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression" language="feel">subject.amount > 100</bpmn2:conditionExpression>
     </bpmn2:sequenceFlow>
     <bpmn2:sequenceFlow id="Flow_default" sourceRef="Gateway_1" targetRef="Task_B"/>
     <bpmn2:sequenceFlow id="Flow_2" sourceRef="Task_A" targetRef="End_1"/>

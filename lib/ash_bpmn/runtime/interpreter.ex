@@ -182,40 +182,84 @@ defmodule AshBpmn.Runtime.Interpreter do
     outgoing = find_outgoing_flows(graph, node_id)
     default_flow = node["default_flow"]
 
-    # Evaluate conditions in order; first true wins
+    # Evaluate conditions in order; the first that is *true* wins.
+    #
+    # FEEL is three-valued, and the three values are not interchangeable here. `false` is an
+    # ordinary answer. `null` means the condition produced no answer at all -- a path the
+    # subject does not have, a type mismatch -- and while it also does not take the branch, it
+    # is recorded, because a condition that is silently never true looks exactly like one that
+    # is legitimately false and is a far worse bug. An `{:error, _}` is not a FEEL value at all
+    # (a timeout, a malformed snapshot) and must not degrade into "branch not taken": it
+    # propagates, the job retries, and the instance fails rather than routing itself down a
+    # path nobody chose.
     expr_ctx = build_expr_ctx(ctx)
 
-    chosen_flow =
-      Enum.find(outgoing, fn flow ->
-        condition = flow["condition"]
+    case evaluate_flows(outgoing, expr_ctx) do
+      {:error, reason} ->
+        {:error, "exclusive gateway #{node_id}: #{reason}"}
 
-        if condition do
-          {:ok, result} = AshBpmn.Expr.eval(condition, expr_ctx)
-          result
-        else
-          false
-        end
-      end)
+      {:ok, chosen_flow, nulls} ->
+        target_flow = chosen_flow || Enum.find(outgoing, &(&1["id"] == default_flow))
 
-    target_flow = chosen_flow || Enum.find(outgoing, &(&1["id"] == default_flow))
-
-    if target_flow do
-      effects =
-        [
-          consume_token: true,
-          events: [
-            event_attrs(ctx, node_id, :gateway_branch_taken, %{
-              "flow_id" => target_flow["id"],
-              "target_node" => target_flow["to"]
+        null_events =
+          Enum.map(nulls, fn flow ->
+            event_attrs(ctx, node_id, :condition_null, %{
+              "flow_id" => flow["id"],
+              "expression" => AshBpmn.Feel.print(flow["condition"])
             })
-          ]
-        ] ++ follow_flow(graph, target_flow, ctx)
+          end)
 
-      {:ok, effects}
-    else
-      {:error, "exclusive gateway #{node_id}: no condition matched and no default flow"}
+        if target_flow do
+          effects =
+            [
+              consume_token: true,
+              events:
+                null_events ++
+                  [
+                    event_attrs(ctx, node_id, :gateway_branch_taken, %{
+                      "flow_id" => target_flow["id"],
+                      "target_node" => target_flow["to"],
+                      "expression" => AshBpmn.Feel.print(target_flow["condition"])
+                    })
+                  ]
+            ] ++ follow_flow(graph, target_flow, ctx)
+
+          {:ok, effects}
+        else
+          {:error,
+           "exclusive gateway #{node_id}: no condition matched and no default flow" <>
+             null_summary(nulls)}
+        end
     end
   end
+
+  # Walks the outgoing flows in order, stopping at the first true condition. Returns the
+  # chosen flow (or nil) together with every flow whose condition evaluated to null, so the
+  # caller can record them whichever way the gateway resolves.
+  defp evaluate_flows(flows, expr_ctx) do
+    Enum.reduce_while(flows, {:ok, nil, []}, fn
+      %{"condition" => nil}, acc ->
+        # An unconditioned flow is the default path, not a condition that failed to answer.
+        {:cont, acc}
+
+      flow, {:ok, nil, nulls} ->
+        case AshBpmn.Feel.evaluate_condition(flow["condition"], expr_ctx) do
+          {:ok, true} -> {:halt, {:ok, flow, nulls}}
+          {:ok, false} -> {:cont, {:ok, nil, nulls}}
+          {:ok, nil} -> {:cont, {:ok, nil, [flow | nulls]}}
+          {:error, reason} -> {:halt, {:error, "flow #{flow["id"]}: #{reason}"}}
+        end
+    end)
+    |> case do
+      {:ok, flow, nulls} -> {:ok, flow, Enum.reverse(nulls)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp null_summary([]), do: ""
+
+  defp null_summary(nulls),
+    do: " (#{length(nulls)} condition(s) evaluated to null: #{Enum.map_join(nulls, ", ", & &1["id"])})"
 
   # ── parallelGateway ─────────────────────────────────────────────────────
 
@@ -320,21 +364,20 @@ defmodule AshBpmn.Runtime.Interpreter do
 
   # ── Expression context ─────────────────────────────────────────────────
 
+  # The context FEEL navigates. Everything is converted through `AshBpmn.Feel.to_feel_value/2`,
+  # which turns Ash records into string-keyed maps and -- importantly -- *drops* unloaded and
+  # forbidden fields rather than nilling them. A dropped key is a missing path is `null`, which
+  # is the honest answer for a value we do not have; and for a field the actor may not read, it
+  # is the only safe one, since nilling it would let a hidden value influence routing.
   defp build_expr_ctx(ctx) do
-    subject = ctx[:subject]
-
-    # Reload subject fresh from data if possible
-    subject =
-      case subject do
-        nil -> nil
-        _ -> subject
-      end
+    assigns = AshBpmn.Feel.to_feel_value(ctx[:assigns] || %{})
 
     %{
-      "subject" => subject,
-      "task" => ctx[:assigns]["task"] || %{}
+      "subject" => AshBpmn.Feel.to_feel_value(ctx[:subject]),
+      "task" => Map.get(assigns, "task") || %{},
+      "routing" => Map.get(assigns, "routing") || %{}
     }
-    |> Map.merge(ctx[:assigns] || %{})
+    |> Map.merge(assigns)
   end
 
   # ── Event attrs helper ───────────────────────────────────────────────────

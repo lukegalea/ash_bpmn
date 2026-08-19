@@ -72,6 +72,12 @@ defmodule AshBpmn.MixProject do
     [
       {:ash, "~> 3.0"},
       {:ash_postgres, "~> 2.0"},
+      # FEEL, the DMN expression language, is what gateway conditions are written in. It
+      # replaced a hand-written parser in this package; see `AshBpmn.Feel` for why. The
+      # dependency is direct and deliberate: a gateway condition is evaluated in-process with
+      # no database access, so routing it through the decision resolver would be both slower
+      # and a lie about where the evaluation happens.
+      {:boxic_feel, "~> 0.2"},
       {:oban, "~> 2.0"},
       {:jason, "~> 1.2"},
       {:phoenix_live_view, "~> 1.0"},
@@ -132,7 +138,7 @@ defmodule AshBpmn.MixProject do
           AshBpmn.Config,
           ~r/AshBpmn\.Checks/
         ],
-        Compiler: [AshBpmn.Compiler, AshBpmn.Expr],
+        Compiler: [AshBpmn.Compiler],
         Web: [~r/AshBpmn\.Web/, AshBpmn.DesignerHook],
         Internals: ~r/.*/
       ]

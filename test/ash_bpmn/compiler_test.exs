@@ -424,6 +424,68 @@ defmodule AshBpmn.CompilerTest do
                String.contains?(e.message, "conditionExpression parse error")
              end)
     end
+
+    # BPMN lets a formal expression declare its language, and the corpus is full of documents
+    # written against JUEL and Groovy. Ignoring the attribute would publish such a document and
+    # then evaluate it as FEEL -- which is the quiet way a diagram and a system come to be
+    # about different processes.
+    test "rejects a conditionExpression declaring a language that is not FEEL" do
+      xml = ~s(<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns">
+        <bpmn2:process id="P" isExecutable="true">
+          <bpmn2:startEvent id="S"><bpmn2:outgoing>F1</bpmn2:outgoing></bpmn2:startEvent>
+          <bpmn2:exclusiveGateway id="GW" default="F2">
+            <bpmn2:incoming>F1</bpmn2:incoming>
+            <bpmn2:outgoing>F2</bpmn2:outgoing>
+            <bpmn2:outgoing>F3</bpmn2:outgoing>
+          </bpmn2:exclusiveGateway>
+          <bpmn2:endEvent id="E1"><bpmn2:incoming>F2</bpmn2:incoming></bpmn2:endEvent>
+          <bpmn2:endEvent id="E2"><bpmn2:incoming>F3</bpmn2:incoming></bpmn2:endEvent>
+          <bpmn2:sequenceFlow id="F1" sourceRef="S" targetRef="GW"/>
+          <bpmn2:sequenceFlow id="F2" sourceRef="GW" targetRef="E1"/>
+          <bpmn2:sequenceFlow id="F3" sourceRef="GW" targetRef="E2">
+            <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression"
+              language="http://www.java.com/products/juel">amount &gt; 100</bpmn2:conditionExpression>
+          </bpmn2:sequenceFlow>
+        </bpmn2:process>
+      </bpmn2:definitions>)
+
+      assert {:error, errors} = Compiler.compile(xml)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "is not supported") and
+                 String.contains?(e.message, "FEEL")
+             end)
+    end
+
+    test "accepts a conditionExpression that declares FEEL explicitly" do
+      xml = ~s(<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns">
+        <bpmn2:process id="P" isExecutable="true">
+          <bpmn2:startEvent id="S"><bpmn2:outgoing>F1</bpmn2:outgoing></bpmn2:startEvent>
+          <bpmn2:exclusiveGateway id="GW" default="F2">
+            <bpmn2:incoming>F1</bpmn2:incoming>
+            <bpmn2:outgoing>F2</bpmn2:outgoing>
+            <bpmn2:outgoing>F3</bpmn2:outgoing>
+          </bpmn2:exclusiveGateway>
+          <bpmn2:endEvent id="E1"><bpmn2:incoming>F2</bpmn2:incoming></bpmn2:endEvent>
+          <bpmn2:endEvent id="E2"><bpmn2:incoming>F3</bpmn2:incoming></bpmn2:endEvent>
+          <bpmn2:sequenceFlow id="F1" sourceRef="S" targetRef="GW"/>
+          <bpmn2:sequenceFlow id="F2" sourceRef="GW" targetRef="E1"/>
+          <bpmn2:sequenceFlow id="F3" sourceRef="GW" targetRef="E2">
+            <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression"
+              language="feel">subject.amount &gt; 100</bpmn2:conditionExpression>
+          </bpmn2:sequenceFlow>
+        </bpmn2:process>
+      </bpmn2:definitions>)
+
+      assert {:ok, graph} = Compiler.compile(xml)
+
+      # The snapshot stores the source text, not a parsed tree: an instance pinned to this
+      # definition must keep evaluating it across engine upgrades, and text pins nothing.
+      assert %{"language" => "feel", "text" => "subject.amount > 100"} =
+               graph["flows"]["F3"]["condition"]
+    end
   end
 
   describe "error: missing taskConfig on serviceTask" do

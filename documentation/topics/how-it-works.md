@@ -33,9 +33,9 @@ BPMN XML ──parse──> elements ──verify──> errors (fix in the desi
                                 └──build──> graph snapshot (JSON-able map)
 ```
 
-The snapshot holds nodes, flows, parsed gateway conditions (as data — see
-`AshBpmn.Expr`), join definitions, candidate/exclusion/timer specs, and the
-instance outcome of each end event. It is stored on the definition row, which is
+The snapshot holds nodes, flows, gateway conditions (as FEEL source text — see
+`AshBpmn.Feel` for why text rather than a parsed tree), join definitions,
+candidate/exclusion/timer specs, and the instance outcome of each end event. It is stored on the definition row, which is
 **immutable once published**.
 
 Verification is why the runtime can be small. Exactly one start event; every node
