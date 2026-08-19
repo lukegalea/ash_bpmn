@@ -88,6 +88,18 @@ defmodule AshBpmn.Runtime.Oban do
   # ── Production mode ──────────────────────────────────────────────────────
 
   defp insert_production(worker_module, args, opts) do
+    # The queue has to be supplied **here**, not left to the worker.
+    #
+    # `Oban.Worker.new/2` reads the queue from the worker's compile-time `use` options, and
+    # these workers deliberately declare none so that `config :ash_bpmn, queue:` can decide.
+    # Overriding the `queue/0` callback does not affect insertion -- so without this every job
+    # landed on `:default`, the configured queue sat empty, and a host that had carefully given
+    # process work its own queue got none of the isolation it configured.
+    #
+    # Silent, too: the jobs ran, just not where anyone was looking. Found by draining `:bpmn`
+    # in a host application and getting nothing while processes were plainly advancing.
+    opts = Keyword.put_new(opts, :queue, AshBpmn.Config.queue())
+
     changeset = worker_module.new(args, opts)
     Oban.insert(changeset)
   end
