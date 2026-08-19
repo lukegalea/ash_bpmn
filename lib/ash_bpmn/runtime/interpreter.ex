@@ -194,8 +194,7 @@ defmodule AshBpmn.Runtime.Interpreter do
 
       cond do
         value == :__absent__ and signal["required"] ->
-          {:halt,
-           {:error, "node #{node_id}: decision did not return required signal '#{name}'"}}
+          {:halt, {:error, "node #{node_id}: decision did not return required signal '#{name}'"}}
 
         value == :__absent__ ->
           {:cont, {:ok, acc}}
@@ -231,8 +230,9 @@ defmodule AshBpmn.Runtime.Interpreter do
   end
 
   defp scalar?(value),
-    do: is_binary(value) or is_number(value) or is_boolean(value) or is_nil(value) or
-          is_struct(value, Decimal) or is_atom(value)
+    do:
+      is_binary(value) or is_number(value) or is_boolean(value) or is_nil(value) or
+        is_struct(value, Decimal) or is_atom(value)
 
   # Stored as strings so the token's jsonb round-trips to exactly what FEEL will compare
   # against, rather than to whatever the JSON encoder chose.
@@ -260,7 +260,10 @@ defmodule AshBpmn.Runtime.Interpreter do
   defp normalize_version(version), do: to_string(version)
 
   defp inspect_value(%Decimal{} = value), do: Decimal.to_string(value, :normal)
-  defp inspect_value(value) when is_binary(value) or is_number(value) or is_boolean(value), do: value
+
+  defp inspect_value(value) when is_binary(value) or is_number(value) or is_boolean(value),
+    do: value
+
   defp inspect_value(value), do: inspect(value, limit: 5)
 
   defp service_task(graph, node_id, node, ctx) do
@@ -433,7 +436,8 @@ defmodule AshBpmn.Runtime.Interpreter do
   defp null_summary([]), do: ""
 
   defp null_summary(nulls),
-    do: " (#{length(nulls)} condition(s) evaluated to null: #{Enum.map_join(nulls, ", ", & &1["id"])})"
+    do:
+      " (#{length(nulls)} condition(s) evaluated to null: #{Enum.map_join(nulls, ", ", & &1["id"])})"
 
   # ── parallelGateway ─────────────────────────────────────────────────────
 

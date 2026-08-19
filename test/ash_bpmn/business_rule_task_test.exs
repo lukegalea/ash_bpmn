@@ -60,7 +60,8 @@ defmodule AshBpmn.BusinessRuleTaskTest do
       assert {:error, errors} = Compiler.compile(@xml)
 
       assert Enum.any?(errors, fn e ->
-               String.contains?(e.message, "risk.tier") and String.contains?(e.message, "does not exist")
+               String.contains?(e.message, "risk.tier") and
+                 String.contains?(e.message, "does not exist")
              end)
     end
 
@@ -72,7 +73,12 @@ defmodule AshBpmn.BusinessRuleTaskTest do
     end
 
     test "refuses an ash:decision without a ref" do
-      xml = String.replace(@xml, ~s|<ash:decision ref="risk.tier" binding="latest"/>|, ~s|<ash:decision binding="latest"/>|)
+      xml =
+        String.replace(
+          @xml,
+          ~s|<ash:decision ref="risk.tier" binding="latest"/>|,
+          ~s|<ash:decision binding="latest"/>|
+        )
 
       assert {:error, errors} = Compiler.compile(xml)
       assert Enum.any?(errors, &String.contains?(&1.message, "non-empty ref"))
@@ -100,7 +106,9 @@ defmodule AshBpmn.BusinessRuleTaskTest do
   describe "execution" do
     test "routes on a promoted signal" do
       DecisionResolver.register("risk.tier", fn inputs ->
-        tier = if Decimal.compare(inputs["amount"], Decimal.new(1000)) == :gt, do: "high", else: "low"
+        tier =
+          if Decimal.compare(inputs["amount"], Decimal.new(1000)) == :gt, do: "high", else: "low"
+
         %{outputs: %{"tier" => tier}, version: 7, rule_ids: ["rule_#{tier}"]}
       end)
 
@@ -119,7 +127,9 @@ defmodule AshBpmn.BusinessRuleTaskTest do
 
     test "the other branch, from the same diagram and the same decision" do
       DecisionResolver.register("risk.tier", fn inputs ->
-        tier = if Decimal.compare(inputs["amount"], Decimal.new(1000)) == :gt, do: "high", else: "low"
+        tier =
+          if Decimal.compare(inputs["amount"], Decimal.new(1000)) == :gt, do: "high", else: "low"
+
         %{outputs: %{"tier" => tier}}
       end)
 

@@ -45,23 +45,17 @@ defmodule AshBpmn do
 
   @spec start_instance(module(), keyword()) :: {:ok, map()} | {:error, term()}
   def start_instance(domain, opts) do
-    process_key = Keyword.fetch!(opts, :process)
     subject = Keyword.fetch!(opts, :subject)
     actor = Keyword.get(opts, :actor)
     scope = %{Scope.from_opts(opts) | domain: domain}
 
     {:ok, resources} = AshBpmn.Resources.for_domain(domain)
 
-    # Get latest published definition. Read through the same scope as everything
-    # below it: a definition is tenant-scoped too when the host asked for that,
-    # and reading it globally would let one organization start another's process.
-    definition_results = resources.definition.latest_published!(process_key, Scope.engine(scope))
+    case resolve_definition(resources, opts, scope) do
+      {:error, reason} ->
+        {:error, reason}
 
-    case definition_results do
-      [] ->
-        {:error, "no published definition found for process: #{process_key}"}
-
-      [definition | _] ->
+      {:ok, definition} ->
         # Create instance
         instance =
           resources.instance.create!(
@@ -69,7 +63,12 @@ defmodule AshBpmn do
               definition_id: definition.id,
               subject_type: subject.__struct__ |> to_string(),
               subject_id: subject.id,
-              started_by_id: if(actor, do: actor.id, else: nil)
+              started_by_id: if(actor, do: actor.id, else: nil),
+              # The instance has carried a `correlation_id` attribute, and its create action
+              # has accepted one, since the resource was written -- but nothing ever passed
+              # it, so every process was an orphan in the host's trace. A process started by
+              # a request, or by an event, belongs to the operation that started it.
+              correlation_id: Keyword.get(opts, :correlation_id)
             },
             Scope.engine(scope)
           )
@@ -100,7 +99,10 @@ defmodule AshBpmn do
             instance_id: instance.id,
             kind: :instance_started,
             data: %{
-              "process_key" => process_key,
+              # The definition's own key rather than the caller's argument: a host that passed
+              # a definition directly never supplied one, and the key on the row is the
+              # authoritative answer either way.
+              "process_key" => definition.key,
               "definition_version" => definition.version
             }
           },
@@ -566,6 +568,43 @@ defmodule AshBpmn do
 
   # ── Private helpers ─────────────────────────────────────────────────────
 
+  # Which definition an instance runs is **host policy**, not engine policy -- the same
+  # arrangement as who a task is for and what an action does.
+  #
+  # By default this is "the latest published definition for this key, in this tenant", which is
+  # what a single-tenant install wants and what every existing caller gets. But a host that
+  # ships baseline processes centrally and lets a tenant diverge from them needs to answer the
+  # question itself: the tenant has no row for the key, and the definition it should run lives
+  # somewhere this package has no business knowing about. Passing `:definition` or
+  # `:definition_id` is how it says so.
+  #
+  # Everything downstream is unchanged: the instance pins whatever definition it was given, for
+  # life, and never consults this again.
+  defp resolve_definition(resources, opts, scope) do
+    cond do
+      definition = Keyword.get(opts, :definition) ->
+        {:ok, definition}
+
+      definition_id = Keyword.get(opts, :definition_id) ->
+        case Ash.get(resources.definition, definition_id, Scope.engine(scope)) do
+          {:ok, definition} -> {:ok, definition}
+          {:error, _} -> {:error, "no definition with id #{inspect(definition_id)}"}
+        end
+
+      process_key = Keyword.get(opts, :process) ->
+        # Read through the same scope as everything below it: a definition is tenant-scoped
+        # too when the host asked for that, and reading it globally would let one organization
+        # start another's process.
+        case resources.definition.latest_published!(process_key, Scope.engine(scope)) do
+          [] -> {:error, "no published definition found for process: #{process_key}"}
+          [definition | _] -> {:ok, definition}
+        end
+
+      true ->
+        {:error, "start_instance requires one of :process, :definition or :definition_id"}
+    end
+  end
+
   defp advance_token_after_task(resources, task, outcome, scope) do
     token =
       resources.token
@@ -581,10 +620,12 @@ defmodule AshBpmn do
         |> Ash.read_one!(Scope.engine(scope))
 
       definition =
-        resources.definition
-        |> Ash.Query.for_read(:read)
-        |> Ash.Query.filter(id == ^instance.definition_id)
-        |> Ash.read_one!(Scope.engine(scope))
+        AshBpmn.DefinitionLoader.load!(
+          resources.definition,
+          instance.definition_id,
+          instance,
+          scope
+        )
 
       graph = definition.graph
 

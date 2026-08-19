@@ -125,10 +125,12 @@ defmodule AshBpmn.Runtime.TimerWorker do
             |> Ash.read_one!(Scope.engine(scope))
 
           definition =
-            resources.definition
-            |> Ash.Query.for_read(:read)
-            |> Ash.Query.filter(id == ^instance.definition_id)
-            |> Ash.read_one!(Scope.engine(scope))
+            AshBpmn.DefinitionLoader.load!(
+              resources.definition,
+              instance.definition_id,
+              instance,
+              scope
+            )
 
           graph = definition.graph
 

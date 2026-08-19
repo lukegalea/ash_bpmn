@@ -135,7 +135,15 @@ defmodule AshBpmn.Resources.Token do
         end
 
         create :create do
-          accept [:node_id, :status, :parent_token_id, :fork_id, :attempts, :instance_id, :routing]
+          accept [
+            :node_id,
+            :status,
+            :parent_token_id,
+            :fork_id,
+            :attempts,
+            :instance_id,
+            :routing
+          ]
         end
 
         # Promotion is its own action rather than part of `:consume`, because it happens on a

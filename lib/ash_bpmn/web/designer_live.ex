@@ -20,7 +20,10 @@ defmodule AshBpmn.Web.DesignerLive do
   ## Options
 
     * `:domain` — **required**. The host Ash domain with BPMN resources.
-    * `:process` — **required**. The definition key to load or create.
+    * `:process` — the definition key to load or create. Optional: when it is omitted the
+      key comes from the route (`:key` or `:process` in the path), which is what a
+      multi-process application needs. Supplying neither is an error at mount, with a message
+      saying so.
     * `:actor` — optional `{module, function, args}` tuple; called with
       `module.function(args ++ [socket])` to resolve the current actor.
 
@@ -54,7 +57,11 @@ defmodule AshBpmn.Web.DesignerLive do
 
   defmacro __using__(opts) do
     domain = Keyword.fetch!(opts, :domain)
-    process_key = Keyword.fetch!(opts, :process)
+    # Optional since the designer learned to take its key from the route. A multi-process
+    # application -- and any application whose tenants author their own processes -- cannot
+    # declare one LiveView module per process key, which is what a compile-time-only option
+    # forces.
+    process_key = Keyword.get(opts, :process)
     actor_mfa = Keyword.get(opts, :actor, nil)
 
     quote do
@@ -71,39 +78,60 @@ defmodule AshBpmn.Web.DesignerLive do
 
       # ── Minimal template XML for new drafts ───────────────────────────────
 
-      @ash_bpmn_template_xml """
-      <?xml version="1.0" encoding="UTF-8"?>
-      <bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
-                         xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
-                         id="Definitions_1"
-                         targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
-        <bpmn2:process id="Process_#{unquote(process_key)}" name="#{unquote(process_key)}" isExecutable="true">
-          <bpmn2:startEvent id="Start_1" name="Start">
-            <bpmn2:outgoing>Flow_1</bpmn2:outgoing>
-          </bpmn2:startEvent>
-          <bpmn2:userTask id="Task_1" name="Task">
-            <bpmn2:extensionElements>
-              <ash:taskConfig>
-                <ash:candidates>
-                  <ash:candidate kind="user" of="actor"/>
-                </ash:candidates>
-                <ash:outcomes>
-                  <ash:outcome name="approve"/>
-                  <ash:outcome name="reject"/>
-                </ash:outcomes>
-              </ash:taskConfig>
-            </bpmn2:extensionElements>
-            <bpmn2:incoming>Flow_1</bpmn2:incoming>
-            <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
-          </bpmn2:userTask>
-          <bpmn2:endEvent id="End_1" name="End">
-            <bpmn2:incoming>Flow_2</bpmn2:incoming>
-          </bpmn2:endEvent>
-          <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Task_1"/>
-          <bpmn2:sequenceFlow id="Flow_2" sourceRef="Task_1" targetRef="End_1"/>
-        </bpmn2:process>
-      </bpmn2:definitions>
-      """
+      # A function rather than an attribute: the key is not known until the route is.
+      defp ash_bpmn_template_xml(process_key) do
+        """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                           xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                           id="Definitions_1"
+                           targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+          <bpmn2:process id="Process_#{process_key}" name="#{process_key}" isExecutable="true">
+            <bpmn2:startEvent id="Start_1" name="Start">
+              <bpmn2:outgoing>Flow_1</bpmn2:outgoing>
+            </bpmn2:startEvent>
+            <bpmn2:userTask id="Task_1" name="Task">
+              <bpmn2:extensionElements>
+                <ash:taskConfig>
+                  <ash:candidates>
+                    <ash:candidate kind="user" of="actor"/>
+                  </ash:candidates>
+                  <ash:outcomes>
+                    <ash:outcome name="approve"/>
+                    <ash:outcome name="reject"/>
+                  </ash:outcomes>
+                </ash:taskConfig>
+              </bpmn2:extensionElements>
+              <bpmn2:incoming>Flow_1</bpmn2:incoming>
+              <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
+            </bpmn2:userTask>
+            <bpmn2:endEvent id="End_1" name="End">
+              <bpmn2:incoming>Flow_2</bpmn2:incoming>
+            </bpmn2:endEvent>
+            <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Task_1"/>
+            <bpmn2:sequenceFlow id="Flow_2" sourceRef="Task_1" targetRef="End_1"/>
+          </bpmn2:process>
+        </bpmn2:definitions>
+        """
+      end
+
+      # The route wins over the compile-time option, so one module can serve every process a
+      # tenant authors. Neither being present is a configuration error rather than a blank
+      # page: the designer has nothing to open.
+      defp ash_bpmn_resolve_key(params) do
+        params["key"] || params["process"] || @ash_bpmn_designer_process_key ||
+          raise """
+          ash_bpmn: the designer has no process key.
+
+          Either pass one at compile time:
+
+              use AshBpmn.Web.DesignerLive, domain: MyApp.Bpmn, process: "access_request"
+
+          or put it in the route, which is what a multi-process application wants:
+
+              live "/processes/:key/designer", MyAppWeb.Bpmn.DesignerLive
+          """
+      end
 
       # ── Mount & handle_params ────────────────────────────────────────────
 
@@ -125,7 +153,8 @@ defmodule AshBpmn.Web.DesignerLive do
       end
 
       @impl true
-      def handle_params(_params, _uri, socket) do
+      def handle_params(params, _uri, socket) do
+        socket = assign(socket, :definition_key, ash_bpmn_resolve_key(params))
         socket = load_or_create_definition(socket)
 
         if connected?(socket) do
@@ -265,15 +294,15 @@ defmodule AshBpmn.Web.DesignerLive do
             %{},
             AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
           )
-          |> Ash.Query.do_filter(key: @ash_bpmn_designer_process_key, status: :draft)
+          |> Ash.Query.do_filter(key: socket.assigns.definition_key, status: :draft)
           |> Ash.read_one!(AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns)))
           |> case do
             nil ->
               definition_mod.create!(
                 %{
-                  key: @ash_bpmn_designer_process_key,
-                  name: String.capitalize(@ash_bpmn_designer_process_key) <> " process",
-                  xml: @ash_bpmn_template_xml
+                  key: socket.assigns.definition_key,
+                  name: String.capitalize(socket.assigns.definition_key) <> " process",
+                  xml: ash_bpmn_template_xml(socket.assigns.definition_key)
                 },
                 Keyword.put(opts, :authorize?, false)
               )
@@ -284,7 +313,7 @@ defmodule AshBpmn.Web.DesignerLive do
 
         latest_published =
           case definition_mod.latest_published(
-                 @ash_bpmn_designer_process_key,
+                 socket.assigns.definition_key,
                  AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
                ) do
             {:ok, []} -> nil

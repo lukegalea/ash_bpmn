@@ -72,7 +72,12 @@ defmodule AshBpmn.Compiler.Verify do
               []
 
             {:error, :missing} ->
-              [Errors.error(id, "businessRuleTask '#{id}' references decision '#{ref}', which does not exist")]
+              [
+                Errors.error(
+                  id,
+                  "businessRuleTask '#{id}' references decision '#{ref}', which does not exist"
+                )
+              ]
 
             {:error, reason} ->
               [

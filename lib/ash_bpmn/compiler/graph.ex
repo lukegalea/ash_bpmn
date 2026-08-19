@@ -329,7 +329,6 @@ defmodule AshBpmn.Compiler.Graph do
     {:ok, %{}}
   end
 
-
   defp build_business_rule_config(id, ext, decision) do
     ref = Xml.element_attr(decision, "ref")
     binding = Xml.element_attr(decision, "binding") || "latest"
@@ -338,7 +337,10 @@ defmodule AshBpmn.Compiler.Graph do
     cond do
       ref == nil or String.trim(ref) == "" ->
         {:error,
-         Errors.error(id, "businessRuleTask '#{id}' ash:decision must have a non-empty ref attribute")}
+         Errors.error(
+           id,
+           "businessRuleTask '#{id}' ash:decision must have a non-empty ref attribute"
+         )}
 
       binding not in ["latest", "pinned"] ->
         {:error,
@@ -351,14 +353,21 @@ defmodule AshBpmn.Compiler.Graph do
       # move under me" and behaves as "latest".
       binding == "pinned" and (version == nil or String.trim(version) == "") ->
         {:error,
-         Errors.error(id, "businessRuleTask '#{id}' ash:decision binding=\"pinned\" requires a version")}
+         Errors.error(
+           id,
+           "businessRuleTask '#{id}' ash:decision binding=\"pinned\" requires a version"
+         )}
 
       true ->
         with {:ok, inputs} <- build_decision_inputs(id, ext),
              {:ok, promote} <- build_decision_promotions(id, ext) do
           {:ok,
            %{
-             "decision" => %{"ref" => String.trim(ref), "binding" => binding, "version" => version},
+             "decision" => %{
+               "ref" => String.trim(ref),
+               "binding" => binding,
+               "version" => version
+             },
              "inputs" => inputs,
              "promote" => promote
            }}
@@ -382,7 +391,10 @@ defmodule AshBpmn.Compiler.Graph do
         from == nil or String.trim(from) == "" ->
           {:halt,
            {:error,
-            Errors.error(node_id, "businessRuleTask '#{node_id}' ash:input '#{name}' needs a from expression")}}
+            Errors.error(
+              node_id,
+              "businessRuleTask '#{node_id}' ash:input '#{name}' needs a from expression"
+            )}}
 
         true ->
           # The `from` expression is validated here, at publish time, for the same reason a
@@ -424,7 +436,10 @@ defmodule AshBpmn.Compiler.Graph do
 
       length(Enum.uniq(names)) != length(names) ->
         {:error,
-         Errors.error(node_id, "businessRuleTask '#{node_id}' promotes the same signal name twice")}
+         Errors.error(
+           node_id,
+           "businessRuleTask '#{node_id}' promotes the same signal name twice"
+         )}
 
       length(signals) > @max_promoted_signals ->
         {:error,

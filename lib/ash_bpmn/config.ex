@@ -87,6 +87,18 @@ defmodule AshBpmn.Config do
   @spec decision_resolver() :: module() | nil
   def decision_resolver, do: Application.get_env(:ash_bpmn, :decision_resolver)
 
+  @doc """
+  The configured `AshBpmn.DefinitionLoader`.
+
+  Defaults to `AshBpmn.DefinitionLoader.Default`, which reads the definition in the instance's
+  own scope -- exactly what the engine did before this was configurable. A host only needs to
+  set it when an instance's definition can live outside the instance's tenant.
+  """
+  @spec definition_loader() :: module()
+  def definition_loader do
+    Application.get_env(:ash_bpmn, :definition_loader, AshBpmn.DefinitionLoader.Default)
+  end
+
   @doc "Returns the Oban queue name for BPMN jobs (default `:bpmn`)."
   @spec queue() :: atom()
   def queue do

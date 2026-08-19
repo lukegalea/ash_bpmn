@@ -73,11 +73,15 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
             {:ok, :failed_permanently}
           else
             # 3. Load graph and dispatch
+            # Through the loader seam, not directly: an instance's definition does not
+            # necessarily live in the instance's tenant. See `AshBpmn.DefinitionLoader`.
             definition =
-              resources.definition
-              |> Ash.Query.for_read(:read)
-              |> Ash.Query.filter(id == ^instance.definition_id)
-              |> Ash.read_one!(Scope.engine(scope))
+              AshBpmn.DefinitionLoader.load!(
+                resources.definition,
+                instance.definition_id,
+                instance,
+                scope
+              )
 
             graph = definition.graph
 

@@ -35,13 +35,15 @@ defmodule AshBpmn.Subject do
   @spec load(map(), Scope.t()) :: struct() | nil
   def load(%{subject_type: type, subject_id: id}, %Scope{} = scope)
       when is_binary(type) and not is_nil(id) do
-    with {:ok, mod} <- resolve(type) do
-      mod
-      |> Ash.Query.for_read(:read)
-      |> Ash.Query.filter(id == ^id)
-      |> Ash.read_one!(Scope.subject(scope))
-    else
-      _ -> nil
+    case resolve(type) do
+      {:ok, mod} ->
+        mod
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(id == ^id)
+        |> Ash.read_one!(Scope.subject(scope))
+
+      :error ->
+        nil
     end
   rescue
     _ -> nil
