@@ -452,8 +452,16 @@ defmodule AshBpmn.Compiler.Graph do
       true ->
         {:ok,
          Enum.map(signals, fn signal ->
+           name = signal |> Xml.element_attr("name") |> String.trim()
+
            %{
-             "name" => signal |> Xml.element_attr("name") |> String.trim(),
+             "name" => name,
+             # Which of the decision's outputs this signal takes. Defaults to the signal's own
+             # name, which is the common case; `from` exists because the name a decision gives
+             # an output and the name a process wants to route on are different vocabularies
+             # owned by different people, and forcing them to coincide makes one of them
+             # rename to suit the other.
+             "from" => (Xml.element_attr(signal, "from") || name) |> String.trim(),
              "required" => Xml.element_attr(signal, "required") in ["true", "1"]
            }
          end)}

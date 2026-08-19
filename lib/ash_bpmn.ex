@@ -43,6 +43,16 @@ defmodule AshBpmn do
     end
   end
 
+  @doc """
+  Options beyond `:process` / `:definition` / `:definition_id` and `:subject`:
+
+    * `:actor` — the authority the engine acts with.
+    * `:started_by_id` — who is *accountable* for the process existing. Defaults to the
+      actor's id, and is worth setting separately whenever the two differ: a process started
+      by a trigger runs as a non-human actor but was caused by a person, and a system actor
+      has no id to fall back on.
+    * `:tenant`, `:correlation_id`.
+  """
   @spec start_instance(module(), keyword()) :: {:ok, map()} | {:error, term()}
   def start_instance(domain, opts) do
     subject = Keyword.fetch!(opts, :subject)
@@ -63,7 +73,15 @@ defmodule AshBpmn do
               definition_id: definition.id,
               subject_type: subject.__struct__ |> to_string(),
               subject_id: subject.id,
-              started_by_id: if(actor, do: actor.id, else: nil),
+              # The actor and the person accountable are not the same thing, and conflating
+              # them breaks two legitimate cases: an engine or system actor has no `:id` at
+              # all and would raise here, and a process started on someone's behalf should
+              # name *them* rather than whatever authority started it. So `:started_by_id`
+              # can be given explicitly, and the actor is only the fallback.
+              #
+              # This is the same distinction a host's audit layer already draws between
+              # `created_by` and `created_on_behalf_by`.
+              started_by_id: Keyword.get(opts, :started_by_id) || actor_id(actor),
               # The instance has carried a `correlation_id` attribute, and its create action
               # has accepted one, since the resource was written -- but nothing ever passed
               # it, so every process was an orphan in the host's trace. A process started by
@@ -567,6 +585,13 @@ defmodule AshBpmn do
   end
 
   # ── Private helpers ─────────────────────────────────────────────────────
+
+  # An actor need not be a record. A system actor is a struct with a name and no id, and
+  # `actor.id` on one raises -- which surfaced as a process that could not start at all when
+  # the engine was handed one.
+  defp actor_id(nil), do: nil
+  defp actor_id(actor) when is_map(actor), do: Map.get(actor, :id)
+  defp actor_id(_actor), do: nil
 
   # Which definition an instance runs is **host policy**, not engine policy -- the same
   # arrangement as who a task is for and what an action does.

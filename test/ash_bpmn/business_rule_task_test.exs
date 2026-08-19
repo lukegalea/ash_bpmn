@@ -50,7 +50,7 @@ defmodule AshBpmn.BusinessRuleTaskTest do
       assert node["decision"]["ref"] == "risk.tier"
       assert node["decision"]["binding"] == "latest"
       assert [%{"name" => "amount", "from" => %{"text" => "subject.amount"}}] = node["inputs"]
-      assert [%{"name" => "tier", "required" => true}] = node["promote"]
+      assert [%{"name" => "tier", "from" => "tier", "required" => true}] = node["promote"]
     end
 
     # The check that makes a decision node safe to publish. Without it the first instance to
@@ -92,6 +92,24 @@ defmodule AshBpmn.BusinessRuleTaskTest do
 
       assert {:error, errors} = Compiler.compile(xml)
       assert Enum.any?(errors, &String.contains?(&1.message, "requires a version"))
+    end
+
+    # The signal a process routes on and the output a decision produces are named by different
+    # people; `from` is what stops one of them having to rename to suit the other.
+    test "a signal can take an output under a different name" do
+      xml =
+        String.replace(
+          @xml,
+          ~s|<ash:signal name="tier" required="true"/>|,
+          ~s|<ash:signal name="tier" from="RiskLevel" required="true"/>|
+        )
+
+      DecisionResolver.register("risk.tier", fn _ -> %{outputs: %{"RiskLevel" => "high"}} end)
+
+      assert {:ok, graph} = Compiler.compile(xml)
+
+      assert [%{"name" => "tier", "from" => "RiskLevel"}] =
+               graph["nodes"]["AssessRisk"]["promote"]
     end
 
     test "refuses an input whose from expression is not valid FEEL" do

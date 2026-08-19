@@ -190,7 +190,7 @@ defmodule AshBpmn.Runtime.Interpreter do
       # rather than calling `String.to_atom/1` on it. The name comes out of tenant-authored
       # BPMN XML, and creating an uncollectable atom from that is the exact defect the old
       # expression language shipped with.
-      value = fetch_output(outputs, name)
+      value = fetch_output(outputs, signal["from"] || name)
 
       cond do
         value == :__absent__ and signal["required"] ->
