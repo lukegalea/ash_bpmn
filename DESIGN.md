@@ -31,7 +31,7 @@ publishing a new definition version. One artifact, one-way compilation, ever.
 | Piece | Modules |
 |---|---|
 | Process data model | six resource macros the **host app instantiates** (`AshBpmn.Resources.*`) |
-| BPMN compiler | `AshBpmn.Compiler`, `AshBpmn.Expr` — XML → verified graph snapshot |
+| BPMN compiler | `AshBpmn.Compiler`, `AshBpmn.Feel` — XML → verified graph snapshot |
 | Runtime engine | `AshBpmn` (facade), `AshBpmn.Runtime.*` — token interpreter over Oban |
 | Web designer | `AshBpmn.Web.*` LiveViews + `priv/js/ash_bpmn_designer.js` hook |
 | Host extension points | `AshBpmn.AssignmentResolver`, `AshBpmn.ActionInvoker` behaviours |
@@ -375,9 +375,35 @@ Rules:
 
 ---
 
-## 4. Expression language (`AshBpmn.Expr`)
+## 4. Expression language (FEEL, via `AshBpmn.Feel`)
 
-Grammar (pratt-free, recursive descent):
+> **Superseded, 2026-08-20.** This section described `AshBpmn.Expr`: a hand-written
+> tokenizer, recursive-descent parser and evaluator for a small comparison grammar.
+> That module has been **deleted**, along with its 393-line test file, and FEEL — the
+> expression language DMN itself specifies — replaced it. The grammar below is kept
+> only so a reader of an older definition can see what used to be accepted.
+>
+> Two defects in the old implementation are worth recording, because they are why the
+> replacement was not merely tidying. It called `String.to_atom/1` on path segments
+> taken from **tenant-authored** BPMN XML, and atoms are never garbage collected, so a
+> tenant admin with enough distinct segments could exhaust the atom table and take the
+> node down. And `eval/2` wrapped everything in a bare `rescue _ -> {:ok, false}`, so
+> every evaluation failure became "branch not taken" — indistinguishable from a
+> condition that was genuinely false.
+>
+> Three semantics changed in ways an old expression can notice, which is why the test
+> file was deleted rather than ported: FEEL orders strings, so `"a" > "b"` is `false`
+> for a *reason* rather than by accident; a comparison against `null` is `null`, not
+> `false`; and an erroneous expression is `null` rather than `false`. See
+> `AshBpmn.Feel`, `AshBpmn.ConditionMigrationTest`, and ADR 0027 in ash_enterprise.
+
+Conditions are FEEL expression text, stored as
+`%{"language" => "feel", "text" => "..."}` inside the graph snapshot, and evaluated by
+`AshBpmn.Feel.evaluate_condition/3` through `boxic_feel`. `language="feel"` on a
+`tFormalExpression` is optional; any other language is refused at compile time with the
+flow id in the error.
+
+### The grammar this replaced (historical)
 
 ```
 expr    := or
@@ -386,18 +412,17 @@ and     := not ("and" not)*
 not     := "not" not | cmp
 cmp     := path op literal | path "in" "[" literal ("," literal)* "]"
 op      := ">" ">=" "<" "<=" "==" "!="
-path    := ident ("." ident)*          # e.g. subject.total_amount, task.outcome, subject.role.is_privileged
+path    := ident ("." ident)*
 literal := integer | float | quoted-string | true | false
 ```
 
-- `AshBpmn.Expr.parse/1` → `{:ok, ast} | {:error, message}`; ast is JSON-able maps:
-  `{"or" => [a, b]}`, `{"and" => [...]}`, `{"not" => a}`,
-  `{"cmp" => [path_string, op_string, literal]}`, `{"in" => [path_string, [literals]]}`.
-- `AshBpmn.Expr.eval/2` (`ast, ctx`) → `{:ok, boolean()}`. Missing path → comparison
-  is `false` (never raises); `nil` compares `==`/`!=` only.
-- Runtime context paths: `subject.<attr>` (and nested maps/structs via Access-safe
-  traversal: structs use dot access on fields, never Access on structs),
-  `task.outcome`, `task.assignee_id`, `env.<key>` from engine assigns.
+Note `==` and `!=`, which are not FEEL: FEEL spells equality `=` and inequality
+`!=`. Fixture conditions were rewritten accordingly.
+
+Runtime context paths are unchanged: `subject.<attr>` (nested maps and structs via
+Access-safe traversal — structs use dot access on fields, never `Access`),
+`task.outcome`, `task.assignee_id`, `routing.<signal>` promoted by a business rule
+task, and `env.<key>` from engine assigns.
 
 ---
 
