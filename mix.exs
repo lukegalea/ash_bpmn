@@ -98,10 +98,15 @@ defmodule AshBpmn.MixProject do
     [
       # Screenshots live in documentation/assets and are linked relatively:
       # `documentation/assets/x.png` from the README, `../assets/x.png` from a
-      # topic page. Those are the paths GitHub needs, and on a private
-      # repository they are the *only* ones that work — GitHub fetches absolute
-      # image URLs through an unauthenticated proxy, so a raw.githubusercontent
-      # link renders as a broken image for everyone, owner included.
+      # topic page. Those are the paths GitHub needs.
+      #
+      # They were originally the *only* ones that worked, because this repository
+      # was private and GitHub fetches absolute image URLs through an
+      # unauthenticated proxy — a raw.githubusercontent link rendered as a broken
+      # image for everyone, owner included. The repository is public now, so
+      # absolute URLs would also resolve; relative paths stay because they
+      # survive a fork, a rename and a move back to private, none of which an
+      # absolute URL does.
       #
       # ex_doc flattens the topic pages into the doc root, where `../assets/`
       # points outside the output, so the shim below rewrites those two prefixes

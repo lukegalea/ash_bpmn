@@ -58,8 +58,21 @@ defmodule AshBpmn.Feel do
   must keep evaluating it for as long as it runs — across engine upgrades. The engine's AST is
   tagged tuples containing `Decimal`s: expressive, but not JSON, and carrying no version of its
   own. So the snapshot stores the **source text**, which is what the author wrote and what the
-  BPMN document already contains, and evaluation parses through a memoised cache. Re-parsing
-  pins nothing; storing a tree would pin a parser.
+  BPMN document already contains. Re-parsing pins nothing; storing a tree would pin a parser.
+
+  **There is no parse cache here, and that is a considered omission rather than an oversight.**
+  `Boxic.FEEL.evaluate/2` parses on every call, and every call in this package evaluates one
+  short gateway condition once per token advance — a token advance that has already done
+  several database round trips. Caching that would optimise the cheapest step in the sequence.
+  `AshDecisions.Feel` *does* memoise, because a decision table evaluates a cell per rule per
+  column on a single call and the arithmetic is entirely different. If gateway evaluation ever
+  moves onto a hot path, the cache to copy is that one.
+
+  What is *not* stored is the engine version that validated the expression at publish time. A
+  definition therefore records what the author wrote but not what agreed it was valid, so an
+  engine upgrade that narrowed the accepted grammar would surface as a runtime failure on a
+  published definition rather than as a refused publish. Named here because it is the one part
+  of this argument that is aspirational.
 
   ## Every expression is hostile input
 
