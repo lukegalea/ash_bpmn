@@ -150,3 +150,41 @@ defmodule AshBpmn.Test.Subject do
     define :update!, action: :update
   end
 end
+
+defmodule AshBpmn.Test.FixedDefinitionLoader do
+  @moduledoc """
+  A loader that always returns one particular definition.
+
+  Exists so a test can tell the difference between a viewer that goes through
+  `AshBpmn.DefinitionLoader` and one that reads the definition itself. Pointing it
+  at a definition the instance is *not* pinned to makes that difference visible
+  without needing a second tenant.
+  """
+
+  @behaviour AshBpmn.DefinitionLoader
+
+  require Ash.Query
+
+  @impl true
+  def load(resource, _definition_id, _instance, _scope) do
+    id = Application.get_env(:ash_bpmn, :test_fixed_definition_id)
+
+    resource
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.do_filter(id: id)
+    |> Ash.read_one!(authorize?: false)
+    |> case do
+      nil -> {:error, :not_found}
+      definition -> {:ok, definition}
+    end
+  end
+end
+
+defmodule AshBpmn.Test.FailingDefinitionLoader do
+  @moduledoc "A loader that never finds anything, for the missing-diagram path."
+
+  @behaviour AshBpmn.DefinitionLoader
+
+  @impl true
+  def load(_resource, _definition_id, _instance, _scope), do: {:error, :nope}
+end

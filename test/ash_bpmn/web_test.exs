@@ -313,6 +313,75 @@ defmodule AshBpmn.WebTest do
       assert_push_event(view, "highlight", %{node_ids: node_ids})
       assert "Task_1" in node_ids
     end
+
+    test "hands the diagram the definition XML, not an empty string", %{instance: instance} do
+      # The gap the tests above left open. They assert the canvas *element* is
+      # present, which it is even when the server found no definition and fell
+      # through to `xml = ""` -- bpmn-js then boots, imports nothing, and renders a
+      # blank box with no error anywhere. That shipped, and was caught by looking at
+      # a screenshot.
+      conn = build_test_conn()
+
+      {:ok, view, _html} = live(conn, "/viewer/#{instance.id}")
+
+      html = view |> element("#ash-bpmn-viewer") |> render()
+
+      refute html =~ ~s|data-xml=""|
+      assert html =~ "Process_1" or html =~ "bpmn"
+    end
+
+    test "loads the definition through the configured loader", %{instance: instance} do
+      # An instance may be pinned to a definition that does not live in its own
+      # tenant -- a baseline the host publishes centrally -- which is why
+      # `AshBpmn.DefinitionLoader` is a seam at all. The viewer used to read the
+      # definition directly instead, so every baseline-backed instance rendered
+      # blank.
+      #
+      # Rather than build a second tenant here, the loader is pointed at a
+      # *different* definition and the viewer is asked which one it showed. Only a
+      # viewer that goes through the loader can answer with the other one.
+      other =
+        force_publish!(
+          Definition.create!(%{
+            key: "loader_target",
+            name: "Loaded By The Seam",
+            # `Process_web_test` is the process id in @valid_xml. Getting this wrong
+            # once made the assertion below vacuous -- both definitions rendered
+            # identical XML, so it could not tell the two apart either way.
+            xml: String.replace(@valid_xml, "Process_web_test", "Process_FromLoader")
+          })
+        )
+
+      Application.put_env(:ash_bpmn, :definition_loader, AshBpmn.Test.FixedDefinitionLoader)
+      Application.put_env(:ash_bpmn, :test_fixed_definition_id, other.id)
+
+      on_exit(fn ->
+        Application.delete_env(:ash_bpmn, :definition_loader)
+        Application.delete_env(:ash_bpmn, :test_fixed_definition_id)
+      end)
+
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/viewer/#{instance.id}")
+
+      html = view |> element("#ash-bpmn-viewer") |> render()
+
+      assert html =~ "Process_FromLoader"
+    end
+
+    test "still shows tokens and events when no definition can be found", %{
+      instance: instance
+    } do
+      # `load/4`, not `load!/4`, on purpose: the tokens, tasks and events are the
+      # useful half of this page and a missing diagram should not take them with it.
+      Application.put_env(:ash_bpmn, :definition_loader, AshBpmn.Test.FailingDefinitionLoader)
+      on_exit(fn -> Application.delete_env(:ash_bpmn, :definition_loader) end)
+
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/viewer/#{instance.id}")
+
+      assert has_element?(view, "#ash-bpmn-tokens")
+      assert has_element?(view, "#ash-bpmn-events")
+    end
   end
 
   # ── Task List Tests ─────────────────────────────────────────────────────

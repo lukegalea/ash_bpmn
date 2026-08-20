@@ -121,11 +121,27 @@ defmodule AshBpmn.Web.ViewerLive do
             |> assign(:tasks, [])
             |> assign(:events, [])
           else
+            # Through the configured loader, not a tenant-scoped read of our own.
+            #
+            # An instance may be pinned to a definition that does not live in its tenant --
+            # a baseline the host publishes centrally -- which is the entire reason
+            # `AshBpmn.DefinitionLoader` exists. Reading it directly here found nothing and
+            # fell through to `xml = ""`, so the viewer rendered its token list, its task
+            # list and its event log correctly beside a completely blank canvas. bpmn-js had
+            # booted and imported nothing, so there was no error anywhere to follow.
+            #
+            # `load/4` rather than `load!/4`: a viewer that cannot find a definition should
+            # still show the tokens and events it *did* find, which are the useful half.
             definition =
-              definition_mod
-              |> Ash.Query.for_read(:read)
-              |> Ash.Query.do_filter(id: instance.definition_id)
-              |> Ash.read_one!(opts)
+              case AshBpmn.Config.definition_loader().load(
+                     definition_mod,
+                     instance.definition_id,
+                     instance,
+                     AshBpmn.Scope.from_assigns(socket.assigns)
+                   ) do
+                {:ok, definition} -> definition
+                {:error, _reason} -> nil
+              end
 
             tokens =
               token_mod
