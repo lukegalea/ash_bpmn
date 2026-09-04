@@ -76,20 +76,36 @@ gateway conditions, never in resolver specs, never in the invoker.
     business rule task -> promote a signal -> gateway reads `routing.<name>`. A
     gateway that dereferenced a decision would do I/O inside a code path that is
     otherwise pure and in-process, and would put the decision back inside the graph.
-12. **Actions are idempotent under redelivery.** Node execution may run twice
+12. **One binding vocabulary for every call a node makes.** Declared FEEL inputs
+    (`ash:inputs`) and promoted signals (`ash:promote`) mean the same thing on a
+    `businessRuleTask`, a `serviceTask` and a `sendTask`, and are extracted,
+    validated and gated by the same code on all three: inputs are evaluated with
+    FEEL against `subject`/`task`/`routing`/`assigns`, and only declared scalars
+    reach the token. A `sendTask` is a `serviceTask` with a different icon --
+    same config, same dispatch. Do not fork the shapes per node kind, and do not
+    add a second way to hand a callee its arguments.
+13. **The catalogue is the allowlist.** The designer's decision and action
+    catalogues come from the host, as code (`AshBpmn.Catalogue.AshActions` is one
+    way to build them). They make authoring honest -- a select, not a guess --
+    but they are not the runtime source of truth: the XML is, and invoking is
+    still the only contract. When the host's `ActionInvoker` exports
+    `exists?(ref) :: boolean`, the compiler verifies every service/send action at
+    publish time, the same promise the decision resolver's `exists?/1` makes; a
+    catalogue crash degrades the *panel* to free text, never the engine.
+14. **Actions are idempotent under redelivery.** Node execution may run twice
     (Oban redelivery). The token claim gate makes double-advance safe; your
     `ActionInvoker` callbacks must tolerate a second invocation.
-13. **Engine calls go through `AshBpmn.Scope`, never `authorize?: false`.** Every
+15. **Engine calls go through `AshBpmn.Scope`, never `authorize?: false`.** Every
     internal call passes `AshBpmn.Scope.engine/2`, which carries the actor and the
     tenant and marks the call for the bypass each generated resource declares on
     `AshBpmn.Checks.AshBpmnInteraction`. There is exactly one exception —
     `AshBpmn.Scope.subject/2`, for reading the *host's* subject, which no ash_bpmn
     policy governs — and a test fails the build if a second one appears.
-14. **Pass the tenant, and pass it explicitly.** `AshBpmn.start_instance/2` takes
+16. **Pass the tenant, and pass it explicitly.** `AshBpmn.start_instance/2` takes
     `:tenant`; operations on a record already loaded infer it from that record.
     Background jobs carry the tenant and the domain in their args, because a job
     outlives the process that enqueued it and has nothing else to read them from.
-15. **A work item can sit on your base resource.** Every resource macro takes
+17. **A work item can sit on your base resource.** Every resource macro takes
     `:base` and `:base_opts`, so a human task inherits whatever your application
     arranged for every other record it owns. One ordering rule comes with it: a
     bypass in Ash short-circuits only the policies declared *after* it, and a base

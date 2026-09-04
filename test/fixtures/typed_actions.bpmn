@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   id="Definitions_typed">
+  <bpmn2:process id="Process_typed" isExecutable="true">
+    <bpmn2:startEvent id="Start">
+      <bpmn2:outgoing>F_start</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <!-- A decision call with a named decision, typed inputs, one promoted signal. -->
+    <bpmn2:businessRuleTask id="AssessRisk" name="Assess risk">
+      <bpmn2:extensionElements>
+        <ash:decision ref="risk.tier" binding="latest" name="RiskTier"/>
+        <ash:inputs>
+          <ash:input name="amount" from="subject.amount"/>
+        </ash:inputs>
+        <ash:promote>
+          <ash:signal name="tier" required="true"/>
+        </ash:promote>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_start</bpmn2:incoming>
+      <bpmn2:outgoing>F_assessed</bpmn2:outgoing>
+    </bpmn2:businessRuleTask>
+
+    <bpmn2:exclusiveGateway id="Route" default="F_low">
+      <bpmn2:incoming>F_assessed</bpmn2:incoming>
+      <bpmn2:outgoing>F_high</bpmn2:outgoing>
+      <bpmn2:outgoing>F_low</bpmn2:outgoing>
+    </bpmn2:exclusiveGateway>
+
+    <!-- A send task: the same config shape as a service task, dispatched the same way. -->
+    <bpmn2:sendTask id="Notify" name="Notify">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="send_notice"/>
+        <ash:inputs>
+          <ash:input name="note" from="routing.tier"/>
+        </ash:inputs>
+        <ash:promote>
+          <ash:signal name="ticket" from="reference" required="true"/>
+        </ash:promote>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_high</bpmn2:incoming>
+      <bpmn2:outgoing>F_notified</bpmn2:outgoing>
+    </bpmn2:sendTask>
+
+    <!-- A service task with typed inputs only. -->
+    <bpmn2:serviceTask id="Record" name="Record">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="record_risk"/>
+        <ash:inputs>
+          <ash:input name="risk_tier" from="routing.tier"/>
+        </ash:inputs>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_low</bpmn2:incoming>
+      <bpmn2:outgoing>F_recorded</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="EndHigh">
+      <bpmn2:extensionElements><ash:taskConfig outcome="escalated"/></bpmn2:extensionElements>
+      <bpmn2:incoming>F_notified</bpmn2:incoming>
+    </bpmn2:endEvent>
+    <bpmn2:endEvent id="EndLow">
+      <bpmn2:extensionElements><ash:taskConfig outcome="approved"/></bpmn2:extensionElements>
+      <bpmn2:incoming>F_recorded</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F_start" sourceRef="Start" targetRef="AssessRisk"/>
+    <bpmn2:sequenceFlow id="F_assessed" sourceRef="AssessRisk" targetRef="Route"/>
+    <bpmn2:sequenceFlow id="F_high" sourceRef="Route" targetRef="Notify">
+      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression"
+        language="feel">routing.tier = "high"</bpmn2:conditionExpression>
+    </bpmn2:sequenceFlow>
+    <bpmn2:sequenceFlow id="F_low" sourceRef="Route" targetRef="Record"/>
+    <bpmn2:sequenceFlow id="F_notified" sourceRef="Notify" targetRef="EndHigh"/>
+    <bpmn2:sequenceFlow id="F_recorded" sourceRef="Record" targetRef="EndLow"/>
+  </bpmn2:process>
+</bpmn2:definitions>

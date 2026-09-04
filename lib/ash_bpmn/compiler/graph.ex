@@ -188,7 +188,12 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
-  defp build_node_config(node, "serviceTask") do
+  # A service or send task invokes a host action. The action is the only required binding;
+  # the typed FEEL inputs and promoted signals are optional and, when absent, are left off
+  # the node entirely so documents written before they existed compile exactly as they
+  # always did.
+  defp build_node_config(node, type) when type in ["serviceTask", "sendTask"] do
+    id = Xml.element_attr(node, "id")
     ext = Xml.find_extension_elements(node)
 
     ash_task_configs = Xml.find_ash_elements(ext, "taskConfig")
@@ -197,45 +202,48 @@ defmodule AshBpmn.Compiler.Graph do
       [] ->
         {:error,
          Errors.error(
-           Xml.element_attr(node, "id"),
-           "serviceTask '#{Xml.element_attr(node, "id")}' must have an ash:taskConfig with a non-empty action attribute"
+           id,
+           "#{type} '#{id}' must have an ash:taskConfig with a non-empty action attribute"
          )}
 
       [config | _] ->
         action = Xml.element_attr(config, "action")
 
-        if action == nil or String.trim(action) == "" do
-          {:error,
-           Errors.error(
-             Xml.element_attr(node, "id"),
-             "serviceTask '#{Xml.element_attr(node, "id")}' ash:taskConfig must have a non-empty action attribute"
-           )}
-        else
-          # Check for unknown ash attributes on taskConfig
-          known_attrs = MapSet.new(["action"])
+        cond do
+          action == nil or String.trim(action) == "" ->
+            {:error,
+             Errors.error(
+               id,
+               "#{type} '#{id}' ash:taskConfig must have a non-empty action attribute"
+             )}
 
-          unknown_ash =
-            Enum.filter(Xml.find_ash_attributes(config), fn {k, _} -> k not in known_attrs end)
-
-          if unknown_ash != [] do
-            {k, _} = hd(unknown_ash)
+          unknown_task_config_attr?(config, ["action"]) ->
+            {k, _} = unknown_task_config_attr(config, ["action"])
 
             {:error,
              Errors.error(
-               Xml.element_attr(node, "id"),
-               "Unknown ash: attribute '#{k}' on ash:taskConfig for serviceTask '#{Xml.element_attr(node, "id")}'"
+               id,
+               "Unknown ash: attribute '#{k}' on ash:taskConfig for #{type} '#{id}'"
              )}
-          else
-            # Check for unknown ash child elements
-            check_unknown_ash_children(
-              config,
-              node,
-              ["candidates", "exclusions", "outcomes", "timers"],
-              %{
-                "action" => action
-              }
-            )
-          end
+
+          true ->
+            with {:ok, inputs} <- build_inputs(type, id, ext),
+                 {:ok, promote} <- build_promotions(type, id, ext) do
+              # Absent means absent: a service task written before typed inputs existed
+              # must produce the same node it always produced.
+              config_map =
+                %{"action" => action}
+                |> maybe_put("inputs", inputs)
+                |> maybe_put("promote", promote)
+
+              # Check for unknown ash child elements
+              check_unknown_ash_children(
+                config,
+                node,
+                ["candidates", "exclusions", "outcomes", "timers"],
+                config_map
+              )
+            end
         end
     end
   end
@@ -333,6 +341,9 @@ defmodule AshBpmn.Compiler.Graph do
     ref = Xml.element_attr(decision, "ref")
     binding = Xml.element_attr(decision, "binding") || "latest"
     version = Xml.element_attr(decision, "version")
+    # The name of the decision inside a multi-decision key. Optional; an empty
+    # name is a typo, not a choice, so it is refused rather than trimmed away.
+    name = Xml.element_attr(decision, "name")
 
     cond do
       ref == nil or String.trim(ref) == "" ->
@@ -358,16 +369,27 @@ defmodule AshBpmn.Compiler.Graph do
            "businessRuleTask '#{id}' ash:decision binding=\"pinned\" requires a version"
          )}
 
+      name != nil and String.trim(name) == "" ->
+        {:error,
+         Errors.error(
+           id,
+           "businessRuleTask '#{id}' ash:decision name must be non-empty when present"
+         )}
+
       true ->
-        with {:ok, inputs} <- build_decision_inputs(id, ext),
-             {:ok, promote} <- build_decision_promotions(id, ext) do
+        with {:ok, inputs} <- build_inputs("businessRuleTask", id, ext),
+             {:ok, promote} <- build_promotions("businessRuleTask", id, ext) do
+          decision_config =
+            %{
+              "ref" => String.trim(ref),
+              "binding" => binding,
+              "version" => version
+            }
+            |> maybe_put("name", name && String.trim(name))
+
           {:ok,
            %{
-             "decision" => %{
-               "ref" => String.trim(ref),
-               "binding" => binding,
-               "version" => version
-             },
+             "decision" => decision_config,
              "inputs" => inputs,
              "promote" => promote
            }}
@@ -375,7 +397,14 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
-  defp build_decision_inputs(node_id, ext) do
+  # ── Shared inputs & promotions ───────────────────────────────────────────
+  #
+  # Declared inputs and promoted signals mean the same thing on every node kind that
+  # carries them -- a decision call and an action call take their arguments from the same
+  # context and promote onto the same token -- so both are extracted and validated here,
+  # once, and every node's snapshot entries come out identical by construction.
+
+  defp build_inputs(kind, node_id, ext) do
     ext
     |> Xml.find_ash_elements("inputs")
     |> Enum.flat_map(&Xml.find_ash_elements([&1], "input"))
@@ -385,20 +414,19 @@ defmodule AshBpmn.Compiler.Graph do
 
       cond do
         name == nil or String.trim(name) == "" ->
-          {:halt,
-           {:error, Errors.error(node_id, "businessRuleTask '#{node_id}' ash:input needs a name")}}
+          {:halt, {:error, Errors.error(node_id, "#{kind} '#{node_id}' ash:input needs a name")}}
 
         from == nil or String.trim(from) == "" ->
           {:halt,
            {:error,
             Errors.error(
               node_id,
-              "businessRuleTask '#{node_id}' ash:input '#{name}' needs a from expression"
+              "#{kind} '#{node_id}' ash:input '#{name}' needs a from expression"
             )}}
 
         true ->
           # The `from` expression is validated here, at publish time, for the same reason a
-          # gateway condition is: a decision node that cannot build its inputs should fail
+          # gateway condition is: a node that cannot build its inputs should fail
           # when someone publishes it, not when an instance reaches it.
           case AshBpmn.Feel.compile(from) do
             {:ok, stored} ->
@@ -409,7 +437,7 @@ defmodule AshBpmn.Compiler.Graph do
                {:error,
                 Errors.error(
                   node_id,
-                  "businessRuleTask '#{node_id}' ash:input '#{name}' from expression is not valid FEEL: #{message}"
+                  "#{kind} '#{node_id}' ash:input '#{name}' from expression is not valid FEEL: #{message}"
                 )}}
           end
       end
@@ -422,7 +450,7 @@ defmodule AshBpmn.Compiler.Graph do
 
   @max_promoted_signals 8
 
-  defp build_decision_promotions(node_id, ext) do
+  defp build_promotions(kind, node_id, ext) do
     signals =
       ext
       |> Xml.find_ash_elements("promote")
@@ -432,20 +460,20 @@ defmodule AshBpmn.Compiler.Graph do
 
     cond do
       Enum.any?(names, &(String.trim(&1) == "")) ->
-        {:error, Errors.error(node_id, "businessRuleTask '#{node_id}' ash:signal needs a name")}
+        {:error, Errors.error(node_id, "#{kind} '#{node_id}' ash:signal needs a name")}
 
       length(Enum.uniq(names)) != length(names) ->
         {:error,
          Errors.error(
            node_id,
-           "businessRuleTask '#{node_id}' promotes the same signal name twice"
+           "#{kind} '#{node_id}' promotes the same signal name twice"
          )}
 
       length(signals) > @max_promoted_signals ->
         {:error,
          Errors.error(
            node_id,
-           "businessRuleTask '#{node_id}' promotes #{length(signals)} signals; at most " <>
+           "#{kind} '#{node_id}' promotes #{length(signals)} signals; at most " <>
              "#{@max_promoted_signals} are allowed -- a token carries routing, not business data"
          )}
 
@@ -456,7 +484,7 @@ defmodule AshBpmn.Compiler.Graph do
 
            %{
              "name" => name,
-             # Which of the decision's outputs this signal takes. Defaults to the signal's own
+             # Which of the callee's outputs this signal takes. Defaults to the signal's own
              # name, which is the common case; `from` exists because the name a decision gives
              # an output and the name a process wants to route on are different vocabularies
              # owned by different people, and forcing them to coincide makes one of them
@@ -467,6 +495,20 @@ defmodule AshBpmn.Compiler.Graph do
          end)}
     end
   end
+
+  defp unknown_task_config_attr(config, known_attrs) do
+    config
+    |> Xml.find_ash_attributes()
+    |> Enum.find(fn {k, _} -> k not in known_attrs end)
+  end
+
+  defp unknown_task_config_attr?(config, known_attrs) do
+    unknown_task_config_attr(config, known_attrs) != nil
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, []), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp build_user_task_config(config, node) do
     id = Xml.element_attr(node, "id")

@@ -61,6 +61,28 @@ defmodule AshBpmn.Web.DesignerWrapper do
     process: "web_test"
 end
 
+defmodule AshBpmn.Web.CatalogueDesignerWrapper do
+  @moduledoc false
+
+  use AshBpmn.Web.DesignerLive,
+    domain: AshBpmn.Test.Domain,
+    process: "web_test",
+    decisions: {AshBpmn.Test.Catalogues, :decisions, []},
+    actions: {AshBpmn.Test.Catalogues, :actions, []},
+    decision_editor: {AshBpmn.Test.Catalogues, :decision_editor, []}
+end
+
+defmodule AshBpmn.Web.FailingCatalogueDesignerWrapper do
+  @moduledoc false
+
+  use AshBpmn.Web.DesignerLive,
+    domain: AshBpmn.Test.Domain,
+    process: "web_test",
+    decisions: {AshBpmn.Test.FailingCatalogues, :decisions, []},
+    actions: {AshBpmn.Test.FailingCatalogues, :actions, []},
+    decision_editor: {AshBpmn.Test.FailingCatalogues, :decision_editor, []}
+end
+
 defmodule AshBpmn.Web.ViewerWrapper do
   @moduledoc false
 
@@ -96,6 +118,12 @@ defmodule AshBpmn.Web.TestRouter do
     pipe_through :browser
 
     live("/designer", DesignerWrapper, :index, as: :designer)
+    live("/catalogue-designer", CatalogueDesignerWrapper, :index, as: :catalogue_designer)
+
+    live("/failing-catalogue-designer", FailingCatalogueDesignerWrapper, :index,
+      as: :failing_catalogue_designer
+    )
+
     live("/viewer/:id", ViewerWrapper, :show, as: :viewer)
     live("/tasks", TaskListWrapper, :index, as: :tasks)
   end

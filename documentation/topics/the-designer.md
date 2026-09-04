@@ -54,9 +54,29 @@ defmodule MyAppWeb.Bpmn.DesignerLive do
   use AshBpmn.Web.DesignerLive,
     domain: MyApp.Bpmn,
     process: "access_request",
-    actor: {MyAppWeb.Bpmn.Helpers, :current_actor, []}
+    actor: {MyAppWeb.Bpmn.Helpers, :current_actor, []},
+
+    # Optional catalogues. Each is an {module, function, args} tuple called as
+    # module.function(args ++ [socket]); a failure is swallowed and the panel
+    # falls back to free text.
+    decisions: {MyAppWeb.Bpmn.Catalogue, :decisions, []},
+    actions: {MyAppWeb.Bpmn.Catalogue, :actions, []},
+    decision_editor: {MyAppWeb.Bpmn.Catalogue, :decision_editor, []}
 end
 ```
+
+The catalogues are what turn the properties panel from a set of blank text
+fields into a set of choices. A decision entry carries the key, its publish
+status, and the named decisions inside it; an action entry carries the
+`ActionInvoker` ref plus the arguments the host's action actually declares, so
+the panel renders one read-only hint and one FEEL input per argument instead of
+asking the modeller to spell argument names from memory. `decision_editor`
+receives a decision key and the socket and answers with an href (or nil), which
+becomes an "Edit decision ↗" link that opens your DMN editor beside the
+designer. `AshBpmn.Catalogue.AshActions.entries/1` builds the action catalogue
+straight from a list of `{ref, resource, action}` triples; the allowlist is
+code, so an entry naming an action that does not exist raises at boot, not in
+front of a modeller. No option means today's behaviour: free-text inputs.
 
 The canvas is the client's; the properties panel is the server's. When you select
 an element, the hook pushes `selection_changed` — carrying the element's current
@@ -72,9 +92,61 @@ edits come back as `apply_config` and the hook rewrites the element's
 `extensionElements` from scratch via moddle — never merged, so a panel that
 rendered blanks over a configured task would erase it on Apply.
 
-A service task has exactly one binding, and the panel narrows to it:
+A service task has exactly one required binding plus the typed inputs and
+promotions; the panel narrows to those:
 
 ![A service task selected, showing only its action reference](../assets/designer-service-task.png)
+
+## Business rule tasks in the panel
+
+A `businessRuleTask` gets the fullest panel, because it carries the most
+vocabulary. With a `decisions` catalogue configured, the decision reference is a
+select, the resolved entry shows a status badge (`draft`, or `published vN`), and
+a `binding="pinned"` whose version is not the latest published one gets a drift
+note saying so — a pin that has quietly fallen behind is exactly the kind of
+thing a modeller should not have to discover in the XML. When the key lists more
+than one decision, a second select picks which one; with one, there is nothing
+to pick. The inputs and promote rows follow the same blank-row convention as a
+user task's lists. Every panel field round-trips: the `apply_config` payload
+carries the decision elements back out, so Apply rebuilds the element's
+`extensionElements` with everything it was shown and erases nothing.
+
+## Typed inputs and promotions on service and send tasks
+
+A `serviceTask` — and a `sendTask`, which is the same node with a different
+icon — takes the same declared-inputs and promoted-signals vocabulary a
+business rule task has, as siblings of `ash:taskConfig`:
+
+```xml
+<bpmn2:serviceTask id="Record" name="Record">
+  <bpmn2:extensionElements>
+    <ash:taskConfig action="record_risk"/>
+    <ash:inputs>
+      <ash:input name="risk_tier" from="routing.risk_tier"/>
+    </ash:inputs>
+    <ash:promote>
+      <ash:signal name="granted_role" from="role"/>
+    </ash:promote>
+  </bpmn2:extensionElements>
+</bpmn2:serviceTask>
+```
+
+The engine evaluates the inputs with FEEL against the same context a decision
+call sees (`subject`, `task`, `routing`, and your `assigns`) and passes the
+resulting map to the invoker as `ctx[:inputs]`. When the invoker answers with
+`{:ok, map}`, the declared signals are lifted from that map onto the token under
+exactly the gating a decision result goes through — scalars only, names and
+values bounded — so a gateway further on reads `routing.<signal>` the same way
+it reads a decision's promotion. `:ok`, or a non-map result, promotes nothing.
+A `sendTask` dispatches through the identical path: it is a service task whose
+icon matches what it does.
+
+With an `actions` catalogue configured, the panel renders one row per argument
+the host's action actually declares — name, type, a required badge, a tooltip
+with the argument's description — and each filled row is persisted as an
+ordinary `ash:input` whose name is the argument's name. The catalogue is a
+convenience for authoring; the compiler still verifies nothing about it except
+that what was written is valid FEEL.
 
 Save asks the hook for `saveXML({format: true})` and stores the document; publish
 runs the compiler and, on success, freezes the version.
@@ -87,13 +159,16 @@ way vendors from Camunda to Flowable attach execution bindings to a diagram.
 
 | Element | On | Carries |
 |---|---|---|
-| `ash:taskConfig action="..."` | serviceTask | the `ActionInvoker` reference |
+| `ash:taskConfig action="..."` | serviceTask, sendTask | the `ActionInvoker` reference |
 | `ash:taskConfig` | userTask | candidates, exclusions, outcomes, timers |
+| `ash:taskConfig outcome="..."` | endEvent | the instance outcome |
+| `ash:decision ref binding name?` | businessRuleTask | the decision reference: `binding` is `latest` or `pinned` (a pin requires `version`); `name` names the decision inside a multi-decision key |
+| `ash:inputs` > `ash:input name from` | businessRuleTask, serviceTask, sendTask | a declared FEEL input, evaluated by the engine before the call |
+| `ash:promote` > `ash:signal name from? required?` | businessRuleTask, serviceTask, sendTask | a named scalar lifted onto the token's routing; `from` defaults to the signal's own name, `required` defaults to false |
 | `ash:outcome name` | userTask config | one allowed decision value |
 | `ash:candidate kind="..." of="..."` | userTask config | a resolver clause (opaque to the library) |
 | `ash:exclusion who="..."` | userTask config | a maker-checker subtraction |
 | `ash:timer kind hours/days/minutes` | userTask config | remind / escalate / expire |
-| `ash:taskConfig outcome="..."` | endEvent | the instance outcome |
 
 Candidate and exclusion specs are **opaque strings** to ash_bpmn. `kind="manager_of"
 of="subject.created_by_id"` means whatever your `AshBpmn.AssignmentResolver` says

@@ -42,6 +42,11 @@ defmodule AshBpmn.Runtime.Interpreter do
       "serviceTask" ->
         service_task(graph, node_id, node, ctx)
 
+      # A send task is a service task with a different icon: it is configured the same
+      # way and dispatched through the same path.
+      "sendTask" ->
+        service_task(graph, node_id, node, ctx)
+
       "businessRuleTask" ->
         business_rule_task(graph, node_id, node, ctx)
 
@@ -104,8 +109,9 @@ defmodule AshBpmn.Runtime.Interpreter do
     decision = node["decision"] || %{}
     ref = decision["ref"]
 
-    with {:ok, inputs} <- resolve_decision_inputs(node["inputs"] || [], ctx, node_id),
-         {:ok, raw} <- invoke_decision(resolver, ref, inputs, ctx, node_id),
+    with {:ok, inputs} <- resolve_inputs(node["inputs"] || [], ctx, node_id),
+         {:ok, raw} <-
+           invoke_decision(resolver, ref, inputs, ctx, node_id, decision["name"]),
          {:ok, result} <- AshBpmn.DecisionResolver.normalize_result(raw),
          {:ok, routing} <- promoted_signals(node["promote"] || [], result.outputs, node_id) do
       outgoing = find_outgoing_flows(graph, node_id)
@@ -142,7 +148,10 @@ defmodule AshBpmn.Runtime.Interpreter do
     end
   end
 
-  defp resolve_decision_inputs(inputs, ctx, node_id) do
+  # One resolver for every node kind that declares FEEL inputs -- a decision call and an
+  # action call take their arguments from the same context, evaluated the same way, so
+  # their snapshot entries are interchangeable by construction.
+  defp resolve_inputs(inputs, ctx, node_id) do
     expr_ctx = build_expr_ctx(ctx)
 
     Enum.reduce_while(inputs, {:ok, %{}}, fn input, {:ok, acc} ->
@@ -157,22 +166,25 @@ defmodule AshBpmn.Runtime.Interpreter do
     end)
   end
 
-  defp invoke_decision(resolver, ref, inputs, ctx, node_id) do
-    case resolver.decide(ref, inputs, decision_context(ctx, node_id)) do
+  defp invoke_decision(resolver, ref, inputs, ctx, node_id, decision_name) do
+    context = decision_context(ctx, node_id, decision_name)
+
+    case resolver.decide(ref, inputs, context) do
       {:ok, result} -> {:ok, result}
       {:error, reason} -> {:error, reason}
       other -> {:error, "decision resolver returned #{inspect(other)}"}
     end
   end
 
-  defp decision_context(ctx, node_id) do
+  defp decision_context(ctx, node_id, decision_name) do
     %{
       subject: ctx[:subject],
       actor: ctx[:actor],
       tenant: ctx[:tenant],
       instance: ctx[:instance],
       token: ctx[:token],
-      node_id: node_id
+      node_id: node_id,
+      decision_name: decision_name
     }
   end
 
@@ -270,39 +282,57 @@ defmodule AshBpmn.Runtime.Interpreter do
     action = node["action"]
     invoker = AshBpmn.Config.action_invoker!()
 
-    case invoker.invoke(action, ctx) do
-      :ok ->
-        outgoing = find_outgoing_flows(graph, node_id)
+    with {:ok, inputs} <- resolve_inputs(node["inputs"] || [], ctx, node_id) do
+      # The evaluated inputs travel to the invoker, not the source text: the same
+      # resolved map a decision call would hand the resolver.
+      ctx = Map.put(ctx, :inputs, inputs)
 
-        effects =
-          [
-            consume_token: true,
-            events: [
-              event_attrs(ctx, node_id, :node_completed),
-              event_attrs(ctx, node_id, :action_invoked, %{"action" => action})
-            ]
-          ] ++ follow_flows(graph, outgoing, ctx)
+      case invoker.invoke(action, ctx) do
+        :ok ->
+          {:ok, service_task_effects(graph, node_id, action, inputs, %{}, ctx)}
 
-        {:ok, effects}
+        # A map result is the action's outputs; only declared, scalar signals may be
+        # promoted onto the token, under exactly the gating a decision result goes
+        # through. `:ok`, or `{:ok, thing}` where thing is not a map, promotes nothing.
+        {:ok, result} when is_map(result) ->
+          case promoted_signals(node["promote"] || [], result, node_id) do
+            {:ok, routing} ->
+              ctx = Map.put(ctx, :routing_override, Map.merge(current_routing(ctx), routing))
+              {:ok, service_task_effects(graph, node_id, action, inputs, routing, ctx)}
 
-      {:ok, _result} ->
-        outgoing = find_outgoing_flows(graph, node_id)
+            {:error, reason} ->
+              raise "service task '#{action}' failed: #{inspect(reason)}"
+          end
 
-        effects =
-          [
-            consume_token: true,
-            events: [
-              event_attrs(ctx, node_id, :node_completed),
-              event_attrs(ctx, node_id, :action_invoked, %{"action" => action})
-            ]
-          ] ++ follow_flows(graph, outgoing, ctx)
+        {:ok, _result} ->
+          {:ok, service_task_effects(graph, node_id, action, inputs, %{}, ctx)}
 
-        {:ok, effects}
-
-      {:error, reason} ->
-        # Raise so Oban retries; the worker will catch after max_attempts
-        raise "service task '#{action}' failed: #{inspect(reason)}"
+        {:error, reason} ->
+          # Raise so Oban retries; the worker will catch after max_attempts
+          raise "service task '#{action}' failed: #{inspect(reason)}"
+      end
     end
+  end
+
+  defp service_task_effects(graph, node_id, action, inputs, promoted, ctx) do
+    outgoing = find_outgoing_flows(graph, node_id)
+
+    effects =
+      [
+        consume_token: true,
+        events: [
+          event_attrs(ctx, node_id, :node_completed),
+          event_attrs(ctx, node_id, :action_invoked, %{
+            "action" => action,
+            # Bounded the same way the decision event bounds its inputs: the values are
+            # the engine's diagnostic, not the invoker's audit log.
+            "inputs" => Map.new(inputs, fn {k, v} -> {k, inspect_value(v)} end),
+            "promoted" => promoted
+          })
+        ]
+      ] ++ follow_flows(graph, outgoing, ctx)
+
+    effects
   end
 
   # ── userTask ─────────────────────────────────────────────────────────────
