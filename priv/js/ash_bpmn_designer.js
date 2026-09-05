@@ -72,7 +72,9 @@ export const ashBpmnModdle = {
       properties: [
         { name: 'ref', type: 'String', isAttr: true },
         { name: 'binding', type: 'String', isAttr: true },
-        { name: 'version', type: 'String', isAttr: true }
+        { name: 'version', type: 'String', isAttr: true },
+        // The decision's name inside a multi-decision key. Optional.
+        { name: 'name', type: 'String', isAttr: true }
       ]
     },
     {
@@ -104,6 +106,10 @@ export const ashBpmnModdle = {
       superClass: ['Element'],
       properties: [
         { name: 'name', type: 'String', isAttr: true },
+        // Which of the callee's outputs this signal takes; defaults to the signal's own
+        // name. Without this descriptor entry moddle drops the attribute on import and
+        // a custom-named signal silently reverts to its default source.
+        { name: 'from', type: 'String', isAttr: true },
         { name: 'required', type: 'String', isAttr: true }
       ]
     },
@@ -181,28 +187,82 @@ function pushError(hook, err) {
 }
 
 /**
- * Read an element's existing ash:TaskConfig back into a plain object, in the
- * same shape buildTaskConfig consumes.
+ * Read an element's existing ash: bindings back into a plain object, in the
+ * same shape buildAshValues consumes.
  *
  * The server only ever sees the last *saved* XML, so without this the
  * properties panel would render blank fields for an already-configured node —
  * and Apply, which rewrites extensionElements from scratch, would erase the
  * configuration the user was looking at.
+ *
+ * The element type decides which ash: elements the panel owns:
+ *   - BusinessRuleTask: ash:decision + ash:inputs + ash:promote
+ *   - ServiceTask / SendTask: ash:taskConfig(action) + ash:inputs + ash:promote
+ *   - UserTask / EndEvent: ash:taskConfig(candidates/outcomes/…)
  */
-function readTaskConfig(element) {
+function readConfig(element) {
   const bo = element && element.businessObject;
-  const ext = bo && bo.get && bo.get('extensionElements');
-  const values = ext ? ext.get('values') || [] : [];
-  const cfg = values.filter(function (v) {
-    return v.$type === 'ash:TaskConfig';
-  })[0];
+  if (!bo) return {};
 
-  if (!cfg) return {};
+  const type = bo.$type;
+  const ext = bo.get && bo.get('extensionElements');
+  const values = ext ? ext.get('values') || [] : [];
+
+  const find = function ($type) {
+    return values.filter(function (v) {
+      return v.$type === $type;
+    })[0];
+  };
 
   const list = function (holder, prop) {
     if (!holder) return [];
     return holder.get(prop) || [];
   };
+
+  const readInputs = function () {
+    const holder = find('ash:Inputs');
+    return list(holder, 'input').map(function (i) {
+      return { name: i.name || '', from: i.from || '' };
+    });
+  };
+
+  const readPromote = function () {
+    const holder = find('ash:Promote');
+    return list(holder, 'signal').map(function (s) {
+      return { name: s.name || '', from: s.from || '', required: s.required || 'false' };
+    });
+  };
+
+  if (type === 'bpmn:BusinessRuleTask') {
+    const decision = find('ash:Decision');
+
+    return {
+      decision: decision
+        ? {
+            ref: decision.ref || '',
+            binding: decision.binding || 'latest',
+            version: decision.version != null ? decision.version : '',
+            name: decision.name || ''
+          }
+        : null,
+      inputs: readInputs(),
+      promote: readPromote()
+    };
+  }
+
+  if (type === 'bpmn:ServiceTask' || type === 'bpmn:SendTask') {
+    const cfg = find('ash:TaskConfig');
+    if (!cfg) return {};
+
+    return {
+      action: cfg.action || '',
+      inputs: readInputs(),
+      promote: readPromote()
+    };
+  }
+
+  const cfg = find('ash:TaskConfig');
+  if (!cfg) return {};
 
   return {
     action: cfg.action || '',
@@ -238,15 +298,19 @@ function readTaskConfig(element) {
  *   exclusions?: [{ who }]
  *   outcomes?:   string[] | [{ name }]
  *   timers?:     [{ kind, minutes?, hours?, days? }]
+ *
+ * Blank optional attributes are omitted rather than written as empty strings —
+ * the compiler treats an empty action on a userTask's taskConfig as an unknown
+ * attribute, so writing one would corrupt a config the panel never showed.
  */
 function buildTaskConfig(moddle, config) {
   const props = {};
 
-  if (config.action !== undefined && config.action !== null) {
-    props.action = config.action;
+  if (nonBlank(config.action)) {
+    props.action = String(config.action);
   }
-  if (config.outcome !== undefined && config.outcome !== null) {
-    props.outcome = config.outcome;
+  if (nonBlank(config.outcome)) {
+    props.outcome = String(config.outcome);
   }
 
   if (Array.isArray(config.candidates) && config.candidates.length > 0) {
@@ -296,20 +360,105 @@ function buildTaskConfig(moddle, config) {
 }
 
 /**
- * Return a new bpmn:ExtensionElements containing the given taskConfig and
- * any pre-existing extension values that are NOT ash:TaskConfig.
+ * Build the ash: elements a given element type owns, from a server config map.
+ * Returns a list: for a BusinessRuleTask [ash:Decision, ash:Inputs?, ash:Promote?],
+ * for everything taskConfig-shaped [ash:TaskConfig, ash:Inputs?, ash:Promote?].
+ *
+ * Optional attributes are omitted when blank: name unless set, version unless the
+ * binding is pinned, from unless the signal redirects. binding and required get
+ * their defaults ("latest" / "false") when the row carried them blank, so a
+ * save → load → save round-trip is stable.
  */
-function rebuildExtensionElements(moddle, businessObject, taskConfig) {
-  var existing = businessObject.get('extensionElements');
-  var otherValues = existing
+function buildAshValues(moddle, type, config) {
+  const values = [];
+
+  if (type === 'bpmn:BusinessRuleTask') {
+    const d = config.decision;
+    if (d) {
+      const props = {};
+      if (nonBlank(d.ref)) props.ref = String(d.ref);
+      props.binding = String(nonBlank(d.binding) ? d.binding : 'latest');
+      if (d.binding === 'pinned' && nonBlank(d.version)) {
+        props.version = String(d.version);
+      }
+      if (nonBlank(d.name)) props.name = String(d.name);
+      values.push(moddle.create('ash:Decision', props));
+    }
+  } else {
+    values.push(buildTaskConfig(moddle, config));
+  }
+
+  if (Array.isArray(config.inputs) && config.inputs.length > 0) {
+    values.push(
+      moddle.create('ash:Inputs', {
+        input: config.inputs.map(function (i) {
+          const props = { name: String(i.name || '') };
+          if (nonBlank(i.from)) props.from = String(i.from);
+          return moddle.create('ash:Input', props);
+        })
+      })
+    );
+  }
+
+  if (Array.isArray(config.promote) && config.promote.length > 0) {
+    values.push(
+      moddle.create('ash:Promote', {
+        signal: config.promote.map(function (s) {
+          const props = { name: String(s.name || '') };
+          if (nonBlank(s.from)) props.from = String(s.from);
+          props.required = truthy(s.required) ? 'true' : 'false';
+          return moddle.create('ash:Signal', props);
+        })
+      })
+    );
+  }
+
+  return values;
+}
+
+/**
+ * The ash: extension element types each element type OWNS — the ones Apply
+ * replaces. Everything else in extensionElements (other namespaces' elements,
+ * other tools' extensions) survives untouched.
+ */
+function ownedAshTypes(type) {
+  if (type === 'bpmn:BusinessRuleTask') {
+    return ['ash:Decision', 'ash:Inputs', 'ash:Promote'];
+  }
+  if (type === 'bpmn:ServiceTask' || type === 'bpmn:SendTask') {
+    return ['ash:TaskConfig', 'ash:Inputs', 'ash:Promote'];
+  }
+  return ['ash:TaskConfig'];
+}
+
+/**
+ * Return a new bpmn:ExtensionElements containing the given ash: values and
+ * any pre-existing extension values that are NOT owned by this element type.
+ */
+function rebuildExtensionElements(moddle, businessObject, type, ashValues) {
+  const owned = {};
+  ownedAshTypes(type).forEach(function (t) {
+    owned[t] = true;
+  });
+
+  const existing = businessObject.get('extensionElements');
+  const otherValues = existing
     ? (existing.get('values') || []).filter(function (v) {
-        return v.$type !== 'ash:TaskConfig';
+        return !owned[v.$type];
       })
     : [];
 
   return moddle.create('bpmn:ExtensionElements', {
-    values: otherValues.concat([taskConfig])
+    values: otherValues.concat(ashValues)
   });
+}
+
+function nonBlank(value) {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+function truthy(value) {
+  return value === 'true' || value === '1' || value === true;
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +525,7 @@ export const AshBpmnDesigner = {
           id: el.id,
           type: el.businessObject.$type,
           name: el.businessObject.name || '',
-          config: readTaskConfig(el)
+          config: readConfig(el)
         };
       }
 
@@ -455,9 +604,9 @@ export const AshBpmnDesigner = {
           return;
         }
 
-        var taskConfig = buildTaskConfig(moddle, payload.config || {});
         var bo = element.businessObject;
-        var newExt = rebuildExtensionElements(moddle, bo, taskConfig);
+        var ashValues = buildAshValues(moddle, bo.$type, payload.config || {});
+        var newExt = rebuildExtensionElements(moddle, bo, bo.$type, ashValues);
 
         var updates = { extensionElements: newExt };
         if (payload.name !== undefined && payload.name !== null) {

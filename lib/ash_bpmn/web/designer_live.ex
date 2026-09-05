@@ -26,6 +26,24 @@ defmodule AshBpmn.Web.DesignerLive do
       saying so.
     * `:actor` — optional `{module, function, args}` tuple; called with
       `module.function(args ++ [socket])` to resolve the current actor.
+    * `:decisions` — optional `{module, function, args}` tuple; called with
+      `module.function(args ++ [socket])` on mount and on every `handle_params`,
+      and expected to return the decision catalogue: a list of entries shaped
+      `%{key: key, name: name, status: :draft | :published,
+      latest_published_version: pos_integer | nil, has_draft: boolean,
+      decisions: [%{name: name, inputs: [...], outputs: [...]}]}`. A failure is
+      swallowed and the panel falls back to free text.
+    * `:actions` — optional `{module, function, args}` tuple; same convention,
+      returning the action catalogue: a list of
+      `%{ref: ref, label: label, description: description | nil,
+      args: [%{name: name, type: type, allow_nil?: boolean,
+      description: description | nil}]}`. One row per declared argument is
+      rendered for the selected action. `AshBpmn.Catalogue.AshActions` builds
+      these straight from `{ref, resource, action}` triples.
+    * `:decision_editor` — optional `{module, function, args}` tuple; called
+      with `module.function(args ++ [decision_key, socket])` and expected to
+      answer with an href (or nil) for editing that decision, which becomes the
+      business rule panel's "Edit decision ↗" link.
 
   ## Testability
 
@@ -63,6 +81,12 @@ defmodule AshBpmn.Web.DesignerLive do
     # forces.
     process_key = Keyword.get(opts, :process)
     actor_mfa = Keyword.get(opts, :actor, nil)
+    # The catalogues. Each is an optional {module, function, args} tuple called with
+    # `module.function(args ++ [socket])`; the panel renders selects from what comes
+    # back and falls back to free text when the option is absent or the call fails.
+    decisions_mfa = Keyword.get(opts, :decisions, nil)
+    actions_mfa = Keyword.get(opts, :actions, nil)
+    decision_editor_mfa = Keyword.get(opts, :decision_editor, nil)
 
     quote do
       use Phoenix.LiveView
@@ -77,6 +101,9 @@ defmodule AshBpmn.Web.DesignerLive do
       # See the note in task_list_live.ex: escaping an option that is already AST stores
       # the alias unexpanded, and it reaches `apply/3` as a tuple rather than a module.
       @ash_bpmn_designer_actor_mfa unquote(actor_mfa)
+      @ash_bpmn_designer_decisions_mfa unquote(decisions_mfa)
+      @ash_bpmn_designer_actions_mfa unquote(actions_mfa)
+      @ash_bpmn_designer_decision_editor_mfa unquote(decision_editor_mfa)
 
       # ── Minimal template XML for new drafts ───────────────────────────────
 
@@ -151,13 +178,16 @@ defmodule AshBpmn.Web.DesignerLive do
            errors: [],
            graph: nil,
            pending_publish: false
-         )}
+         )
+         |> ash_bpmn_load_catalogues()}
       end
 
       @impl true
       def handle_params(params, _uri, socket) do
         socket = assign(socket, :definition_key, ash_bpmn_resolve_key(params))
         socket = load_or_create_definition(socket)
+        # The catalogues can depend on the tenant, which the route may just have changed.
+        socket = ash_bpmn_load_catalogues(socket)
 
         if connected?(socket) do
           {:noreply, push_event(socket, "load_xml", %{xml: socket.assigns.xml})}
@@ -266,9 +296,66 @@ defmodule AshBpmn.Web.DesignerLive do
       def handle_event("update-config", params, socket) do
         id = params["element_id"] || params["id"] || ""
         name = params["name"] || ""
-        config = build_config_from_params(params)
+        config = build_config_from_params(params, socket.assigns[:actions] || [])
 
         {:noreply, push_event(socket, "apply_config", %{id: id, name: name, config: config})}
+      end
+
+      # A select inside the properties panel changed before Apply — most usefully the
+      # action select on a service task, whose declared argument rows only exist once
+      # the action is chosen. Re-render the panel around the new selection.
+      @impl true
+      def handle_event("panel-changed", params, socket) do
+        selected =
+          case socket.assigns[:selected] do
+            nil ->
+              nil
+
+            sel ->
+              %{sel | config: panel_params_to_config(params, sel.config)}
+          end
+
+        {:noreply, assign(socket, :selected, selected)}
+      end
+
+      # Merges just the panel fields a `phx-change` select owns back into the
+      # selection's config, leaving every other entry untouched.
+      defp panel_params_to_config(params, config) do
+        config = config || %{}
+
+        config =
+          if Map.has_key?(params, "action") do
+            Map.put(config, "action", params["action"] || "")
+          else
+            config
+          end
+
+        decision_keys = [
+          {"decision_ref", "ref"},
+          {"binding", "binding"},
+          {"version", "version"},
+          {"decision_name", "name"}
+        ]
+
+        decision =
+          Enum.reduce(decision_keys, Map.get(config, "decision") || %{}, fn
+            {param, key}, acc ->
+              if Map.has_key?(params, param) do
+                Map.put(acc, key, params[param] || "")
+              else
+                acc
+              end
+          end)
+
+        if decision == %{} do
+          config
+        else
+          Map.put(
+            config,
+            "decision",
+            Map.merge(AshBpmn.Web.DesignerLive.empty_decision(), decision)
+          )
+        end
       end
 
       # ── Render delegates to the component module ─────────────────────────
@@ -279,6 +366,43 @@ defmodule AshBpmn.Web.DesignerLive do
       end
 
       # ── Private helpers ─────────────────────────────────────────────────
+
+      # Refresh the catalogue assigns. Called from mount and handle_params: the
+      # catalogues may be tenant-scoped, and the tenant can change between params.
+      defp ash_bpmn_load_catalogues(socket) do
+        socket
+        |> assign(:decisions, ash_bpmn_catalogue(@ash_bpmn_designer_decisions_mfa, socket))
+        |> assign(:actions, ash_bpmn_catalogue(@ash_bpmn_designer_actions_mfa, socket))
+        |> assign(:decision_editor_href, ash_bpmn_editor_href_fn(socket))
+      end
+
+      # A catalogue outage must degrade to free-text inputs, not to a broken page.
+      defp ash_bpmn_catalogue(mfa, socket) do
+        case mfa do
+          nil -> []
+          {m, f, a} -> apply(m, f, a ++ [socket])
+        end
+      rescue
+        _ -> []
+      end
+
+      # The editor link is resolved per decision key at render time, against the socket
+      # this navigation came in on.
+      defp ash_bpmn_editor_href_fn(socket) do
+        case @ash_bpmn_designer_decision_editor_mfa do
+          nil ->
+            nil
+
+          {m, f, a} ->
+            fn key ->
+              try do
+                apply(m, f, a ++ [key, socket])
+              rescue
+                _ -> nil
+              end
+            end
+        end
+      end
 
       defp load_or_create_definition(socket) do
         {:ok, %{definition: definition_mod}} =
@@ -379,12 +503,31 @@ defmodule AshBpmn.Web.DesignerLive do
         end
       end
 
-      defp build_config_from_params(params) do
+      defp build_config_from_params(params, actions \\ []) do
         type = params["type"] || ""
 
         case type do
           "bpmn:ServiceTask" ->
-            %{action: params["action"] || ""}
+            service_task_config(params, actions)
+
+          "bpmn:SendTask" ->
+            service_task_config(params, actions)
+
+          "bpmn:BusinessRuleTask" ->
+            version =
+              if params["binding"] == "pinned", do: params["version"] || "", else: nil
+
+            %{
+              "decision" => %{
+                "ref" => params["decision_ref"] || "",
+                "binding" => params["binding"] || "latest",
+                "version" => version,
+                "name" =>
+                  if(blank?(params["decision_name"]), do: nil, else: params["decision_name"])
+              },
+              "inputs" => parse_feel_inputs(params),
+              "promote" => parse_promote(params)
+            }
 
           "bpmn:UserTask" ->
             %{
@@ -400,6 +543,55 @@ defmodule AshBpmn.Web.DesignerLive do
           _ ->
             %{}
         end
+      end
+
+      defp service_task_config(params, actions) do
+        %{
+          "action" => params["action"] || "",
+          # The rows the panel rendered for the selected action's declared arguments
+          # are ordinary ash:inputs whose name is the argument's name; only the rows
+          # the user filled are kept. No catalogue entry — no declared rows.
+          "inputs" => parse_arg_inputs(params, actions),
+          "promote" => parse_promote(params)
+        }
+      end
+
+      # One positional `inputs_from[]` per declared argument row, in the order the
+      # panel rendered them.
+      defp parse_arg_inputs(params, actions) do
+        case Enum.find(actions, fn entry -> to_string(entry.ref) == params["action"] end) do
+          nil ->
+            []
+
+          entry ->
+            froms = pad(List.wrap(params["inputs_from"] || []), length(entry.args))
+
+            entry.args
+            |> Enum.zip_with(froms, fn arg, from -> {arg, from} end)
+            |> Enum.reject(fn {_arg, from} -> blank?(from) end)
+            |> Enum.map(fn {arg, from} -> %{"name" => to_string(arg.name), "from" => from} end)
+        end
+      end
+
+      defp parse_feel_inputs(params) do
+        names = List.wrap(params["inputs_name"] || [])
+        froms = pad(List.wrap(params["inputs_from"] || []), length(names))
+
+        names
+        |> Enum.zip_with(froms, &%{"name" => &1, "from" => &2})
+        |> Enum.reject(&(blank?(&1["name"]) or blank?(&1["from"])))
+      end
+
+      defp parse_promote(params) do
+        names = List.wrap(params["promote_name"] || [])
+        froms = pad(List.wrap(params["promote_from"] || []), length(names))
+        required = pad(List.wrap(params["promote_required"] || []), length(names))
+
+        [names, froms, required]
+        |> Enum.zip_with(fn [name, from, req] ->
+          %{"name" => name, "from" => from, "required" => to_string(req) == "true"}
+        end)
+        |> Enum.reject(&blank?(&1["name"]))
       end
 
       # The panel renders a blank row at the end of every list so entries can be
@@ -603,7 +795,12 @@ defmodule AshBpmn.Web.DesignerLive do
                   />
                 </div>
 
-                <.node_config selected={assigns.selected} />
+                <.node_config
+                  selected={assigns.selected}
+                  decisions={assigns[:decisions] || []}
+                  actions={assigns[:actions] || []}
+                  decision_editor_href={assigns[:decision_editor_href]}
+                />
 
                 <button
                   type="submit"
@@ -645,20 +842,246 @@ defmodule AshBpmn.Web.DesignerLive do
   # renders one row per existing entry plus one blank row, so a submit can only
   # add — never silently drop what was already bound to the element.
   attr(:selected, :map, required: true)
+  attr(:decisions, :list, default: [])
+  attr(:actions, :list, default: [])
+  attr(:decision_editor_href, :any, default: nil)
 
-  def node_config(%{selected: %{type: "bpmn:ServiceTask"}} = assigns) do
+  # A service task and a send task are configured identically — an action, typed
+  # FEEL inputs, promoted signals — so they share one panel branch.
+  def node_config(%{selected: %{type: type}} = assigns)
+      when type in ["bpmn:ServiceTask", "bpmn:SendTask"] do
+    action = assigns.selected.config["action"] || ""
+    entry = Enum.find(assigns.actions, fn a -> to_string(a.ref) == action end)
+
+    arg_rows =
+      if entry do
+        Enum.map(entry.args, fn arg ->
+          %{"arg" => arg, "value" => arg_input_value(assigns.selected.config["inputs"], arg.name)}
+        end)
+      else
+        []
+      end
+
+    assigns =
+      assigns
+      |> assign(:svc_action, action)
+      |> assign(:svc_entry, entry)
+      |> assign(:svc_arg_rows, arg_rows)
+      |> assign(
+        :svc_promote,
+        rows(promote_signal_rows(assigns.selected.config["promote"]), %{
+          "name" => "",
+          "from" => "",
+          "required" => "false"
+        })
+      )
+
     ~H"""
     <div class="mb-3">
       <label class={label_class()} for="config-action">Action</label>
-      <input
-        id="config-action"
-        type="text"
-        name="action"
-        value={@selected.config["action"]}
-        class={field_class()}
-        placeholder="my_app.do_something"
-      />
+      <%= if @actions == [] do %>
+        <input
+          id="config-action"
+          type="text"
+          name="action"
+          value={@svc_action}
+          class={field_class()}
+          placeholder="my_app.do_something"
+        />
+      <% else %>
+        <select
+          id="config-action"
+          name="action"
+          phx-change="panel-changed"
+          class={select_class(@svc_entry != nil or @svc_action == "")}
+        >
+          <option value="" selected={@svc_action == ""}>— choose an action —</option>
+          <option :for={a <- @actions} value={a.ref} selected={to_string(a.ref) == @svc_action}>
+            {a.label}
+          </option>
+        </select>
+        <%= if @svc_action != "" and @svc_entry == nil do %>
+          <p class="mt-1 text-xs text-red-600 dark:text-red-400">
+            '{@svc_action}' is not in the action catalogue.
+          </p>
+        <% end %>
+      <% end %>
     </div>
+
+    <%= if @svc_entry != nil do %>
+      <div class="mb-3">
+        <label class={label_class()}>Arguments (FEEL)</label>
+        <div :for={row <- @svc_arg_rows} class="mb-2">
+          <div class="flex items-center gap-1 mb-1">
+            <span class="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+              {row["arg"].name}
+            </span>
+            <span class="text-xs text-zinc-400 dark:text-zinc-500">{row["arg"].type}</span>
+            <%= if row["arg"].allow_nil? == false do %>
+              <span class="px-1 rounded bg-zinc-100 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 text-xs">
+                required
+              </span>
+            <% end %>
+            <%= if row["arg"][:description] do %>
+              <span class="text-xs text-zinc-400 dark:text-zinc-500" title={row["arg"][:description]}>
+                ⓘ
+              </span>
+            <% end %>
+          </div>
+          <input
+            type="text"
+            name="inputs_from[]"
+            value={row["value"]}
+            class={field_class()}
+            placeholder="FEEL, e.g. routing.risk_tier"
+          />
+        </div>
+      </div>
+    <% end %>
+
+    <.promote_rows promote={@svc_promote} />
+    """
+  end
+
+  def node_config(%{selected: %{type: "bpmn:BusinessRuleTask"}} = assigns) do
+    decision = assigns.selected.config["decision"] || AshBpmn.Web.DesignerLive.empty_decision()
+    ref = decision["ref"] || ""
+    entry = Enum.find(assigns.decisions, fn d -> to_string(d.key) == ref end)
+
+    assigns =
+      assigns
+      |> assign(:brt_decision, decision)
+      |> assign(:brt_entry, entry)
+      |> assign(
+        :brt_inputs,
+        rows(assigns.selected.config["inputs"], %{"name" => "", "from" => ""})
+      )
+      |> assign(
+        :brt_promote,
+        rows(promote_signal_rows(assigns.selected.config["promote"]), %{
+          "name" => "",
+          "from" => "",
+          "required" => "false"
+        })
+      )
+      |> assign(:brt_editor_href, decision_editor_href(assigns.decision_editor_href, ref))
+
+    ~H"""
+    <div class="mb-3">
+      <label class={label_class()} for="config-decision-ref">Decision</label>
+      <%= if @decisions == [] do %>
+        <input
+          id="config-decision-ref"
+          type="text"
+          name="decision_ref"
+          value={@brt_decision["ref"]}
+          class={field_class()}
+          placeholder="my_app.decision_key"
+        />
+      <% else %>
+        <select
+          id="config-decision-ref"
+          name="decision_ref"
+          phx-change="panel-changed"
+          class={select_class(@brt_entry != nil or @brt_decision["ref"] == "")}
+        >
+          <option value="" selected={@brt_decision["ref"] == ""}>— choose a decision —</option>
+          <option :for={d <- @decisions} value={d.key} selected={to_string(d.key) == @brt_decision["ref"]}>
+            {d.name || d.key}
+          </option>
+        </select>
+        <%= if @brt_decision["ref"] != "" and @brt_entry == nil do %>
+          <p class="mt-1 text-xs text-red-600 dark:text-red-400">
+            '{@brt_decision["ref"]}' is not in the decision catalogue.
+          </p>
+        <% end %>
+      <% end %>
+
+      <%= if @brt_entry != nil do %>
+        <div class="mt-1">
+          <span class={["px-1.5 py-0.5 rounded-full text-xs font-medium", decision_badge_class(@brt_entry)]}>
+            {decision_badge_text(@brt_entry)}
+          </span>
+        </div>
+        <%= if drift?(@brt_decision, @brt_entry) do %>
+          <p class="mt-1 text-xs text-amber-600 dark:text-amber-400">
+            Pinned to v{@brt_decision["version"]}; latest published is v{@brt_entry.latest_published_version}.
+          </p>
+        <% end %>
+      <% end %>
+
+      <%= if @brt_editor_href do %>
+        <div class="mt-1">
+          <a
+            href={@brt_editor_href}
+            target="_blank"
+            rel="noopener"
+            class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+          >
+            Edit decision ↗
+          </a>
+        </div>
+      <% end %>
+    </div>
+
+    <div class="mb-3">
+      <label class={label_class()}>Binding</label>
+      <select name="binding" phx-change="panel-changed" class={field_class()}>
+        <option value="latest" selected={@brt_decision["binding"] != "pinned"}>latest</option>
+        <option value="pinned" selected={@brt_decision["binding"] == "pinned"}>pinned</option>
+      </select>
+    </div>
+
+    <%= if @brt_decision["binding"] == "pinned" do %>
+      <div class="mb-3">
+        <label class={label_class()} for="config-decision-version">Version</label>
+        <input
+          id="config-decision-version"
+          type="text"
+          name="version"
+          value={@brt_decision["version"]}
+          class={field_class()}
+          placeholder="3"
+        />
+      </div>
+    <% end %>
+
+    <%= if @brt_entry != nil and length(@brt_entry.decisions) > 1 do %>
+      <div class="mb-3">
+        <label class={label_class()} for="config-decision-name">Decision name</label>
+        <select id="config-decision-name" name="decision_name" class={field_class()}>
+          <option
+            :for={dec <- @brt_entry.decisions}
+            value={dec.name}
+            selected={dec.name == @brt_decision["name"]}
+          >
+            {dec.name}
+          </option>
+        </select>
+      </div>
+    <% end %>
+
+    <div class="mb-3">
+      <label class={label_class()}>Inputs</label>
+      <div :for={input <- @brt_inputs} class="space-y-1 mb-2">
+        <input
+          type="text"
+          name="inputs_name[]"
+          value={input["name"]}
+          class={field_class()}
+          placeholder="name"
+        />
+        <input
+          type="text"
+          name="inputs_from[]"
+          value={feel_text(input["from"])}
+          class={field_class()}
+          placeholder="FEEL from, e.g. subject.amount"
+        />
+      </div>
+    </div>
+
+    <.promote_rows promote={@brt_promote} />
     """
   end
 
@@ -781,6 +1204,97 @@ defmodule AshBpmn.Web.DesignerLive do
   defp rows([], blank), do: [blank]
   defp rows(entries, blank), do: entries ++ [blank]
 
+  # Promote rows arrive as %{name, from, required-boolean}; the panel renders
+  # required as a select, so normalize to the "true"/"false" strings once.
+  defp promote_signal_rows(nil), do: []
+
+  defp promote_signal_rows(entries) when is_list(entries) do
+    Enum.map(entries, fn signal ->
+      %{
+        "name" => signal["name"] || "",
+        "from" => signal["from"] || "",
+        "required" => promote_required_string(signal)
+      }
+    end)
+  end
+
+  defp promote_required_string(signal) do
+    if signal["required"] in [true, "true", "1"], do: "true", else: "false"
+  end
+
+  # An input's from arrives as the raw attribute text from the modeller; older
+  # snapshots may carry the compiled stored map, so accept both.
+  defp feel_text(%{"text" => text}) when is_binary(text), do: text
+  defp feel_text(text) when is_binary(text), do: text
+  defp feel_text(_), do: ""
+
+  defp arg_input_value(inputs, arg_name) when is_list(inputs) do
+    Enum.find_value(inputs, "", fn input ->
+      if input["name"] == to_string(arg_name), do: feel_text(input["from"])
+    end)
+  end
+
+  defp arg_input_value(_, _), do: ""
+
+  defp decision_editor_href(fun, ref) when is_function(fun, 1) and ref != "", do: fun.(ref)
+  defp decision_editor_href(_, _), do: nil
+
+  # A pinned binding is drifting when the pinned version is not the latest published one.
+  defp drift?(%{"binding" => "pinned"} = decision, entry) do
+    latest = entry.latest_published_version
+    decision["version"] != "" and latest != nil and decision["version"] != to_string(latest)
+  end
+
+  defp drift?(_, _), do: false
+
+  defp decision_badge_class(%{status: :published}) do
+    "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+  end
+
+  defp decision_badge_class(_),
+    do: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
+
+  defp decision_badge_text(%{status: :published, latest_published_version: version})
+       when version != nil,
+       do: "published v#{version}"
+
+  defp decision_badge_text(%{status: :published}), do: "published"
+  defp decision_badge_text(_), do: "draft"
+
+  # Red border when a catalogue is present but the reference is not in it.
+  defp select_class(true), do: field_class()
+  defp select_class(false), do: field_class() <> " border-red-500 dark:border-red-500"
+
+  attr(:promote, :list, required: true)
+
+  defp promote_rows(assigns) do
+    ~H"""
+    <div class="mb-3">
+      <label class={label_class()}>Promote</label>
+      <div :for={signal <- @promote} class="space-y-1 mb-2">
+        <input
+          type="text"
+          name="promote_name[]"
+          value={signal["name"]}
+          class={field_class()}
+          placeholder="signal name"
+        />
+        <input
+          type="text"
+          name="promote_from[]"
+          value={signal["from"]}
+          class={field_class()}
+          placeholder="from (defaults to name)"
+        />
+        <select name="promote_required[]" class={field_class()}>
+          <option value="false" selected={signal["required"] != "true"}>false</option>
+          <option value="true" selected={signal["required"] == "true"}>true</option>
+        </select>
+      </div>
+    </div>
+    """
+  end
+
   # A timer carries exactly one of minutes/hours/days; these pick whichever it is.
   @timer_units ~w(minutes hours days)
 
@@ -800,17 +1314,33 @@ defmodule AshBpmn.Web.DesignerLive do
   def normalize_config(nil), do: empty_config()
 
   def normalize_config(config) when is_map(config) do
-    Map.merge(empty_config(), config)
+    config
+    |> then(&Map.merge(empty_config(), &1))
+    |> Map.put("decision", normalize_decision(Map.get(config, "decision")))
   end
+
+  @doc false
+  # The decision binding of a businessRuleTask, with every key the panel reads.
+  def empty_decision do
+    %{"ref" => "", "binding" => "latest", "version" => "", "name" => ""}
+  end
+
+  defp normalize_decision(nil), do: empty_decision()
+
+  defp normalize_decision(decision) when is_map(decision),
+    do: Map.merge(empty_decision(), decision)
 
   defp empty_config do
     %{
       "action" => "",
       "outcome" => "",
+      "decision" => empty_decision(),
       "candidates" => [],
       "exclusions" => [],
       "outcomes" => [],
-      "timers" => []
+      "timers" => [],
+      "inputs" => [],
+      "promote" => []
     }
   end
 end

@@ -268,7 +268,14 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       token: token,
       subject: subject,
       assigns: assigns,
-      scope: scope
+      scope: scope,
+      # The tenant travelled in the job args and the instance also knows its own;
+      # either way anything the ctx hands to a resolver or invoker must see it.
+      tenant: scope.tenant || Map.get(instance, :organization_id),
+      # A job has nobody behind it: the scope carries the named system actor the
+      # engine acts as, and nothing else. Read it off the scope so the ctx can
+      # never promise an actor the job does not have.
+      actor: Map.get(scope, :actor)
     }
   end
 

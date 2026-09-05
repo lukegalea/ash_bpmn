@@ -32,6 +32,10 @@ defmodule AshBpmn.Compiler.Verify do
     # 7. Business rule tasks: a configured resolver, and a decision that exists
     errors = errors ++ verify_business_rule_tasks(nodes)
 
+    # 8. Service and send tasks: when the host's invoker can confirm its action
+    #    catalogue, an action that does not exist fails here rather than at runtime
+    errors = errors ++ verify_service_task_actions(nodes)
+
     errors
   end
 
@@ -93,6 +97,53 @@ defmodule AshBpmn.Compiler.Verify do
 
   defp safe_exists?(resolver, ref) do
     if resolver.exists?(ref), do: :ok, else: {:error, :missing}
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  # The same publish-time promise the decision check makes, for the action seam. It is
+  # opt-in on the host's side: an `ActionInvoker` that exports `exists?(ref) :: boolean`
+  # is offering its catalogue for verification, so a diagram cannot ship against an
+  # action that does not exist. An invoker without the export is simply not asked --
+  # invoking the action is still the only contract it owes the engine.
+  defp verify_service_task_actions(nodes) do
+    invoker = Application.get_env(:ash_bpmn, :action_invoker)
+
+    if invoker && function_exported?(invoker, :exists?, 1) do
+      nodes
+      |> Enum.filter(fn {_id, node} -> node["type"] in ["serviceTask", "sendTask"] end)
+      |> Enum.flat_map(fn {id, node} ->
+        ref = node["action"]
+        type = node["type"]
+
+        case safe_action_exists?(invoker, ref) do
+          :ok ->
+            []
+
+          {:error, :missing} ->
+            [
+              Errors.error(
+                id,
+                "#{type} '#{id}' references action '#{ref}', which does not exist"
+              )
+            ]
+
+          {:error, reason} ->
+            [
+              Errors.error(
+                id,
+                "#{type} '#{id}': could not verify action '#{ref}': #{inspect(reason)}"
+              )
+            ]
+        end
+      end)
+    else
+      []
+    end
+  end
+
+  defp safe_action_exists?(invoker, ref) do
+    if invoker.exists?(ref), do: :ok, else: {:error, :missing}
   rescue
     e -> {:error, Exception.message(e)}
   end

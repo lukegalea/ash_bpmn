@@ -10,7 +10,7 @@ defmodule AshBpmn.Compiler.Xml do
   # The ash: namespace URI is https://github.com/lukegalea/ash_bpmn/ns, but it
   # is never compared against: xmerl scans without :namespace_conform, so
   # extension attributes arrive as prefixed atoms and are matched by prefix.
-  @supported_node_types ~w(startEvent endEvent userTask serviceTask businessRuleTask exclusiveGateway parallelGateway)
+  @supported_node_types ~w(startEvent endEvent userTask serviceTask sendTask businessRuleTask exclusiveGateway parallelGateway)
   @supported_node_types_with_prefix Enum.map(@supported_node_types, &"bpmn2:#{&1}")
 
   @spec parse(String.t()) :: {:ok, tuple()} | {:error, String.t()}
