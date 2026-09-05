@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Luke Galea
+# SPDX-License-Identifier: MIT
+
 defmodule AshBpmn.FixtureWellformednessTest do
   @moduledoc """
   Every BPMN fixture parses as *namespaced* XML, not merely as XML.
