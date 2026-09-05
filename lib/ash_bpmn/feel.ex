@@ -262,6 +262,8 @@ defmodule AshBpmn.Feel do
 
   def to_feel_value(value, _depth), do: value
 
-  defp describe(%{message: message}), do: message
-  defp describe(other), do: inspect(other)
+  # `Boxic.FEEL.parse/1` is spec'd to fail with `Boxic.FEEL.Error`, so this is
+  # the whole of what describe/1 can be handed — matching it exactly rather
+  # than keeping a catch-all keeps the clause set honest about that contract.
+  defp describe(%Boxic.FEEL.Error{message: message}), do: message
 end

@@ -369,39 +369,27 @@ defmodule AshBpmn.Web.DesignerLive do
 
       # Refresh the catalogue assigns. Called from mount and handle_params: the
       # catalogues may be tenant-scoped, and the tenant can change between params.
+      # The nil-or-MFA dispatch lives in the library (`resolve_catalogue/2`,
+      # `resolve_decision_editor_href/2`): branching here on the module attribute
+      # would compile a case whose MFA clause is provably dead for any host that
+      # passes no catalogue, which is dialyzer noise in every such host's build.
       defp ash_bpmn_load_catalogues(socket) do
         socket
-        |> assign(:decisions, ash_bpmn_catalogue(@ash_bpmn_designer_decisions_mfa, socket))
-        |> assign(:actions, ash_bpmn_catalogue(@ash_bpmn_designer_actions_mfa, socket))
-        |> assign(:decision_editor_href, ash_bpmn_editor_href_fn(socket))
-      end
-
-      # A catalogue outage must degrade to free-text inputs, not to a broken page.
-      defp ash_bpmn_catalogue(mfa, socket) do
-        case mfa do
-          nil -> []
-          {m, f, a} -> apply(m, f, a ++ [socket])
-        end
-      rescue
-        _ -> []
-      end
-
-      # The editor link is resolved per decision key at render time, against the socket
-      # this navigation came in on.
-      defp ash_bpmn_editor_href_fn(socket) do
-        case @ash_bpmn_designer_decision_editor_mfa do
-          nil ->
-            nil
-
-          {m, f, a} ->
-            fn key ->
-              try do
-                apply(m, f, a ++ [key, socket])
-              rescue
-                _ -> nil
-              end
-            end
-        end
+        |> assign(
+          :decisions,
+          AshBpmn.Web.DesignerLive.resolve_catalogue(@ash_bpmn_designer_decisions_mfa, socket)
+        )
+        |> assign(
+          :actions,
+          AshBpmn.Web.DesignerLive.resolve_catalogue(@ash_bpmn_designer_actions_mfa, socket)
+        )
+        |> assign(
+          :decision_editor_href,
+          AshBpmn.Web.DesignerLive.resolve_decision_editor_href(
+            @ash_bpmn_designer_decision_editor_mfa,
+            socket
+          )
+        )
       end
 
       defp load_or_create_definition(socket) do
@@ -1323,6 +1311,50 @@ defmodule AshBpmn.Web.DesignerLive do
   # The decision binding of a businessRuleTask, with every key the panel reads.
   def empty_decision do
     %{"ref" => "", "binding" => "latest", "version" => "", "name" => ""}
+  end
+
+  @doc """
+  Resolves the `:decisions` or `:actions` catalogue option against the socket.
+
+  Public rather than private, and taking the option value at runtime rather
+  than branching in the using module: a host that passes no catalogue has a
+  literal `nil` for the module attribute, and a per-host case on it would make
+  the MFA clause provably dead — a dialyzer warning in every such host's build.
+  Exported here once, the argument domain is open and every clause is live.
+
+  Returns the catalogue entries, `[]` when the option is absent, and `[]` when
+  the call fails: a catalogue outage must degrade the *panel* to free-text
+  inputs, never break the page (usage-rules.md rule 13).
+  """
+  @spec resolve_catalogue(nil | {module(), atom(), list()}, Phoenix.LiveView.Socket.t()) :: list()
+  def resolve_catalogue(nil, _socket), do: []
+
+  def resolve_catalogue({module, function, args}, socket) do
+    apply(module, function, args ++ [socket])
+  rescue
+    _ -> []
+  end
+
+  @doc """
+  Resolves the `:decision_editor` option into the function the panel calls with
+  a decision key to get its edit href, or `nil` when the option is absent (and
+  so no "Edit decision" link is rendered). Runtime-dispatched in the library for
+  the same reason as `resolve_catalogue/2`; a failing call resolves to `nil`.
+  """
+  @spec resolve_decision_editor_href(
+          nil | {module(), atom(), list()},
+          Phoenix.LiveView.Socket.t()
+        ) :: (String.t() -> String.t() | nil) | nil
+  def resolve_decision_editor_href(nil, _socket), do: nil
+
+  def resolve_decision_editor_href({module, function, args}, socket) do
+    fn key ->
+      try do
+        apply(module, function, args ++ [key, socket])
+      rescue
+        _ -> nil
+      end
+    end
   end
 
   defp normalize_decision(nil), do: empty_decision()
