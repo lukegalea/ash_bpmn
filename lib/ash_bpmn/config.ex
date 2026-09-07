@@ -53,6 +53,31 @@ defmodule AshBpmn.Config do
   end
 
   @doc """
+  Returns the configured `AshBpmn.EventSource` module.  Raises if unset.
+  """
+  @spec event_source!() :: module()
+  def event_source! do
+    case Application.get_env(:ash_bpmn, :event_source) do
+      nil ->
+        raise """
+        ash_bpmn: :event_source is not configured.
+
+        Add to your config:
+
+            config :ash_bpmn,
+              event_source: MyApp.Audit.EventSource
+
+        The module must implement the `AshBpmn.EventSource` behaviour. The event sweep
+        refuses to start without one: every coupling to the host's event log lives in the
+        adapter, and the engine never sees the log's own types.
+        """
+
+      mod when is_atom(mod) ->
+        mod
+    end
+  end
+
+  @doc """
   The configured `AshBpmn.DecisionResolver`, or a raise explaining what to set.
 
   Unlike the invoker and the assignment resolver, this one is only needed by documents that
