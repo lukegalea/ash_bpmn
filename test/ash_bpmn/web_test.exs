@@ -514,6 +514,51 @@ defmodule AshBpmn.WebTest do
     end
   end
 
+  # ── ash:call publish errors (the Phase 1 errors surface) ──────────────
+
+  describe "designer: ash:call publish errors" do
+    test "an unknown callable ref renders in the errors surface and jumps to the node" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      view
+      |> element("#ash-bpmn-save-form")
+      |> render_submit(%{
+        "xml" => call_service_task_xml("AshBpmn.Test.RuntimeCallablesDomain.nope")
+      })
+
+      # The publish-time promise for ash:call: the ref is verified against the
+      # configured domains, and the failure names the node it belongs to.
+      assert has_element?(view, "#bpmn-error-0")
+      assert render(view) =~ "does not exist"
+      assert has_element?(view, "#bpmn-error-jump-0")
+
+      view
+      |> element("#ash-bpmn-errors button[phx-value-path='Charge']")
+      |> render_click()
+
+      assert_push_event(view, "select_element", %{id: "Charge"})
+    end
+
+    test "an input naming a non-argument lands in the errors surface too" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      xml =
+        call_service_task_xml(
+          "AshBpmn.Test.RuntimeCallablesDomain.record_inputs",
+          ~s|<ash:inputs><ash:input name="mystery" from="subject.amount"/></ash:inputs>|
+        )
+
+      view
+      |> element("#ash-bpmn-save-form")
+      |> render_submit(%{"xml" => xml})
+
+      assert has_element?(view, "#bpmn-error-0")
+      assert render(view) =~ "not an argument of callable"
+    end
+  end
+
   # ── Viewer Tests ────────────────────────────────────────────────────────
 
   describe "viewer" do
@@ -766,6 +811,38 @@ defmodule AshBpmn.WebTest do
   defp build_test_conn do
     Phoenix.ConnTest.build_conn()
     |> Plug.Test.init_test_session(%{})
+  end
+
+  # A valid-shaped process whose serviceTask binds through ash:call — the
+  # publish-verification surface for call bindings, driven through the same
+  # hidden save form every other errors-surface test uses.
+  defp call_service_task_xml(ref, extra_ext \\ "") do
+    """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                       xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                       id="Definitions_call_err"
+                       targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+      <bpmn2:process id="Process_call_err" name="Call error" isExecutable="true">
+        <bpmn2:startEvent id="Start_1" name="Start">
+          <bpmn2:outgoing>Flow_1</bpmn2:outgoing>
+        </bpmn2:startEvent>
+        <bpmn2:serviceTask id="Charge" name="Charge">
+          <bpmn2:extensionElements>
+            <ash:call ref="#{ref}"/>
+            #{extra_ext}
+          </bpmn2:extensionElements>
+          <bpmn2:incoming>Flow_1</bpmn2:incoming>
+          <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
+        </bpmn2:serviceTask>
+        <bpmn2:endEvent id="End_1" name="End">
+          <bpmn2:incoming>Flow_2</bpmn2:incoming>
+        </bpmn2:endEvent>
+        <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Charge"/>
+        <bpmn2:sequenceFlow id="Flow_2" sourceRef="Charge" targetRef="End_1"/>
+      </bpmn2:process>
+    </bpmn2:definitions>
+    """
   end
 
   # Force-publishes a draft definition using raw SQL, bypassing the

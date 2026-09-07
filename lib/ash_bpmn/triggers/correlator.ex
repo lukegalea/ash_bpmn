@@ -467,7 +467,7 @@ defmodule AshBpmn.Triggers.Correlator do
   defp already_dispatched?(dispatch_resource, subscription, event_id, ctx) do
     # `Ash.read_one/2` answers in a tuple, so the row's presence is a pattern
     # match on the payload, not a nil check on the result.
-    match?({:ok, %{}}, 
+    match?({:ok, %{}},
       dispatch_resource
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(subscription_id == ^subscription.id and event_id == ^event_id)
