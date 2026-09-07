@@ -194,4 +194,71 @@ defmodule AshBpmn.Config do
   def oban_testing do
     Application.get_env(:ash_bpmn, :oban_testing)
   end
+
+  # ── Triggers extension ────────────────────────────────────────────────────
+
+  @doc """
+  The tenants the trigger sweep fans out to, as a list or `{m, f, a}`.
+
+  A list is used as-is; the MFA is applied per call (the `ash_oban`
+  `list_tenants` pattern), so a host whose tenant list lives in its own tables
+  plugs its loader in:
+
+      config :ash_bpmn, trigger_tenants: {MyApp.Organizations, :all_tenant_ids, []}
+
+  Default `[]`. Read by `AshBpmn.Triggers.SweepWorker.enqueue_all/0`, which the
+  cron fan-out (`AshBpmn.Triggers.CronSweep`) calls every minute — the ordering
+  guarantee the cursor relies on holds *within* a tenant, so there is one sweep
+  job per tenant and no global sweep.
+
+  A host that prefers to derive the list from its own data (for example "every
+  tenant with a published subscription", the reference application's choice)
+  does it inside the MFA — the library does not read the host's resources.
+  """
+  @spec trigger_tenants() :: [term()]
+  def trigger_tenants do
+    case Application.get_env(:ash_bpmn, :trigger_tenants, []) do
+      {m, f, a} when is_atom(m) and is_atom(f) and is_list(a) -> apply(m, f, a)
+      tenants when is_list(tenants) -> tenants
+    end
+  end
+
+  @doc """
+  The dispatch depth past which a trigger refuses to start another process
+  (default `5`).
+
+  Subscriptions may not match `ash_bpmn` resources, which closes the direct
+  cycle; a cycle through `AshBpmn.Resources.Signal` remains structurally
+  possible, and this is the bound that keeps it *bounded* rather than merely
+  improbable. A refused dispatch records `:depth_exceeded` and starts nothing.
+  """
+  @spec trigger_max_depth() :: pos_integer()
+  def trigger_max_depth do
+    Application.get_env(:ash_bpmn, :trigger_max_depth, 5)
+  end
+
+  @doc """
+  The field `AshBpmn.Triggers.Nudge` reads the event's resource from on the
+  host's event-log row (default `:resource`).
+
+  A module atom or a string in either spelling is normalized to the short form
+  the index is keyed on.
+  """
+  @spec nudge_resource_field() :: atom()
+  def nudge_resource_field do
+    Application.get_env(:ash_bpmn, :nudge_resource_field, :resource)
+  end
+
+  @doc """
+  The field `AshBpmn.Triggers.Nudge` reads the event's tenant from on the
+  host's event-log row (default `:organization_id`).
+
+  The sweep's job args carry the tenant under `"tenant"`, and every trigger
+  resource under attribute multitenancy stores it in `organization_id` — but
+  the *log* is the host's, so the field name is the host's to correct.
+  """
+  @spec nudge_tenant_field() :: atom()
+  def nudge_tenant_field do
+    Application.get_env(:ash_bpmn, :nudge_tenant_field, :organization_id)
+  end
 end
