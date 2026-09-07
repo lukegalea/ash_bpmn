@@ -28,6 +28,12 @@ import './ash_bpmn.css';
 // Vocabulary (DESIGN.md §3):
 //   TaskConfig   attrs: action?, outcome?
 //                children: candidates, exclusions, outcomes, timers
+//   Decision     attrs: ref, binding, version?, name?
+//   Call         attrs: ref  (serviceTask/sendTask binding; round-trip only)
+//   Inputs       child: input
+//   Input        attrs: name, from
+//   Promote      child: signal
+//   Signal       attrs: name, from?, required?
 //   Candidates   child: candidate
 //   Candidate    attrs: kind, of
 //   Exclusions   child: exclusion
@@ -75,6 +81,20 @@ export const ashBpmnModdle = {
         { name: 'version', type: 'String', isAttr: true },
         // The decision's name inside a multi-decision key. Optional.
         { name: 'name', type: 'String', isAttr: true }
+      ]
+    },
+    // --- serviceTask / sendTask -------------------------------------------
+    // An ash:call binding: the callable the engine invokes, spelled "Domain.name".
+    // Vocabulary round-trip only -- the authoring panel is a later lane. Without this
+    // descriptor entry moddle drops the element on import, and a designer save/load
+    // silently erases the binding the compiler and engine read. Its declared inputs
+    // (ash:Inputs) and promoted signals (ash:Promote) are the shared vocabulary
+    // registered above -- the same elements a businessRuleTask uses.
+    {
+      name: 'Call',
+      superClass: ['Element'],
+      properties: [
+        { name: 'ref', type: 'String', isAttr: true }
       ]
     },
     {

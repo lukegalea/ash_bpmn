@@ -8,6 +8,26 @@ defmodule AshBpmn.Runtime.Interpreter do
   Called by AdvanceWorker with the graph, node config, and context.
   Returns `{:ok, actions}` where actions is a list of effects to apply
   (create tokens, events, enqueue jobs, complete instance, etc.).
+
+  ## `ash:call` service tasks, and idempotency
+
+  A service task may be bound either to the host's `AshBpmn.ActionInvoker` (the
+  legacy `ash:taskConfig action=`) or, with `ash:call`, directly to a host Ash
+  action declared in a domain's `callables` block. Both bindings evaluate the same
+  declared FEEL inputs from the same context and promote onto the token under the
+  same gating; the compiler guarantees a node carries exactly one of them.
+
+  The `ash:call` invocation goes through `AshBpmn.Scope.engine/1` — the actor and
+  the instance's tenant travel on every call, and the private context flag marks it
+  for the `AshBpmn.Checks.AshBpmnInteraction` bypass the host's policies recognise.
+  Nothing is authorized away: if the host's policies do not admit the engine, the
+  call fails like any other.
+
+  **Idempotency contract (usage rules 12 and 14):** node execution may run twice
+  under Oban redelivery. The token claim gate makes double-advance safe, but the
+  invoked action itself must tolerate a second invocation — exactly the contract an
+  `ActionInvoker` callback owes. A callable that charges a card or sends an email
+  on every run will do both twice on redelivery; make it idempotent in the action.
   """
 
   @doc """
@@ -278,7 +298,158 @@ defmodule AshBpmn.Runtime.Interpreter do
 
   defp inspect_value(value), do: inspect(value, limit: 5)
 
+  # The compiler guarantees exactly one binding per service task (both or neither is
+  # refused at publish), so dispatching on the presence of "call" is total: the legacy
+  # `ash:taskConfig action=` goes to the host's ActionInvoker, `ash:call` to a host
+  # Ash action invoked through the engine scope. Both take their arguments from the
+  # same declared FEEL inputs and promote onto the token under the same gating.
   defp service_task(graph, node_id, node, ctx) do
+    if is_map_key(node, "call") do
+      ash_call_task(graph, node_id, node, ctx)
+    else
+      invoker_service_task(graph, node_id, node, ctx)
+    end
+  end
+
+  # ── serviceTask, ash:call binding ────────────────────────────────────────
+
+  # A call on a callable the host declared in a domain's `callables` block. The
+  # resolution is the same walk publish verification did, so a diagram that verified
+  # is the diagram that executes; a snapshot whose callable has since disappeared
+  # fails here rather than being silently skipped.
+  defp ash_call_task(graph, node_id, node, ctx) do
+    ref = node["call"]["ref"]
+
+    with {:ok, callable} <- resolve_callable(ref),
+         {:ok, inputs} <- resolve_inputs(node["inputs"] || [], ctx, node_id),
+         {:ok, result} <- invoke_callable(callable, inputs, ctx) do
+      # A map result is the callee's outputs; only declared, scalar signals may be
+      # promoted onto the token, under exactly the gating a decision result goes
+      # through. Any other result promotes nothing.
+      outputs = if is_map(result), do: result, else: %{}
+
+      case promoted_signals(node["promote"] || [], outputs, node_id) do
+        {:ok, routing} ->
+          ctx = Map.put(ctx, :routing_override, Map.merge(current_routing(ctx), routing))
+          {:ok, service_task_effects(graph, node_id, ref, inputs, routing, ctx)}
+
+        {:error, reason} ->
+          raise "service task '#{ref}' failed: #{inspect(reason)}"
+      end
+    else
+      {:error, reason} ->
+        # Same convention as the invoker path: raise, so Oban retries and the
+        # instance fails after max_attempts rather than routing itself down a
+        # branch nobody chose.
+        raise "service task '#{node_id}' (ash:call '#{ref}') failed: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  Resolves an `ash:call` ref — spelled `"Domain.name"`, or bare against the configured
+  domains — to the callable it names.
+
+  Walks the configured ash domains (`AshBpmn.Runtime.DomainResolver.domains/0`) and
+  returns the first domain whose `callables` contain the ref, together with the
+  resource and action it names and the action's type. Publish verification
+  (`AshBpmn.Compiler.Verify`) and the runtime resolve through this one function, so
+  the allowlist that accepted the diagram is the allowlist that executes it.
+
+  Fully total: unknown domains, unknown names and domain mismatches are an
+  `{:error, _}`, never a raise.
+  """
+  @spec resolve_callable(String.t()) ::
+          {:ok,
+           %{
+             required(:ref) => String.t(),
+             required(:domain) => module(),
+             required(:resource) => module(),
+             required(:action) => atom(),
+             required(:action_type) => :action | :create | :update | :destroy | :read
+           }}
+          | {:error, String.t()}
+  def resolve_callable(ref) when is_binary(ref) do
+    resolved =
+      AshBpmn.Runtime.DomainResolver.domains()
+      |> Enum.find_value(fn domain ->
+        if AshBpmn.Domain.callable?(domain, ref) do
+          domain_callable(domain, ref)
+        end
+      end)
+
+    case resolved do
+      nil ->
+        {:error, "no configured ash domain declares it"}
+
+      callable ->
+        {:ok, callable}
+    end
+  end
+
+  defp domain_callable(domain, ref) do
+    name = ref |> String.split(".") |> List.last() |> String.to_existing_atom()
+
+    Enum.find_value(AshBpmn.Domain.callables(domain), fn
+      %{name: ^name, resource: resource, action: action} ->
+        action_info = Ash.Resource.Info.action(resource, action)
+
+        if action_info do
+          %{
+            ref: ref,
+            domain: domain,
+            resource: resource,
+            action: action,
+            action_type: action_info.type
+          }
+        end
+
+      _ ->
+        nil
+    end)
+  end
+
+  # The action is invoked by its type: generic through an action input, the mutating
+  # kinds through a changeset and the matching entry point. Every call carries the
+  # engine scope -- actor, tenant, and the private flag the host's policies recognise
+  # (usage rule 15). The tenant is the ctx's, which is the instance's own -- what the
+  # engine's other calls travel with.
+  defp invoke_callable(
+         %{resource: resource, action: action, action_type: action_type},
+         inputs,
+         ctx
+       ) do
+    scope = %AshBpmn.Scope{actor: ctx[:actor], tenant: ctx[:tenant]}
+    opts = AshBpmn.Scope.engine(scope)
+
+    case action_type do
+      :action ->
+        resource
+        |> Ash.ActionInput.for_action(action, inputs)
+        |> Ash.run_action(opts)
+
+      :create ->
+        resource
+        |> Ash.Changeset.for_action(action, inputs)
+        |> Ash.create(opts)
+
+      :update ->
+        resource
+        |> Ash.Changeset.for_action(action, inputs)
+        |> Ash.update(opts)
+
+      :destroy ->
+        resource
+        |> Ash.Changeset.for_action(action, inputs)
+        |> Ash.destroy(opts)
+
+      other ->
+        {:error, "callable action type #{inspect(other)} is not invocable by ash:call"}
+    end
+  end
+
+  # ── serviceTask, legacy ash:taskConfig binding ──────────────────────────
+
+  defp invoker_service_task(graph, node_id, node, ctx) do
     action = node["action"]
     invoker = AshBpmn.Config.action_invoker!()
 

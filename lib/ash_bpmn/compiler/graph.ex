@@ -384,25 +384,38 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
-  # A service or send task invokes a host action. The action is the only required binding;
-  # the typed FEEL inputs and promoted signals are optional and, when absent, are left off
-  # the node entirely so documents written before they existed compile exactly as they
-  # always did.
+  # A service or send task carries exactly one binding, and the compiler refuses both
+  # or neither: the legacy `ash:taskConfig action=`, dispatched through the host's
+  # ActionInvoker, or `ash:call`, a host Ash action invoked through the engine scope.
+  # The action is the only required part of the legacy binding; the typed FEEL inputs
+  # and promoted signals are optional on both and, when absent, are left off the node
+  # entirely so documents written before they existed compile exactly as they always
+  # did.
   defp build_node_config(node, type) when type in ["serviceTask", "sendTask"] do
     id = Xml.element_attr(node, "id")
     ext = Xml.find_extension_elements(node)
 
     ash_task_configs = Xml.find_ash_elements(ext, "taskConfig")
+    ash_calls = Xml.find_ash_elements(ext, "call")
 
-    case ash_task_configs do
-      [] ->
+    case {ash_calls, ash_task_configs} do
+      {[], []} ->
         {:error,
          Errors.error(
            id,
-           "#{type} '#{id}' must have an ash:taskConfig with a non-empty action attribute"
+           "#{type} '#{id}' must have an ash:taskConfig with a non-empty action attribute " <>
+             "or an ash:call with a non-empty ref"
          )}
 
-      [config | _] ->
+      {[_ | _], [_ | _]} ->
+        {:error,
+         Errors.error(
+           id,
+           "#{type} '#{id}' must not have both an ash:taskConfig and an ash:call; " <>
+             "exactly one binding per service task"
+         )}
+
+      {[], [config | _]} ->
         action = Xml.element_attr(config, "action")
 
         cond do
@@ -441,6 +454,9 @@ defmodule AshBpmn.Compiler.Graph do
               )
             end
         end
+
+      {[call | _], []} ->
+        build_call_config(type, id, ext, call)
     end
   end
 
@@ -532,6 +548,57 @@ defmodule AshBpmn.Compiler.Graph do
   defp build_node_config(_node, type) when type in ["startEvent", "parallelGateway"] do
     {:ok, %{}}
   end
+
+  # An `ash:call` names a callable the host declared in a domain's `callables` block —
+  # the same reference spelling as `ash:decision`, `"Domain.name"`. Whether the ref
+  # actually resolves, and whether the declared inputs name real arguments of the
+  # callable, is the publish-time check in verify.ex; here the vocabulary is parsed and
+  # its shape enforced. Inputs and promotions are the shared vocabulary of every node
+  # kind that declares them (usage rule 12), so they are extracted by the same code and
+  # land at the node level, exactly as on a businessRuleTask.
+  defp build_call_config(type, id, ext, call) do
+    ref = Xml.element_attr(call, "ref")
+
+    cond do
+      ref == nil or String.trim(ref) == "" ->
+        {:error, Errors.error(id, "#{type} '#{id}' ash:call must have a non-empty ref attribute")}
+
+      unknown_call_attr?(call) ->
+        {k, _} = unknown_call_attr(call)
+
+        {:error,
+         Errors.error(id, "Unknown ash: attribute '#{k}' on ash:call for #{type} '#{id}'")}
+
+      has_children?(call) ->
+        name = call |> Xml.get_element_children() |> hd() |> Xml.local_name()
+
+        {:error, Errors.error(id, "Unknown ash: element '#{name}' in ash:call for '#{id}'")}
+
+      true ->
+        with {:ok, inputs} <- build_inputs(type, id, ext),
+             {:ok, promote} <- build_promotions(type, id, ext) do
+          {:ok,
+           %{"call" => %{"ref" => String.trim(ref)}}
+           |> maybe_put("inputs", inputs)
+           |> maybe_put("promote", promote)}
+        end
+    end
+  end
+
+  # `ref` is a plain attribute; anything else on the element — plain or
+  # ash:-prefixed — is a typo, and moddle would drop it on the next save anyway.
+  @known_call_attrs MapSet.new(["ref"])
+
+  defp unknown_call_attr(call) do
+    call
+    |> Xml.element_attrs()
+    |> Enum.find(fn {k, _} -> k not in @known_call_attrs end)
+  end
+
+  defp unknown_call_attr?(call), do: unknown_call_attr(call) != nil
+
+  defp has_children?(call),
+    do: Xml.get_element_children(call) != []
 
   defp build_business_rule_config(id, ext, decision) do
     ref = Xml.element_attr(decision, "ref")

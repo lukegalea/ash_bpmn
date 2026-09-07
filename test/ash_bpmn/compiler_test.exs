@@ -703,6 +703,202 @@ defmodule AshBpmn.CompilerTest do
     end
   end
 
+  # ── ash:call on serviceTask ──────────────────────────────────────────────
+  #
+  # The second service-task binding. Exactly one per task — the legacy
+  # ash:taskConfig action= or an ash:call — with the shared inputs/promote
+  # vocabulary around it, the callable ref verified at publish against the host's
+  # configured domains, and every declared input naming an argument of the
+  # callable's action.
+  @callable_ref "AshBpmn.Test.RuntimeCallablesDomain.assess_tier"
+
+  # An otherwise-valid process whose serviceTask carries the given extension
+  # elements. `type` lets the sendTask twin share the corpus.
+  defp service_task_xml(ext_content, type \\ "serviceTask", id \\ "T") do
+    """
+    <bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                       xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns">
+      <bpmn2:process id="P" isExecutable="true">
+        <bpmn2:startEvent id="S"><bpmn2:outgoing>F</bpmn2:outgoing></bpmn2:startEvent>
+        <bpmn2:#{type} id="#{id}" name="Task">
+          <bpmn2:extensionElements>#{ext_content}</bpmn2:extensionElements>
+          <bpmn2:incoming>F</bpmn2:incoming>
+          <bpmn2:outgoing>F2</bpmn2:outgoing>
+        </bpmn2:#{type}>
+        <bpmn2:endEvent id="E"><bpmn2:incoming>F2</bpmn2:incoming></bpmn2:endEvent>
+        <bpmn2:sequenceFlow id="F" sourceRef="S" targetRef="#{id}"/>
+        <bpmn2:sequenceFlow id="F2" sourceRef="#{id}" targetRef="E"/>
+      </bpmn2:process>
+    </bpmn2:definitions>
+    """
+  end
+
+  describe "ash:call acceptance" do
+    test "a call with inputs and promotions parses into the snapshot" do
+      xml =
+        service_task_xml("""
+        <ash:call ref="#{@callable_ref}"/>
+        <ash:inputs>
+          <ash:input name="amount" from="subject.amount"/>
+        </ash:inputs>
+        <ash:promote>
+          <ash:signal name="tier" required="true"/>
+        </ash:promote>
+        """)
+
+      assert {:ok, graph} = Compiler.compile(xml)
+
+      node = graph["nodes"]["T"]
+
+      # Same shape as a decision config: the ref under the binding key, inputs and
+      # promotions at the node level, extracted by the same shared code.
+      assert node["call"] == %{"ref" => @callable_ref}
+      assert [%{"name" => "amount", "from" => %{"text" => "subject.amount"}}] = node["inputs"]
+
+      assert [%{"name" => "tier", "from" => "tier", "required" => true}] = node["promote"]
+    end
+
+    test "a bare ash:call with no inputs or promotions leaves them off the node" do
+      xml = service_task_xml(~s|<ash:call ref="#{@callable_ref}"/>|)
+
+      assert {:ok, graph} = Compiler.compile(xml)
+      node = graph["nodes"]["T"]
+
+      assert node["call"] == %{"ref" => @callable_ref}
+      refute Map.has_key?(node, "inputs")
+      refute Map.has_key?(node, "promote")
+    end
+
+    # One binding vocabulary for every node kind that carries it (usage rule 12): a
+    # send task is a service task with a different icon, so it binds the same way.
+    test "a sendTask binds with ash:call exactly like its serviceTask twin" do
+      xml = service_task_xml(~s|<ash:call ref="#{@callable_ref}"/>|, "sendTask")
+
+      assert {:ok, graph} = Compiler.compile(xml)
+      assert graph["nodes"]["T"]["call"] == %{"ref" => @callable_ref}
+    end
+  end
+
+  describe "ash:call refusals" do
+    test "refuses a ref that resolves against no configured domain" do
+      xml = service_task_xml(~s|<ash:call ref="AshBpmn.Test.RuntimeCallablesDomain.nope"/>|)
+
+      assert {:error, errors} = Compiler.compile(xml)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "RuntimeCallablesDomain.nope") and
+                 String.contains?(e.message, "does not exist")
+             end)
+    end
+
+    # The configured domains are the allowlist: the CallablesDomain exists and has
+    # the callable, but the host never offered it to the engine, so the ref is not
+    # publishable.
+    test "refuses a ref that points at a domain outside the configured allowlist" do
+      xml = service_task_xml(~s|<ash:call ref="AshBpmn.Test.CallablesDomain.approve_payout"/>|)
+
+      assert {:error, errors} = Compiler.compile(xml)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "CallablesDomain.approve_payout") and
+                 String.contains?(e.message, "does not exist")
+             end)
+    end
+
+    test "refuses a task with both bindings" do
+      xml =
+        service_task_xml("""
+        <ash:call ref="#{@callable_ref}"/>
+        <ash:taskConfig action="do_something"/>
+        """)
+
+      assert {:error, errors} = Compiler.compile(xml)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "both an ash:taskConfig and an ash:call")
+             end)
+    end
+
+    test "refuses a task with neither binding" do
+      xml = service_task_xml("")
+
+      assert {:error, errors} = Compiler.compile(xml)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "'T'") and
+                 String.contains?(e.message, "must have an ash:taskConfig") and
+                 String.contains?(e.message, "ash:call")
+             end),
+             "got: #{inspect(errors)}"
+    end
+
+    test "refuses an ash:call without a ref" do
+      xml = service_task_xml(~s|<ash:call/>|)
+
+      assert {:error, errors} = Compiler.compile(xml)
+      assert Enum.any?(errors, &String.contains?(&1.message, "non-empty ref"))
+    end
+
+    test "refuses an input naming something that is not an argument of the callable" do
+      xml =
+        service_task_xml("""
+        <ash:call ref="#{@callable_ref}"/>
+        <ash:inputs>
+          <ash:input name="bogus" from="subject.amount"/>
+        </ash:inputs>
+        """)
+
+      assert {:error, errors} = Compiler.compile(xml)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "'bogus'") and
+                 String.contains?(e.message, "not an argument of callable '#{@callable_ref}'")
+             end),
+             "got: #{inspect(errors)}"
+    end
+
+    test "refuses a call that promotes more than the signal limit" do
+      signals = Enum.map_join(1..9, "", &~s(<ash:signal name="sig#{&1}"/>))
+
+      xml =
+        service_task_xml("""
+        <ash:call ref="#{@callable_ref}"/>
+        <ash:promote>#{signals}</ash:promote>
+        """)
+
+      assert {:error, errors} = Compiler.compile(xml)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "promotes 9 signals") and
+                 String.contains?(e.message, "at most 8")
+             end),
+             "got: #{inspect(errors)}"
+    end
+
+    test "refuses an unknown attribute on ash:call" do
+      xml = service_task_xml(~s|<ash:call ref="#{@callable_ref}" action="oops"/>|)
+
+      assert {:error, errors} = Compiler.compile(xml)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "Unknown ash: attribute 'action' on ash:call")
+             end)
+    end
+
+    test "refuses an unknown element inside ash:call" do
+      xml =
+        service_task_xml("""
+        <ash:call ref="#{@callable_ref}"><ash:inputs/></ash:call>
+        """)
+
+      assert {:error, errors} = Compiler.compile(xml)
+
+      assert Enum.any?(errors, fn e ->
+               String.contains?(e.message, "Unknown ash: element 'ash:inputs' in ash:call")
+             end)
+    end
+  end
+
   # ── Refusal corpus: constructs nested inside supported nodes ─────────────
   #
   # Each fixture is an otherwise-valid process whose supported node carries a
