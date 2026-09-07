@@ -199,6 +199,11 @@ function pushError(hook, err) {
  *   - BusinessRuleTask: ash:decision + ash:inputs + ash:promote
  *   - ServiceTask / SendTask: ash:taskConfig(action) + ash:inputs + ash:promote
  *   - UserTask / EndEvent: ash:taskConfig(candidates/outcomes/…)
+ *
+ * Sequence flows and exclusive gateways carry no ash: vocabulary, but the
+ * panel edits two plain-BPMN features on them — the flow's FEEL condition
+ * (conditionExpression child) and the gateway's default flow (default
+ * attribute) — so readConfig surfaces those in the same payload.
  */
 function readConfig(element) {
   const bo = element && element.businessObject;
@@ -219,6 +224,11 @@ function readConfig(element) {
     return holder.get(prop) || [];
   };
 
+  const conditionBody = function (flowBo) {
+    var expr = flowBo.get('conditionExpression');
+    return expr && nonBlank(expr.get('body')) ? expr.get('body') : '';
+  };
+
   const readInputs = function () {
     const holder = find('ash:Inputs');
     return list(holder, 'input').map(function (i) {
@@ -232,6 +242,31 @@ function readConfig(element) {
       return { name: s.name || '', from: s.from || '', required: s.required || 'false' };
     });
   };
+
+  if (type === 'bpmn:SequenceFlow') {
+    const source = bo.get('sourceRef');
+
+    return {
+      condition: conditionBody(bo),
+      // Set when the source gateway routes to this flow when nothing matches —
+      // the panel then explains why the flow must not carry a condition.
+      default_of:
+        source && source.get && source.get('default') === bo ? source.id || '' : null
+    };
+  }
+
+  if (type === 'bpmn:ExclusiveGateway') {
+    const outgoing = (bo.get('outgoing') || []).map(function (flow) {
+      return { id: flow.id, name: flow.name || '', condition: conditionBody(flow) !== '' };
+    });
+
+    const def = bo.get('default');
+
+    return {
+      outgoing: outgoing,
+      default: def ? def.id : ''
+    };
+  }
 
   if (type === 'bpmn:BusinessRuleTask') {
     const decision = find('ash:Decision');
@@ -453,12 +488,57 @@ function rebuildExtensionElements(moddle, businessObject, type, ashValues) {
   });
 }
 
+/**
+ * Build a bpmn:FormalExpression for a flow condition. An empty/blank source
+ * returns undefined, which is how bpmn-js itself clears the condition — the
+ * same idiom ReplaceConnectionBehavior uses.
+ *
+ * The language attribute, when the existing expression declared one, is kept:
+ * the compiler accepts feel/FEEL/absent, but the document should not lose what
+ * its author wrote.
+ */
+function buildConditionExpression(moddle, businessObject, source) {
+  if (!nonBlank(source)) return undefined;
+
+  const props = { body: String(source).trim() };
+
+  const existing = businessObject.get('conditionExpression');
+  if (existing && existing.language) {
+    props.language = existing.language;
+  }
+
+  return moddle.create('bpmn:FormalExpression', props);
+}
+
+/**
+ * Resolve one of a gateway's outgoing flows by id — the default-flow picker's
+ * options all come from bo.outgoing, so a miss means the panel and the canvas
+ * disagree and must not be written blindly.
+ */
+function resolveOutgoingFlow(gatewayBo, flowId) {
+  const outgoing = gatewayBo.get('outgoing') || [];
+
+  for (var i = 0; i < outgoing.length; i++) {
+    if (outgoing[i].id === flowId) return outgoing[i];
+  }
+
+  return undefined;
+}
+
 function nonBlank(value) {
   return value !== undefined && value !== null && String(value).trim() !== '';
 }
 
 function truthy(value) {
   return value === 'true' || value === '1' || value === true;
+}
+
+// Every bpmn:* gateway type — none of them own ash: extension elements, and
+// the default-flow picker the panel renders applies to whichever gateway the
+// descriptor gives a `default` attribute.
+function endsWithGateway(type) {
+  return typeof type === 'string' && type.indexOf(':') !== -1 &&
+    type.slice(type.indexOf(':') + 1).endsWith('Gateway');
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +552,16 @@ function resolveContainer(el) {
   return null;
 }
 
+// A highlight that arrived mid-import is held on the hook; this runs once the
+// import resolves and the elements exist to mark.
+function replayPendingErrorHighlight(hook) {
+  if (hook._pendingErrorHighlight) {
+    var pending = hook._pendingErrorHighlight;
+    hook._pendingErrorHighlight = null;
+    hook._applyErrorHighlight(pending);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // AshBpmnDesigner — Phoenix LiveView hook  (plain object, NOT a class)
 //
@@ -482,10 +572,14 @@ function resolveContainer(el) {
 //   import_error      %{ message: string }
 //
 // LV → Hook  (handleEvent):
-//   load_xml     %{ xml }
-//   collect_xml  %{}
-//   apply_config %{ id, config, name }
-//   fit          %{}
+//   load_xml      %{ xml }
+//   collect_xml   %{}
+//   apply_config  %{ id, config, name, condition?, default_flow? }
+//                    condition    — sequence flow FEEL source (blank clears)
+//                    default_flow — exclusive gateway default flow id (blank clears)
+//   highlight     %{ node_ids: [string] }   — compile-error markers
+//   select_element %{ id }                  — select + scroll to an element
+//   fit           %{}
 // ---------------------------------------------------------------------------
 
 export const AshBpmnDesigner = {
@@ -555,6 +649,8 @@ export const AshBpmnDesigner = {
         .then(function () {
           canvas.zoom('fit-viewport', 'auto');
           this._currentSelection = null;
+          this._imported = true;
+          replayPendingErrorHighlight(this);
         }.bind(this))
         .catch(function (err) {
           pushError(this, err);
@@ -566,11 +662,14 @@ export const AshBpmnDesigner = {
     // -----------------------------------------------------------------------
 
     this.handleEvent('load_xml', function (payload) {
+      this._imported = false;
       this._modeler
         .importXML(payload.xml)
         .then(function () {
           canvas.zoom('fit-viewport', 'auto');
           this._currentSelection = null;
+          this._imported = true;
+          replayPendingErrorHighlight(this);
           this.pushEvent('dirty_changed', { dirty: false });
         }.bind(this))
         .catch(function (err) {
@@ -605,16 +704,118 @@ export const AshBpmnDesigner = {
         }
 
         var bo = element.businessObject;
-        var ashValues = buildAshValues(moddle, bo.$type, payload.config || {});
-        var newExt = rebuildExtensionElements(moddle, bo, bo.$type, ashValues);
+        var type = bo.$type;
+        var updates = {};
 
-        var updates = { extensionElements: newExt };
+        // ash: extension elements — only on the element types that own the
+        // vocabulary. A sequence flow or gateway carries none; rebuilding
+        // extensionElements there would write an empty ash:taskConfig onto
+        // elements the compiler never reads it from.
+        if (type !== 'bpmn:SequenceFlow' && !endsWithGateway(type)) {
+          var ashValues = buildAshValues(moddle, type, payload.config || {});
+          updates.extensionElements = rebuildExtensionElements(moddle, bo, type, ashValues);
+        }
+
         if (payload.name !== undefined && payload.name !== null) {
           updates.name = payload.name;
         }
 
+        // A flow's condition: the FEEL expression the source gateway routes
+        // on. Blank clears it.
+        if (type === 'bpmn:SequenceFlow' && payload.condition != null) {
+          updates.conditionExpression = buildConditionExpression(moddle, bo, payload.condition);
+        }
+
+        // An exclusive gateway's default flow: the branch taken when no
+        // condition matches. Blank clears the reference.
+        if (endsWithGateway(type) && payload.default_flow != null) {
+          if (nonBlank(payload.default_flow)) {
+            var defaultBo = resolveOutgoingFlow(bo, String(payload.default_flow));
+
+            if (!defaultBo) {
+              pushError(
+                this,
+                'apply_config: default flow "' +
+                  payload.default_flow +
+                  '" is not an outgoing flow of ' +
+                  payload.id
+              );
+              return;
+            }
+
+            updates.default = defaultBo;
+          } else {
+            updates.default = undefined;
+          }
+        }
+
         modeling.updateProperties(element, updates);
         this.pushEvent('dirty_changed', { dirty: true });
+      } catch (err) {
+        pushError(this, err);
+      }
+    }.bind(this));
+
+    // -----------------------------------------------------------------------
+    // Error highlighting — the same marker channel the instance viewer uses,
+    // with an error-red marker. The payload can land before importXML
+    // resolves, so the last one is held and replayed on import.
+    // -----------------------------------------------------------------------
+    this._imported = false;
+    this._pendingErrorHighlight = null;
+    this._errorIds = new Set();
+
+    this._applyErrorHighlight = function (payload) {
+      try {
+        var elementRegistry = this._modeler.get('elementRegistry');
+
+        var _this = this;
+        this._errorIds.forEach(function (prevId) {
+          var prev = elementRegistry.get(prevId);
+          if (prev) {
+            canvas.removeMarker(prev, 'ash-bpmn-error');
+          }
+        });
+        this._errorIds.clear();
+
+        var nodeIds = payload.node_ids;
+        if (Array.isArray(nodeIds)) {
+          nodeIds.forEach(function (nodeId) {
+            var el = elementRegistry.get(nodeId);
+            if (el) {
+              canvas.addMarker(el, 'ash-bpmn-error');
+              _this._errorIds.add(nodeId);
+            }
+          });
+        }
+      } catch (err) {
+        pushError(this, err);
+      }
+    }.bind(this);
+
+    this.handleEvent('highlight', function (payload) {
+      if (this._imported) {
+        this._applyErrorHighlight(payload);
+      } else {
+        this._pendingErrorHighlight = payload;
+      }
+    }.bind(this));
+
+    // -----------------------------------------------------------------------
+    // Select an element and bring it into view — the jump an error row makes.
+    // Selecting goes through the selection service, so the panel opens through
+    // exactly the channel a canvas click uses.
+    // -----------------------------------------------------------------------
+    this.handleEvent('select_element', function (payload) {
+      try {
+        var elementRegistry = this._modeler.get('elementRegistry');
+        var selection = this._modeler.get('selection');
+
+        var el = elementRegistry.get(payload.id);
+        if (el) {
+          selection.select(el);
+          canvas.scrollToElement(el);
+        }
       } catch (err) {
         pushError(this, err);
       }

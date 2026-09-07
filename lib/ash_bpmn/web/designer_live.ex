@@ -61,7 +61,10 @@ defmodule AshBpmn.Web.DesignerLive do
   Server → Client (via `push_event` to JS hook):
     * `load_xml` — replace canvas XML
     * `collect_xml` — request XML from the modeler
-    * `apply_config` — update node extension elements
+    * `apply_config` — update node extension elements, a sequence flow's
+      condition expression, or an exclusive gateway's default flow
+    * `highlight` — mark the elements named by compile errors on the canvas
+    * `select_element` — select an element and bring it into view
     * `fit` — zoom to fit
 
   Form-driven (testable without JS):
@@ -177,7 +180,9 @@ defmodule AshBpmn.Web.DesignerLive do
            dirty: false,
            errors: [],
            graph: nil,
-           pending_publish: false
+           pending_publish: false,
+           # Inline FEEL verdicts for the panel: %{field => :ok | {:error, msg}}.
+           feel: %{}
          )
          |> ash_bpmn_load_catalogues()}
       end
@@ -190,7 +195,21 @@ defmodule AshBpmn.Web.DesignerLive do
         socket = ash_bpmn_load_catalogues(socket)
 
         if connected?(socket) do
-          {:noreply, push_event(socket, "load_xml", %{xml: socket.assigns.xml})}
+          socket =
+            push_event(socket, "load_xml", %{xml: socket.assigns.xml})
+
+          # A definition that arrives with errors highlights its broken elements
+          # right away; the hook replays the payload once the import resolves.
+          socket =
+            if socket.assigns.errors != [] do
+              push_event(socket, "highlight", %{
+                node_ids: AshBpmn.Web.DesignerLive.error_element_ids(socket.assigns.errors)
+              })
+            else
+              socket
+            end
+
+          {:noreply, socket}
         else
           {:noreply, socket}
         end
@@ -232,7 +251,12 @@ defmodule AshBpmn.Web.DesignerLive do
               nil
           end
 
-        {:noreply, assign(socket, :selected, selected)}
+        {:noreply,
+         socket
+         |> assign(:selected, selected)
+         # A new selection means new expressions; last selection's verdicts
+         # would point at fields this panel may not even render.
+         |> assign(:feel, %{})}
       end
 
       @impl true
@@ -298,7 +322,25 @@ defmodule AshBpmn.Web.DesignerLive do
         name = params["name"] || ""
         config = build_config_from_params(params, socket.assigns[:actions] || [])
 
-        {:noreply, push_event(socket, "apply_config", %{id: id, name: name, config: config})}
+        payload = %{id: id, name: name, config: config}
+
+        # A gateway condition and a gateway's default flow are not ash: config:
+        # they live on the flow's conditionExpression child and the gateway's
+        # default attribute. They travel beside the config so the hook can put
+        # each part of the payload where the compiler reads it from.
+        payload =
+          case params["type"] do
+            "bpmn:SequenceFlow" ->
+              Map.put(payload, :condition, params["condition"] || "")
+
+            "bpmn:ExclusiveGateway" ->
+              Map.put(payload, :default_flow, params["default_flow"] || "")
+
+            _ ->
+              payload
+          end
+
+        {:noreply, push_event(socket, "apply_config", payload)}
       end
 
       # A select inside the properties panel changed before Apply — most usefully the
@@ -306,55 +348,47 @@ defmodule AshBpmn.Web.DesignerLive do
       # the action is chosen. Re-render the panel around the new selection.
       @impl true
       def handle_event("panel-changed", params, socket) do
-        selected =
-          case socket.assigns[:selected] do
-            nil ->
-              nil
-
-            sel ->
-              %{sel | config: panel_params_to_config(params, sel.config)}
-          end
-
-        {:noreply, assign(socket, :selected, selected)}
+        handle_panel_change(params, socket)
       end
 
-      # Merges just the panel fields a `phx-change` select owns back into the
-      # selection's config, leaving every other entry untouched.
-      defp panel_params_to_config(params, config) do
-        config = config || %{}
+      # Any FEEL-bearing field changed: validate it through the one FEEL seam
+      # the package has and show the verdict next to the field, before Apply
+      # is pressed and long before publish.
+      @impl true
+      def handle_event("validate-feel", params, socket) do
+        handle_panel_change(params, socket)
+      end
 
-        config =
-          if Map.has_key?(params, "action") do
-            Map.put(config, "action", params["action"] || "")
-          else
-            config
-          end
+      # An error row was clicked: bring the offending element into view and
+      # open its panel, through the same selection channel a canvas click uses.
+      @impl true
+      def handle_event("focus-error", %{"path" => path}, socket) do
+        {:noreply, push_event(socket, "select_element", %{id: path})}
+      end
 
-        decision_keys = [
-          {"decision_ref", "ref"},
-          {"binding", "binding"},
-          {"version", "version"},
-          {"decision_name", "name"}
-        ]
+      defp handle_panel_change(params, socket) do
+        case socket.assigns[:selected] do
+          nil ->
+            {:noreply, socket}
 
-        decision =
-          Enum.reduce(decision_keys, Map.get(config, "decision") || %{}, fn
-            {param, key}, acc ->
-              if Map.has_key?(params, param) do
-                Map.put(acc, key, params[param] || "")
-              else
-                acc
-              end
-          end)
+          selected ->
+            config =
+              AshBpmn.Web.DesignerLive.merge_panel_config(
+                params,
+                selected.config,
+                socket.assigns[:actions] || []
+              )
 
-        if decision == %{} do
-          config
-        else
-          Map.put(
-            config,
-            "decision",
-            Map.merge(AshBpmn.Web.DesignerLive.empty_decision(), decision)
-          )
+            selected = %{
+              selected
+              | name: if(Map.has_key?(params, "name"), do: params["name"], else: selected.name),
+                config: config
+            }
+
+            {:noreply,
+             socket
+             |> assign(:selected, selected)
+             |> assign(:feel, AshBpmn.Web.DesignerLive.validate_feel(selected))}
         end
       end
 
@@ -451,7 +485,7 @@ defmodule AshBpmn.Web.DesignerLive do
         socket
         |> assign(:definition, definition)
         |> assign(:xml, definition.xml)
-        |> assign(:errors, definition.errors || [])
+        |> assign(:errors, AshBpmn.Web.DesignerLive.normalize_errors(definition.errors))
         |> assign(:graph, definition.graph)
         |> assign(:latest_published, latest_published)
       end
@@ -469,10 +503,15 @@ defmodule AshBpmn.Web.DesignerLive do
             socket
             |> assign(:definition, updated)
             |> assign(:xml, updated.xml)
-            |> assign(:errors, updated.errors || [])
+            |> assign(:errors, AshBpmn.Web.DesignerLive.normalize_errors(updated.errors))
             |> assign(:graph, updated.graph)
             |> assign(:dirty, false)
             |> put_flash(:info, "Saved")
+            # An empty list clears whatever was highlighted: the errors surface
+            # and the canvas markers must agree about what is broken.
+            |> push_event("highlight", %{
+              node_ids: AshBpmn.Web.DesignerLive.error_element_ids(updated.errors)
+            })
 
           {:error, error} ->
             socket
@@ -495,11 +534,15 @@ defmodule AshBpmn.Web.DesignerLive do
             |> assign(:errors, [])
             |> assign(:pending_publish, false)
             |> put_flash(:info, "Published v#{published.version}")
+            |> push_event("highlight", %{node_ids: []})
 
           {:error, error} ->
             socket
             |> assign(:pending_publish, false)
             |> put_flash(:error, Exception.message(error))
+            |> push_event("highlight", %{
+              node_ids: AshBpmn.Web.DesignerLive.error_element_ids(socket.assigns.errors)
+            })
         end
       end
 
@@ -539,6 +582,14 @@ defmodule AshBpmn.Web.DesignerLive do
 
           "bpmn:EndEvent" ->
             %{"outcome" => params["outcome"] || ""}
+
+          # A flow's condition and a gateway's default are not ash: config —
+          # handle_event/3 "update-config" carries them beside the config map.
+          "bpmn:SequenceFlow" ->
+            %{}
+
+          "bpmn:ExclusiveGateway" ->
+            %{}
 
           _ ->
             %{}
@@ -728,16 +779,47 @@ defmodule AshBpmn.Web.DesignerLive do
       <div class="flex flex-1 overflow-hidden">
         <%!-- Main canvas area --%>
         <div class="flex-1 flex flex-col overflow-hidden">
-          <%!-- Errors panel --%>
-          <div id="ash-bpmn-errors" class="px-4 py-2">
-            <%= for error <- assigns.errors do %>
-              <div class="mb-2 p-3 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-lg text-sm">
-                <span class="font-medium text-red-800 dark:text-red-200">
-                  {error["path"] || "error"}
-                </span>
-                <span class="text-red-700 dark:text-red-300 ml-2">
-                  {error["message"]}
-                </span>
+          <%!-- Errors surface: appears when the last save or publish produced
+                compile errors, clears the moment one succeeds. Paths that name
+                an element jump to it on the canvas. --%>
+          <div id="ash-bpmn-errors" class={["px-4", assigns.errors != [] && "pt-3"]}>
+            <%= if assigns.errors != [] do %>
+              <div class="mb-2 rounded-lg border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950 overflow-hidden">
+                <div class="flex items-baseline gap-2 px-3 py-2 border-b border-red-200 dark:border-red-800">
+                  <h2 id="bpmn-errors-count" class="text-sm font-semibold text-red-800 dark:text-red-200">
+                    {length(assigns.errors)} {plural_word(length(assigns.errors))}
+                  </h2>
+                  <span class="text-xs text-red-600 dark:text-red-300">
+                    Fix these, then save or publish again.
+                  </span>
+                </div>
+                <ul class="divide-y divide-red-100 dark:divide-red-900" role="list">
+                  <li
+                    :for={{error, idx} <- Enum.with_index(assigns.errors)}
+                    id={"bpmn-error-#{idx}"}
+                    class="px-3 py-2 flex items-start gap-2"
+                  >
+                    <%= if jumpable_path?(error["path"]) do %>
+                      <button
+                        type="button"
+                        id={"bpmn-error-jump-#{idx}"}
+                        phx-click="focus-error"
+                        phx-value-path={error["path"]}
+                        title="Show this element in the diagram"
+                        class="shrink-0 font-mono text-xs px-1.5 py-0.5 rounded bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200 hover:bg-red-200 dark:hover:bg-red-800 focus:outline-none focus-visible:ring-1 focus-visible:ring-red-500 transition-colors"
+                      >
+                        {error["path"]}
+                      </button>
+                    <% else %>
+                      <span class="shrink-0 font-mono text-xs px-1.5 py-0.5 rounded bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">
+                        {error["path"] != "" && error["path"] || "process"}
+                      </span>
+                    <% end %>
+                    <span class="text-xs leading-5 text-red-700 dark:text-red-300">
+                      {error["message"]}
+                    </span>
+                  </li>
+                </ul>
               </div>
             <% end %>
           </div>
@@ -778,7 +860,9 @@ defmodule AshBpmn.Web.DesignerLive do
               <p class="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
                 {assigns.selected.type} — {assigns.selected.id}
               </p>
-              <form phx-submit="update-config">
+              <%!-- phx-change keeps FEEL fields validated as they are typed;
+                    Apply (phx-submit) still carries every field itself. --%>
+              <form id={"config-form-#{assigns.selected.id}"} phx-submit="update-config" phx-change="validate-feel">
                 <input type="hidden" name="element_id" value={assigns.selected.id} />
                 <input type="hidden" name="type" value={assigns.selected.type} />
 
@@ -800,6 +884,7 @@ defmodule AshBpmn.Web.DesignerLive do
                   decisions={assigns[:decisions] || []}
                   actions={assigns[:actions] || []}
                   decision_editor_href={assigns[:decision_editor_href]}
+                  feel={assigns[:feel]}
                 />
 
                 <button
@@ -845,6 +930,106 @@ defmodule AshBpmn.Web.DesignerLive do
   attr(:decisions, :list, default: [])
   attr(:actions, :list, default: [])
   attr(:decision_editor_href, :any, default: nil)
+  # Inline FEEL verdicts from the last phx-change, keyed "condition" and
+  # "inputs:<row index>"; absent means "not validated yet".
+  attr(:feel, :map, default: %{})
+
+  # A sequence flow carries the gateway condition in its conditionExpression
+  # child — the one FEEL expression the flow owns. The default flow of its
+  # source gateway must not carry one, so that case reads instead of edits.
+  def node_config(%{selected: %{type: "bpmn:SequenceFlow"}} = assigns) do
+    assigns =
+      assigns
+      |> assign(:flow_condition, assigns.selected.config["condition"] || "")
+      |> assign(:flow_default_of, assigns.selected.config["default_of"])
+
+    ~H"""
+    <%= if @flow_default_of do %>
+      <div class="mb-3 rounded-md border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 p-2.5">
+        <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
+          Default flow of <span class="font-mono">{@flow_default_of}</span>.
+          The source gateway takes it when no condition matches, so it must not carry one.
+        </p>
+      </div>
+      <%!-- Still submits an (empty) condition so Apply clears any condition
+            the flow should not have kept. --%>
+      <input type="hidden" name="condition" value="" />
+    <% else %>
+      <div class="mb-3">
+        <div class="flex items-baseline justify-between gap-2 mb-1">
+          <label class={label_class()} for="config-condition">
+            Condition (FEEL)
+          </label>
+          <span class="text-xs text-zinc-400 dark:text-zinc-500 whitespace-nowrap">
+            equality is =, not ==
+          </span>
+        </div>
+        <textarea
+          id="config-condition"
+          name="condition"
+          rows="3"
+          placeholder='routing.tier = "high"'
+          phx-debounce="300"
+          class={[
+            field_class(),
+            "font-mono leading-5 resize-y",
+            feel_invalid?(@feel, "condition") && "border-red-400 dark:border-red-500"
+          ]}
+          aria-invalid={if feel_invalid?(@feel, "condition"), do: "true"}
+        >{@flow_condition}</textarea>
+        <.feel_feedback id="condition-feel-feedback" state={@feel["condition"]} />
+      </div>
+    <% end %>
+    """
+  end
+
+  # An exclusive gateway routes on its outgoing flows' conditions; the default
+  # flow is the one taken when nothing matches. The compiler demands every
+  # outgoing flow is conditioned or exactly one is the default — the panel
+  # shows each flow's state so that rule reads at a glance.
+  def node_config(%{selected: %{type: "bpmn:ExclusiveGateway"}} = assigns) do
+    assigns =
+      assigns
+      |> assign(:gw_outgoing, List.wrap(assigns.selected.config["outgoing"] || []))
+      |> assign(:gw_default, assigns.selected.config["default"] || "")
+
+    ~H"""
+    <div class="mb-3">
+      <label class={label_class()} for="config-default-flow">
+        Default flow
+      </label>
+      <select
+        id="config-default-flow"
+        name="default_flow"
+        phx-change="panel-changed"
+        class={field_class()}
+      >
+        <option value="" selected={@gw_default == ""}>— none —</option>
+        <option :for={flow <- @gw_outgoing} value={flow["id"]} selected={flow["id"] == @gw_default}>
+          {flow_option_label(flow)}
+        </option>
+      </select>
+      <p class="mt-1.5 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+        Taken when no condition matches. Every outgoing flow needs a condition, or exactly one
+        must be the default — and the default must not also carry a condition.
+      </p>
+
+      <%= if @gw_outgoing != [] do %>
+        <ul class="mt-2 space-y-1" role="list">
+          <li :for={flow <- @gw_outgoing} class="flex items-center gap-2 text-xs">
+            <span class="truncate text-zinc-600 dark:text-zinc-300">
+              {flow_label(flow)}
+            </span>
+            <% {badge_text, badge_class} = flow_badge(flow, @gw_default) %>
+            <span class={["shrink-0 px-1.5 rounded-full", badge_class]}>
+              {badge_text}
+            </span>
+          </li>
+        </ul>
+      <% end %>
+    </div>
+    """
+  end
 
   # A service task and a send task are configured identically — an action, typed
   # FEEL inputs, promoted signals — so they share one panel branch.
@@ -911,7 +1096,7 @@ defmodule AshBpmn.Web.DesignerLive do
     <%= if @svc_entry != nil do %>
       <div class="mb-3">
         <label class={label_class()}>Arguments (FEEL)</label>
-        <div :for={row <- @svc_arg_rows} class="mb-2">
+        <div :for={{row, idx} <- Enum.with_index(@svc_arg_rows)} class="mb-2">
           <div class="flex items-center gap-1 mb-1">
             <span class="text-xs font-medium text-zinc-700 dark:text-zinc-300">
               {row["arg"].name}
@@ -932,9 +1117,14 @@ defmodule AshBpmn.Web.DesignerLive do
             type="text"
             name="inputs_from[]"
             value={row["value"]}
-            class={field_class()}
+            phx-debounce="300"
+            class={[
+              field_class(),
+              feel_invalid?(@feel, "inputs:#{idx}") && "border-red-400 dark:border-red-500"
+            ]}
             placeholder="FEEL, e.g. routing.risk_tier"
           />
+          <.feel_feedback id={"feel-feedback-inputs-#{idx}"} state={@feel["inputs:#{idx}"]} />
         </div>
       </div>
     <% end %>
@@ -1063,7 +1253,7 @@ defmodule AshBpmn.Web.DesignerLive do
 
     <div class="mb-3">
       <label class={label_class()}>Inputs</label>
-      <div :for={input <- @brt_inputs} class="space-y-1 mb-2">
+      <div :for={{input, idx} <- Enum.with_index(@brt_inputs)} class="space-y-1 mb-2">
         <input
           type="text"
           name="inputs_name[]"
@@ -1075,9 +1265,15 @@ defmodule AshBpmn.Web.DesignerLive do
           type="text"
           name="inputs_from[]"
           value={feel_text(input["from"])}
-          class={field_class()}
+          phx-debounce="300"
+          class={[
+            field_class(),
+            "font-mono",
+            feel_invalid?(@feel, "inputs:#{idx}") && "border-red-400 dark:border-red-500"
+          ]}
           placeholder="FEEL from, e.g. subject.amount"
         />
+        <.feel_feedback id={"feel-feedback-inputs-#{idx}"} state={@feel["inputs:#{idx}"]} />
       </div>
     </div>
 
@@ -1295,6 +1491,28 @@ defmodule AshBpmn.Web.DesignerLive do
     """
   end
 
+  # The inline verdict under a FEEL field: the engine's message when the
+  # expression will not parse, a quiet confirmation when it will, nothing at
+  # all until the field has actually been validated.
+  attr(:id, :string, required: true)
+  attr(:state, :any, default: nil)
+
+  defp feel_feedback(assigns) do
+    ~H"""
+    <%= case @state do %>
+      <% {:error, message} -> %>
+        <p id={@id} role="alert" class="mt-1 text-xs leading-5 text-red-600 dark:text-red-400">
+          {message}
+        </p>
+      <% :ok -> %>
+        <p id={@id} class="mt-1 text-xs leading-5 text-emerald-600 dark:text-emerald-400">
+          Valid FEEL
+        </p>
+      <% _ -> %>
+    <% end %>
+    """
+  end
+
   # A timer carries exactly one of minutes/hours/days; these pick whichever it is.
   @timer_units ~w(minutes hours days)
 
@@ -1305,6 +1523,308 @@ defmodule AshBpmn.Web.DesignerLive do
   defp timer_unit(timer) do
     Enum.find(@timer_units, "hours", fn unit -> timer[unit] end)
   end
+
+  @doc """
+  Normalizes compile errors to string-keyed maps.
+
+  The compiler produces atom-keyed maps; the jsonb round-trip through the
+  definition record hands them back with string keys. The errors surface and
+  the highlight channel read one shape.
+  """
+  @spec normalize_errors(term()) :: [%{required(String.t()) => String.t()}]
+  def normalize_errors(nil), do: []
+
+  def normalize_errors(errors) when is_list(errors) do
+    Enum.map(errors, fn
+      %{} = error ->
+        %{
+          "path" => to_string(error[:path] || error["path"] || ""),
+          "message" => to_string(error[:message] || error["message"] || "")
+        }
+
+      other ->
+        %{"path" => "", "message" => to_string(other)}
+    end)
+  end
+
+  # The compiler's synthetic paths — they name a problem, not an element on
+  # the canvas.
+  @non_element_paths ~w(process unknown xml)
+
+  @doc false
+  # The error paths that can name a canvas element. Ids that do not resolve
+  # are skipped silently by the hook, so this can stay a plain allowlist.
+  @spec error_element_ids(term()) :: [String.t()]
+  def error_element_ids(errors) do
+    errors
+    |> normalize_errors()
+    |> Enum.map(& &1["path"])
+    |> Enum.reject(&(&1 in ["" | @non_element_paths]))
+    |> Enum.uniq()
+  end
+
+  @doc false
+  # The change-time mirror of the panel's submit-time parsing: it merges what
+  # the form currently shows back into the selection WITHOUT dropping blank
+  # rows. The submit parsers drop blank rows on purpose; dropping them at
+  # change time would delete the row the user is typing into the moment a
+  # validation re-render lands.
+  @spec merge_panel_config(map(), map() | nil, list()) :: map()
+  def merge_panel_config(params, config, actions \\ []) do
+    config = config || %{}
+
+    config =
+      config
+      |> merge_scalar(params, "action")
+      |> merge_scalar(params, "outcome")
+      |> merge_scalar(params, "condition")
+      |> merge_default_flow(params)
+
+    config
+    |> merge_decision(params)
+    |> Map.put("inputs", merge_inputs(params, config, actions))
+    |> Map.put("promote", merge_promote(params, config))
+    |> Map.put("candidates", merge_candidates(params, config))
+    |> Map.put("exclusions", merge_exclusions(params, config))
+    |> Map.put("outcomes", merge_outcomes(params, config))
+    |> Map.put("timers", merge_timers(params, config))
+  end
+
+  defp merge_scalar(config, params, key) do
+    if Map.has_key?(params, key), do: Map.put(config, key, params[key] || ""), else: config
+  end
+
+  # The form field is `default_flow`; the config the hook reads calls it
+  # `default` — one rename, in one place.
+  defp merge_default_flow(config, params) do
+    if Map.has_key?(params, "default_flow") do
+      Map.put(config, "default", params["default_flow"] || "")
+    else
+      config
+    end
+  end
+
+  defp merge_decision(config, params) do
+    keys = [
+      {"decision_ref", "ref"},
+      {"binding", "binding"},
+      {"version", "version"},
+      {"decision_name", "name"}
+    ]
+
+    if Enum.any?(keys, fn {param, _key} -> Map.has_key?(params, param) end) do
+      decision =
+        Enum.reduce(keys, Map.get(config, "decision") || empty_decision(), fn {param, key}, acc ->
+          if Map.has_key?(params, param), do: Map.put(acc, key, params[param] || ""), else: acc
+        end)
+
+      Map.put(config, "decision", decision)
+    else
+      config
+    end
+  end
+
+  defp merge_inputs(params, config, actions) do
+    cond do
+      params["type"] in ["bpmn:ServiceTask", "bpmn:SendTask"] ->
+        entry = Enum.find(actions, fn a -> to_string(a.ref) == (params["action"] || "") end)
+
+        if entry != nil and Map.has_key?(params, "inputs_from") do
+          froms = pad(List.wrap(params["inputs_from"] || []), length(entry.args))
+
+          entry.args
+          |> Enum.zip_with(froms, fn arg, from ->
+            %{"name" => to_string(arg.name), "from" => from || ""}
+          end)
+        else
+          Map.get(config, "inputs") || []
+        end
+
+      Map.has_key?(params, "inputs_name") ->
+        names = List.wrap(params["inputs_name"] || [])
+        froms = pad(List.wrap(params["inputs_from"] || []), length(names))
+
+        names
+        |> Enum.zip_with(froms, fn name, from -> %{"name" => name || "", "from" => from || ""} end)
+
+      true ->
+        Map.get(config, "inputs") || []
+    end
+  end
+
+  defp merge_promote(params, config) do
+    if Map.has_key?(params, "promote_name") do
+      names = List.wrap(params["promote_name"] || [])
+      froms = pad(List.wrap(params["promote_from"] || []), length(names))
+      required = pad(List.wrap(params["promote_required"] || []), length(names))
+
+      [names, froms, required]
+      |> Enum.zip_with(fn [name, from, req] ->
+        %{"name" => name || "", "from" => from || "", "required" => to_string(req) == "true"}
+      end)
+    else
+      Map.get(config, "promote") || []
+    end
+  end
+
+  defp merge_candidates(params, config) do
+    if Map.has_key?(params, "candidates_kind") do
+      kinds = List.wrap(params["candidates_kind"] || [])
+      ofs = pad(List.wrap(params["candidates_of"] || []), length(kinds))
+
+      kinds
+      |> Enum.zip_with(ofs, fn kind, of -> %{"kind" => kind || "", "of" => of || ""} end)
+    else
+      Map.get(config, "candidates") || []
+    end
+  end
+
+  defp merge_exclusions(params, config) do
+    if Map.has_key?(params, "exclusions_who") do
+      params["exclusions_who"]
+      |> List.wrap()
+      |> Enum.map(&%{"who" => &1 || ""})
+    else
+      Map.get(config, "exclusions") || []
+    end
+  end
+
+  defp merge_outcomes(params, config) do
+    if Map.has_key?(params, "outcomes_name") do
+      params["outcomes_name"]
+      |> List.wrap()
+      |> Enum.map(&(&1 || ""))
+    else
+      Map.get(config, "outcomes") || []
+    end
+  end
+
+  defp merge_timers(params, config) do
+    if Map.has_key?(params, "timers_kind") do
+      kinds = List.wrap(params["timers_kind"] || [])
+      values = pad(List.wrap(params["timers_value"] || []), length(kinds))
+      units = pad(List.wrap(params["timers_unit"] || []), length(kinds))
+
+      [kinds, values, units]
+      |> Enum.zip_with(fn [kind, value, unit] ->
+        %{"kind" => kind || "", (unit || "hours") => parse_integer(value)}
+      end)
+    else
+      Map.get(config, "timers") || []
+    end
+  end
+
+  @doc false
+  # Validates every FEEL expression the panel is editing — a gateway condition,
+  # or the `from` of each declared input row — through the one FEEL seam the
+  # package has. Blank fields are absent from the map: blank means "no
+  # expression", not "invalid".
+  @spec validate_feel(%{optional(any()) => any()}) :: %{
+          optional(String.t()) => :ok | {:error, String.t()}
+        }
+  def validate_feel(%{type: "bpmn:SequenceFlow", config: config}) do
+    case validate_feel_field(config["condition"]) do
+      nil -> %{}
+      result -> %{"condition" => result}
+    end
+  end
+
+  def validate_feel(%{type: type, config: config})
+      when type in ["bpmn:BusinessRuleTask", "bpmn:ServiceTask", "bpmn:SendTask"] do
+    config
+    |> Map.get("inputs")
+    |> List.wrap()
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {input, idx} ->
+      case validate_feel_field(feel_text(input["from"])) do
+        nil -> []
+        result -> [{"inputs:#{idx}", result}]
+      end
+    end)
+    |> Map.new()
+  end
+
+  def validate_feel(_other), do: %{}
+
+  defp validate_feel_field(source) when is_binary(source) do
+    if blank?(source) do
+      nil
+    else
+      case AshBpmn.Feel.compile(source) do
+        {:ok, _stored} -> :ok
+        {:error, message} -> {:error, equality_note(source, message)}
+      end
+    end
+  end
+
+  defp validate_feel_field(_other), do: nil
+
+  # The engine's parse errors are terse ("expected expression"); a `==` in the
+  # source is the one mistake whose cause the panel can name with confidence.
+  defp equality_note(source, message) do
+    if String.contains?(source, "==") do
+      message <> " — FEEL equality is =, not =="
+    else
+      message
+    end
+  end
+
+  # ── Panel display helpers ─────────────────────────────────────────────
+
+  defp feel_invalid?(feel, key), do: match?({:error, _message}, feel[key])
+
+  defp plural_word(1), do: "problem"
+  defp plural_word(_count), do: "problems"
+
+  defp jumpable_path?(path), do: path != "" and path not in @non_element_paths
+
+  defp flow_label(flow) do
+    if blank?(flow["name"]), do: flow["id"], else: flow["name"]
+  end
+
+  defp flow_option_label(flow) do
+    flow_label(flow) <>
+      if flow["condition"], do: " — has condition", else: " — no condition"
+  end
+
+  # The state each outgoing flow is in, against the chosen default: green is a
+  # conditioned flow, indigo the default, amber an unconditioned flow the
+  # compiler will refuse at publish, red the impossible combination.
+  defp flow_badge(flow, default_id) do
+    cond do
+      flow["id"] == default_id and flow["condition"] ->
+        {"default + condition", "bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-200"}
+
+      flow["id"] == default_id ->
+        {"default", "bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-200"}
+
+      flow["condition"] ->
+        {"condition", "bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-200"}
+
+      true ->
+        {"no condition", "bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-200"}
+    end
+  end
+
+  defp pad(list, size) do
+    list ++ List.duplicate(nil, max(size - length(list), 0))
+  end
+
+  defp parse_integer(nil), do: nil
+
+  defp parse_integer(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {int, _} -> int
+      :error -> nil
+    end
+  end
+
+  defp parse_integer(value) when is_integer(value), do: value
+  defp parse_integer(_), do: nil
+
+  defp blank?(nil), do: true
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blank?(_), do: false
 
   @doc """
   Normalizes the `config` payload the designer hook sends with a selection into
@@ -1340,7 +1860,13 @@ defmodule AshBpmn.Web.DesignerLive do
       "outcomes" => [],
       "timers" => [],
       "inputs" => [],
-      "promote" => []
+      "promote" => [],
+      # Gateway condition / default-flow vocabulary: the flow's FEEL condition,
+      # the gateway it is the default of, and the gateway's outgoing flows.
+      "condition" => "",
+      "default_of" => nil,
+      "default" => "",
+      "outgoing" => []
     }
   end
 end
