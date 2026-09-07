@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_ash_call_create"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_ash_call_create" name="ash:call create" isExecutable="true">
+
+    <bpmn2:startEvent id="Start">
+      <bpmn2:outgoing>F_start</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <bpmn2:serviceTask id="EnrollCall" name="Enroll via a create callable">
+      <bpmn2:extensionElements>
+        <ash:call ref="AshBpmn.Test.RuntimeCallablesDomain.enroll"/>
+        <ash:inputs>
+          <ash:input name="name" from="subject.name"/>
+        </ash:inputs>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_start</bpmn2:incoming>
+      <bpmn2:outgoing>F_done</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End">
+      <bpmn2:incoming>F_done</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F_start" sourceRef="Start" targetRef="EnrollCall"/>
+    <bpmn2:sequenceFlow id="F_done" sourceRef="EnrollCall" targetRef="End"/>
+  </bpmn2:process>
+</bpmn2:definitions>

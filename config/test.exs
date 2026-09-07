@@ -26,12 +26,16 @@ config :ash_bpmn,
 # Order matters. `AshBpmn.Runtime.DomainResolver.resolve!/1` falls back to the
 # first domain here that has all six resource kinds when a caller does not name
 # one, so the tenant-scoped domain goes last: it is reached by name, from the
-# `"domain"` key its jobs carry, and never by the fallback.
+# `"domain"` key its jobs carry, and never by the fallback. `RuntimeCallablesDomain`
+# hosts the `ash:call` engine-test callables; it has no BPMN resources, so the
+# fallback skips it, and it is reached only because `ash:call` resolves refs
+# against every domain in this list.
 config :ash_bpmn,
   ash_domains: [
     AshBpmn.Test.Domain,
     AshBpmn.ApprovalTestSupport.Domain,
-    AshBpmn.TenantTest.Domain
+    AshBpmn.TenantTest.Domain,
+    AshBpmn.Test.RuntimeCallablesDomain
   ]
 
 # The web test endpoint (test/support/web_endpoint.ex). Config lives here —

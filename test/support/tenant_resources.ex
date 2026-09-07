@@ -74,6 +74,38 @@ defmodule AshBpmn.TenantTest.ProcessEvent do
     tenant?: true
 end
 
+# The triggers extension's three resources, tenant-scoped — the version
+# sequence is per key *within the tenant*, and the cursor is one row per
+# tenant, so attribute multitenancy is not optional for these.
+defmodule AshBpmn.TenantTest.Subscription do
+  @moduledoc false
+  use AshBpmn.Resources.Subscription,
+    domain: AshBpmn.TenantTest.Domain,
+    repo: AshBpmn.TestRepo,
+    table: "tenant_bpmn_subscriptions",
+    tenant?: true
+end
+
+defmodule AshBpmn.TenantTest.Cursor do
+  @moduledoc false
+  use AshBpmn.Resources.Cursor,
+    domain: AshBpmn.TenantTest.Domain,
+    repo: AshBpmn.TestRepo,
+    table: "tenant_bpmn_cursors",
+    tenant?: true
+end
+
+defmodule AshBpmn.TenantTest.Dispatch do
+  @moduledoc false
+  use AshBpmn.Resources.Dispatch,
+    domain: AshBpmn.TenantTest.Domain,
+    repo: AshBpmn.TestRepo,
+    subscription: AshBpmn.TenantTest.Subscription,
+    token: AshBpmn.TenantTest.Token,
+    table: "tenant_bpmn_dispatches",
+    tenant?: true
+end
+
 defmodule AshBpmn.TenantTest.Domain do
   @moduledoc false
   use Ash.Domain
@@ -85,5 +117,8 @@ defmodule AshBpmn.TenantTest.Domain do
     resource AshBpmn.TenantTest.HumanTask
     resource AshBpmn.TenantTest.TaskCandidate
     resource AshBpmn.TenantTest.ProcessEvent
+    resource AshBpmn.TenantTest.Subscription
+    resource AshBpmn.TenantTest.Cursor
+    resource AshBpmn.TenantTest.Dispatch
   end
 end

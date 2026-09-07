@@ -5,6 +5,7 @@ defmodule AshBpmn.Compiler.Verify do
   @moduledoc false
 
   alias AshBpmn.Compiler.Errors
+  alias AshBpmn.Runtime.Interpreter
 
   @spec verify(map()) :: [map()]
   def verify(graph) do
@@ -35,6 +36,11 @@ defmodule AshBpmn.Compiler.Verify do
     # 8. Service and send tasks: when the host's invoker can confirm its action
     #    catalogue, an action that does not exist fails here rather than at runtime
     errors = errors ++ verify_service_task_actions(nodes)
+
+    # 9. Service and send tasks bound with ash:call: the callable ref resolves against
+    #    the host's configured domains, and every declared input names an argument of
+    #    the callable's action
+    errors = errors ++ verify_call_bindings(nodes)
 
     errors
   end
@@ -146,6 +152,71 @@ defmodule AshBpmn.Compiler.Verify do
     if invoker.exists?(ref), do: :ok, else: {:error, :missing}
   rescue
     e -> {:error, Exception.message(e)}
+  end
+
+  # The publish-time promise for `ash:call`, mirroring the decision check above: a
+  # diagram cannot ship against a callable that does not resolve, or against declared
+  # inputs the callee would not know what to do with. The resolution is the *same*
+  # walk the runtime does (`AshBpmn.Runtime.Interpreter.resolve_callable/1`), so a
+  # diagram that verified here is the diagram that executes -- the catalogue is the
+  # host's configured domains, and a ref outside them does not exist.
+  defp verify_call_bindings(nodes) do
+    nodes
+    |> Enum.filter(fn {_id, node} -> is_map_key(node, "call") end)
+    |> Enum.flat_map(fn {id, node} ->
+      call = node["call"]
+      ref = call["ref"]
+      type = node["type"]
+
+      case Interpreter.resolve_callable(ref) do
+        {:ok, %{resource: resource, action: action_name}} ->
+          verify_call_inputs(id, type, ref, resource, action_name, node)
+
+        {:error, reason} ->
+          [
+            Errors.error(
+              id,
+              "#{type} '#{id}' references callable '#{ref}', which does not exist (#{reason})"
+            )
+          ]
+      end
+    end)
+  end
+
+  defp verify_call_inputs(id, type, ref, resource, action_name, node) do
+    case Ash.Resource.Info.action(resource, action_name) do
+      nil ->
+        [
+          Errors.error(
+            id,
+            "#{type} '#{id}': could not verify callable '#{ref}': the action is no longer on the resource"
+          )
+        ]
+
+      action ->
+        # Every action type -- generic, create, update, destroy, read -- carries its
+        # declared arguments here, so one check covers the lot. Input names arrive from
+        # XML as strings; argument names are atoms, and the comparison goes
+        # atom-to-string, never the other way.
+        argument_names = MapSet.new(action.arguments, &Atom.to_string(&1.name))
+
+        node
+        |> Map.get("inputs", [])
+        |> Enum.flat_map(fn input ->
+          name = input["name"]
+
+          if MapSet.member?(argument_names, name) do
+            []
+          else
+            [
+              Errors.error(
+                id,
+                "#{type} '#{id}' declares input '#{name}', which is not an argument of callable '#{ref}'"
+              )
+            ]
+          end
+        end)
+    end
   end
 
   defp verify_start_end(nodes) do

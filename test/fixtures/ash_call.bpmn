@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   id="Definitions_ash_call"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_ash_call" name="ash:call service task" isExecutable="true">
+
+    <bpmn2:startEvent id="Start">
+      <bpmn2:outgoing>F_start</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <!-- The call's promoted output lands on the token's routing; the gateway reads it. -->
+    <bpmn2:serviceTask id="AssessCall" name="Assess tier via ash:call">
+      <bpmn2:extensionElements>
+        <ash:call ref="AshBpmn.Test.RuntimeCallablesDomain.assess_tier"/>
+        <ash:inputs>
+          <ash:input name="amount" from="subject.amount"/>
+        </ash:inputs>
+        <ash:promote>
+          <ash:signal name="tier" required="true"/>
+        </ash:promote>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_start</bpmn2:incoming>
+      <bpmn2:outgoing>F_assessed</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:exclusiveGateway id="Route" default="F_low">
+      <bpmn2:incoming>F_assessed</bpmn2:incoming>
+      <bpmn2:outgoing>F_high</bpmn2:outgoing>
+      <bpmn2:outgoing>F_low</bpmn2:outgoing>
+    </bpmn2:exclusiveGateway>
+
+    <!-- Inputs from the subject and from the routing a sibling node promoted. -->
+    <bpmn2:serviceTask id="RecordCall" name="Record the evaluated inputs">
+      <bpmn2:extensionElements>
+        <ash:call ref="AshBpmn.Test.RuntimeCallablesDomain.record_inputs"/>
+        <ash:inputs>
+          <ash:input name="amount" from="subject.amount"/>
+          <ash:input name="tier" from="routing.tier"/>
+        </ash:inputs>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_high</bpmn2:incoming>
+      <bpmn2:outgoing>F_recorded</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="EndHigh">
+      <bpmn2:extensionElements><ash:taskConfig outcome="escalated"/></bpmn2:extensionElements>
+      <bpmn2:incoming>F_recorded</bpmn2:incoming>
+    </bpmn2:endEvent>
+    <bpmn2:endEvent id="EndLow">
+      <bpmn2:extensionElements><ash:taskConfig outcome="approved"/></bpmn2:extensionElements>
+      <bpmn2:incoming>F_low</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F_start" sourceRef="Start" targetRef="AssessCall"/>
+    <bpmn2:sequenceFlow id="F_assessed" sourceRef="AssessCall" targetRef="Route"/>
+    <bpmn2:sequenceFlow id="F_high" sourceRef="Route" targetRef="RecordCall">
+      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression"
+        language="feel">routing.tier = "high"</bpmn2:conditionExpression>
+    </bpmn2:sequenceFlow>
+    <bpmn2:sequenceFlow id="F_low" sourceRef="Route" targetRef="EndLow"/>
+    <bpmn2:sequenceFlow id="F_recorded" sourceRef="RecordCall" targetRef="EndHigh"/>
+  </bpmn2:process>
+</bpmn2:definitions>

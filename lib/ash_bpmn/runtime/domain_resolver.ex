@@ -7,8 +7,34 @@ defmodule AshBpmn.Runtime.DomainResolver do
 
   Looks at `config :ash_bpmn, ash_domains: [...]` first, then falls back to the
   application-wide `config :ash, ash_domains: [...]`, and picks the first domain
-  that has all six BPMN resource kinds registered.
+  that has all six core BPMN resource kinds registered.
+
+  The triggers extension's kinds (`:subscription`, `:cursor`, `:dispatch`) are
+  **additive and optional**: `AshBpmn.Resources.for_domain/1` still requires
+  only the core six, so a domain without the trigger resources resolves exactly
+  as before, with those three keys `nil` in the mapping. The event sweep
+  resolves its resources by name, from the domain its job carries, and treats
+  `nil` as "not installed" rather than as an error.
   """
+
+  @doc """
+  The configured ash domains, in config order.
+
+  `config :ash_bpmn, ash_domains: [...]` first, falling back to the
+  application-wide `config :ash, :ash_domains: [...]` — the same lookup
+  `resolve!/1` does. This is the allowlist the `ash:call` vocabulary resolves
+  callable refs against, at publish time (`AshBpmn.Compiler.Verify`) and at
+  execution time (`AshBpmn.Runtime.Interpreter`): a ref that resolves against
+  no domain in this list does not exist, because a diagram never contains
+  module aliases beyond a configured domain's own name.
+  """
+  @spec domains() :: [module()]
+  def domains do
+    case Application.get_env(:ash_bpmn, :ash_domains, []) do
+      [] -> Application.get_env(:ash, :ash_domains, [])
+      domains -> domains
+    end
+  end
 
   @doc """
   Returns the resource mapping `%{definition: mod, instance: mod, ...}` or raises.
@@ -29,14 +55,8 @@ defmodule AshBpmn.Runtime.DomainResolver do
   def resolve!(domain \\ nil)
 
   def resolve!(nil) do
-    domains =
-      case Application.get_env(:ash_bpmn, :ash_domains, []) do
-        [] -> Application.get_env(:ash, :ash_domains, [])
-        domains -> domains
-      end
-
     result =
-      Enum.find_value(domains, fn domain ->
+      Enum.find_value(domains(), fn domain ->
         try do
           case AshBpmn.Resources.for_domain(domain) do
             {:ok, mapping} -> mapping
