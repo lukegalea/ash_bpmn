@@ -5,8 +5,9 @@ defmodule AshBpmn.DesignerCatalogueTest do
   @moduledoc """
   The designer's typed-node panels: the business rule task panel (decision
   catalogue, status badge, drift note, deep link, inputs, promotions), the
-  service/send panels fed by the action catalogue, and the free-text fallback
-  when no catalogue is configured or its source is down.
+  service/send panels fed by the action catalogue — and their `ash:call`
+  binding, fed by the callables the configured domains expose — plus the
+  free-text fallback when no catalogue is configured or its source is down.
 
   The round-trip contract matters more than any single field: the apply_config
   payload must carry the decision elements back out, because the hook rewrites
@@ -467,6 +468,371 @@ defmodule AshBpmn.DesignerCatalogueTest do
     end
   end
 
+  # ── ServiceTask / SendTask panel: the ash:call binding ────────────────
+
+  # The diagram spelling of the callables the test config's domains expose.
+  @record_inputs_ref "AshBpmn.Test.RuntimeCallablesDomain.record_inputs"
+  @assess_tier_ref "AshBpmn.Test.RuntimeCallablesDomain.assess_tier"
+
+  describe "service task panel: ash:call binding" do
+    test "renders the picker and the callable dropdown from the configured domains" do
+      {:ok, view, _html} = live_catalogue_designer()
+
+      html =
+        render_hook(view, "selection_changed", %{
+          "id" => "Record",
+          "type" => "bpmn:ServiceTask",
+          "name" => "Record",
+          "config" => %{
+            "call" => %{"ref" => @record_inputs_ref},
+            "inputs" => [
+              %{"name" => "amount", "from" => "subject.amount"},
+              %{"name" => "tier", "from" => "routing.tier"}
+            ]
+          }
+        })
+
+      # The binding picker, with the call mode derived from the live config
+      assert has_element?(view, "#config-binding-mode")
+      assert html =~ ~s(<option value="call" selected)
+
+      # The dropdown: the diagram spelling as the value, name and description
+      # as the label — a select, not a guess
+      assert html =~ ~s(<select id="config-call-ref" name="call_ref")
+      assert html =~ ~s(value="#{@record_inputs_ref}" selected)
+      assert html =~ "assess_tier — Assesses the risk tier from the amount"
+
+      # The input palette is the callable's action arguments, prefilled from
+      # the live binding — blank rows here would mean Apply erases them
+      assert html =~ "amount"
+      assert html =~ "tier"
+      assert html =~ "decimal"
+      assert length(Regex.scan(~r/name="inputs_from\[\]"/, html)) == 2
+      assert html =~ ~s(value="subject.amount")
+      assert html =~ ~s(value="routing.tier")
+
+      # Promote rows ride along exactly as on every other binding
+      assert has_element?(view, "input[name='promote_name[]']")
+    end
+
+    test "arg rows follow the callable select and validate their FEEL on change" do
+      {:ok, view, _html} = live_catalogue_designer()
+
+      render_hook(view, "selection_changed", %{
+        "id" => "Record",
+        "type" => "bpmn:ServiceTask",
+        "name" => "Record",
+        "config" => %{"call" => %{"ref" => @record_inputs_ref}}
+      })
+
+      # record_inputs declares two arguments
+      assert length(Regex.scan(~r/name="inputs_from\[\]"/, render(view))) == 2
+
+      # assess_tier declares one — the palette refreshes before Apply
+      html =
+        view
+        |> element("#config-call-ref")
+        |> render_change(%{"call_ref" => @assess_tier_ref})
+
+      assert length(Regex.scan(~r/name="inputs_from\[\]"/, html)) == 1
+
+      # The Phase 1 row validation, unchanged: bad FEEL flags the row inline
+      # with the =-not-== hint, and the half-typed row survives the re-render
+      html =
+        view
+        |> element("#ash-bpmn-panel form")
+        |> render_change(%{
+          "element_id" => "Record",
+          "type" => "bpmn:ServiceTask",
+          "name" => "Record",
+          "binding_mode" => "call",
+          "call_ref" => @assess_tier_ref,
+          "inputs_from" => ["subject.amount =="],
+          "promote_name" => [""],
+          "promote_from" => [""],
+          "promote_required" => ["false"]
+        })
+
+      assert has_element?(view, "#feel-feedback-inputs-0")
+      assert html =~ "expected expression"
+      assert html =~ "FEEL equality is =, not =="
+      assert html =~ "subject.amount =="
+
+      html =
+        view
+        |> element("#ash-bpmn-panel form")
+        |> render_change(%{
+          "element_id" => "Record",
+          "type" => "bpmn:ServiceTask",
+          "name" => "Record",
+          "binding_mode" => "call",
+          "call_ref" => @assess_tier_ref,
+          "inputs_from" => ["subject.amount"],
+          "promote_name" => [""],
+          "promote_from" => [""],
+          "promote_required" => ["false"]
+        })
+
+      assert html =~ "Valid FEEL"
+    end
+
+    test "picking a mode clears the other binding, in the panel and in the payload" do
+      {:ok, view, _html} = live_catalogue_designer()
+
+      render_hook(view, "selection_changed", %{
+        "id" => "Record",
+        "type" => "bpmn:ServiceTask",
+        "name" => "Record",
+        "config" => %{"action" => "record_risk"}
+      })
+
+      # The legacy-bound task opens in action mode
+      html = render(view)
+      assert html =~ ~s(<option value="action" selected)
+      assert has_element?(view, "#config-action")
+
+      # Flipping to the call binding swaps the field set before Apply
+      view
+      |> element("#config-binding-mode")
+      |> render_change(%{"binding_mode" => "call"})
+
+      refute has_element?(view, "#config-action")
+      assert has_element?(view, "#config-call-ref")
+
+      view
+      |> element("#ash-bpmn-panel form")
+      |> render_submit(%{
+        "element_id" => "Record",
+        "type" => "bpmn:ServiceTask",
+        "name" => "Record",
+        "binding_mode" => "call",
+        "call_ref" => @record_inputs_ref,
+        "inputs_from" => ["subject.amount", "routing.tier"],
+        "promote_name" => [""],
+        "promote_from" => [""],
+        "promote_required" => ["false"]
+      })
+
+      assert_push_event(view, "apply_config", %{config: config})
+
+      # The payload carries the call, and the action is cleared: the hook can
+      # only ever write one binding element
+      assert config["call"] == %{"ref" => @record_inputs_ref}
+      assert config["action"] == ""
+
+      assert config["inputs"] == [
+               %{"name" => "amount", "from" => "subject.amount"},
+               %{"name" => "tier", "from" => "routing.tier"}
+             ]
+
+      assert config["promote"] == []
+
+      # And back: an action-mode Apply carries the action and an empty call
+      view
+      |> element("#config-binding-mode")
+      |> render_change(%{"binding_mode" => "action"})
+
+      view
+      |> element("#ash-bpmn-panel form")
+      |> render_submit(%{
+        "element_id" => "Record",
+        "type" => "bpmn:ServiceTask",
+        "name" => "Record",
+        "binding_mode" => "action",
+        "action" => "send_notice",
+        "inputs_from" => ["routing.tier"],
+        "promote_name" => [""],
+        "promote_from" => [""],
+        "promote_required" => ["false"]
+      })
+
+      assert_push_event(view, "apply_config", %{config: config})
+
+      assert config["action"] == "send_notice"
+      assert config["call"] == %{"ref" => ""}
+      assert config["inputs"] == [%{"name" => "note", "from" => "routing.tier"}]
+    end
+
+    test "the applied call binding is XML the compiler accepts" do
+      {:ok, view, _html} = live_catalogue_designer()
+
+      render_hook(view, "selection_changed", %{
+        "id" => "Record",
+        "type" => "bpmn:ServiceTask",
+        "name" => "Record",
+        "config" => %{"call" => %{"ref" => @assess_tier_ref}}
+      })
+
+      view
+      |> element("#ash-bpmn-panel form")
+      |> render_submit(%{
+        "element_id" => "Record",
+        "type" => "bpmn:ServiceTask",
+        "name" => "Record",
+        "binding_mode" => "call",
+        "call_ref" => @assess_tier_ref,
+        "inputs_from" => ["subject.amount"],
+        "promote_name" => ["tier"],
+        "promote_from" => [""],
+        "promote_required" => ["true"]
+      })
+
+      assert_push_event(view, "apply_config", %{config: config})
+
+      assert config["call"] == %{"ref" => @assess_tier_ref}
+      assert config["inputs"] == [%{"name" => "amount", "from" => "subject.amount"}]
+
+      # The XML the hook writes from this payload — the ash:call binding plus
+      # the shared inputs/promote vocabulary — must compile and verify: the
+      # ref resolves against the configured domains and every declared input
+      # names a real argument of the callable's action.
+      inputs =
+        Enum.map_join(config["inputs"], fn input ->
+          ~s|<ash:input name="#{input["name"]}" from="#{input["from"]}"/>|
+        end)
+
+      xml =
+        service_task_xml("""
+        <ash:call ref="#{config["call"]["ref"]}"/>
+        <ash:inputs>#{inputs}</ash:inputs>
+        <ash:promote>
+          <ash:signal name="tier" required="true"/>
+        </ash:promote>
+        """)
+
+      assert {:ok, graph} = AshBpmn.Compiler.compile(xml)
+
+      node = graph["nodes"]["T"]
+
+      assert node["call"] == %{"ref" => @assess_tier_ref}
+      assert [%{"name" => "amount", "from" => %{"text" => "subject.amount"}}] = node["inputs"]
+      assert [%{"name" => "tier", "from" => "tier", "required" => true}] = node["promote"]
+    end
+
+    test "sendTask gets the same picker and call payload" do
+      {:ok, view, _html} = live_catalogue_designer()
+
+      html =
+        render_hook(view, "selection_changed", %{
+          "id" => "Notify",
+          "type" => "bpmn:SendTask",
+          "name" => "Notify",
+          "config" => %{
+            "call" => %{"ref" => @assess_tier_ref},
+            "inputs" => [%{"name" => "amount", "from" => "subject.amount"}]
+          }
+        })
+
+      assert has_element?(view, "#config-binding-mode")
+      assert html =~ ~s(<option value="call" selected)
+      assert html =~ ~s(value="#{@assess_tier_ref}" selected)
+      assert html =~ ~s(value="subject.amount")
+
+      view
+      |> element("#ash-bpmn-panel form")
+      |> render_submit(%{
+        "element_id" => "Notify",
+        "type" => "bpmn:SendTask",
+        "name" => "Notify",
+        "binding_mode" => "call",
+        "call_ref" => @assess_tier_ref,
+        "inputs_from" => ["subject.amount"],
+        "promote_name" => [""],
+        "promote_from" => [""],
+        "promote_required" => ["false"]
+      })
+
+      assert_push_event(view, "apply_config", %{config: config})
+
+      assert config["call"] == %{"ref" => @assess_tier_ref}
+      assert config["action"] == ""
+      assert config["inputs"] == [%{"name" => "amount", "from" => "subject.amount"}]
+    end
+
+    test "warns when the call ref is not declared by any configured domain" do
+      {:ok, view, _html} = live_catalogue_designer()
+
+      html =
+        render_hook(view, "selection_changed", %{
+          "id" => "Record",
+          "type" => "bpmn:ServiceTask",
+          "name" => "Record",
+          "config" => %{"call" => %{"ref" => "AshBpmn.Test.RuntimeCallablesDomain.nope"}}
+        })
+
+      assert has_element?(view, "#config-call-ref")
+      assert html =~ "AshBpmn.Test.RuntimeCallablesDomain.nope"
+      assert html =~ "is not declared by any configured domain"
+    end
+
+    test "no callables anywhere: the quiet note, never a broken control" do
+      # The callable dropdown's source is the configured domains; emptying
+      # them empties the dropdown. These tests are async: false, so the app env
+      # mutation is exclusive to this test and restored before the next.
+      original_bpmn = Application.get_env(:ash_bpmn, :ash_domains)
+      original_ash = Application.get_env(:ash, :ash_domains)
+
+      Application.put_env(:ash_bpmn, :ash_domains, [])
+      Application.put_env(:ash, :ash_domains, [])
+
+      on_exit(fn ->
+        Application.put_env(:ash_bpmn, :ash_domains, original_bpmn)
+
+        if original_ash == nil,
+          do: Application.delete_env(:ash, :ash_domains),
+          else: Application.put_env(:ash, :ash_domains, original_ash)
+      end)
+
+      {:ok, view, _html} = live_catalogue_designer()
+
+      render_hook(view, "selection_changed", %{
+        "id" => "Record",
+        "type" => "bpmn:ServiceTask",
+        "name" => "Record",
+        "config" => %{}
+      })
+
+      html =
+        view
+        |> element("#config-binding-mode")
+        |> render_change(%{"binding_mode" => "call"})
+
+      assert has_element?(view, "#config-call-empty")
+      assert html =~ "No actions are exposed to diagrams"
+      assert html =~ "callables"
+      refute has_element?(view, "#config-call-ref")
+
+      # A stray ref from the XML stays visible and submittable: Apply must not
+      # silently erase a binding the panel was shown.
+      html =
+        render_hook(view, "selection_changed", %{
+          "id" => "Record",
+          "type" => "bpmn:ServiceTask",
+          "name" => "Record",
+          "config" => %{"call" => %{"ref" => @record_inputs_ref}}
+        })
+
+      assert html =~ "is not declared by any configured domain"
+      assert html =~ ~s(name="call_ref")
+
+      view
+      |> element("#ash-bpmn-panel form")
+      |> render_submit(%{
+        "element_id" => "Record",
+        "type" => "bpmn:ServiceTask",
+        "name" => "Record",
+        "binding_mode" => "call",
+        "call_ref" => @record_inputs_ref,
+        "promote_name" => [""],
+        "promote_from" => [""],
+        "promote_required" => ["false"]
+      })
+
+      assert_push_event(view, "apply_config", %{config: config})
+      assert config["call"] == %{"ref" => @record_inputs_ref}
+    end
+  end
+
   # ── Unchanged panels ───────────────────────────────────────────────────
 
   test "userTask and endEvent panels still render" do
@@ -495,6 +861,28 @@ defmodule AshBpmn.DesignerCatalogueTest do
   end
 
   # ── Helpers ────────────────────────────────────────────────────────────
+
+  # An otherwise-valid process whose serviceTask carries the given extension
+  # elements — the same corpus shape compiler_test.exs uses, so the panel's
+  # apply payload can be compiled exactly as the hook would write it.
+  defp service_task_xml(ext_content) do
+    """
+    <bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                       xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns">
+      <bpmn2:process id="P" isExecutable="true">
+        <bpmn2:startEvent id="S"><bpmn2:outgoing>F</bpmn2:outgoing></bpmn2:startEvent>
+        <bpmn2:serviceTask id="T" name="Task">
+          <bpmn2:extensionElements>#{ext_content}</bpmn2:extensionElements>
+          <bpmn2:incoming>F</bpmn2:incoming>
+          <bpmn2:outgoing>F2</bpmn2:outgoing>
+        </bpmn2:serviceTask>
+        <bpmn2:endEvent id="E"><bpmn2:incoming>F2</bpmn2:incoming></bpmn2:endEvent>
+        <bpmn2:sequenceFlow id="F" sourceRef="S" targetRef="T"/>
+        <bpmn2:sequenceFlow id="F2" sourceRef="T" targetRef="E"/>
+      </bpmn2:process>
+    </bpmn2:definitions>
+    """
+  end
 
   defp live_designer do
     conn =

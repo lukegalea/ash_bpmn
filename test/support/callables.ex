@@ -178,7 +178,10 @@ defmodule AshBpmn.Test.RuntimeCallablesDomain do
   end
 
   callables do
-    callable(:assess_tier, AshBpmn.Test.CallablesRuntimeResource, :assess_tier)
+    callable :assess_tier, AshBpmn.Test.CallablesRuntimeResource, :assess_tier do
+      description "Assesses the risk tier from the amount"
+    end
+
     callable(:record_inputs, AshBpmn.Test.CallablesRuntimeResource, :record_inputs)
     callable(:always_fails, AshBpmn.Test.CallablesRuntimeResource, :always_fails)
     callable(:enroll, AshBpmn.Test.CallablesEnrollee, :enroll)

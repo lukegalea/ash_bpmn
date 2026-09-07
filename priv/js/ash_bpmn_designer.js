@@ -29,7 +29,7 @@ import './ash_bpmn.css';
 //   TaskConfig   attrs: action?, outcome?
 //                children: candidates, exclusions, outcomes, timers
 //   Decision     attrs: ref, binding, version?, name?
-//   Call         attrs: ref  (serviceTask/sendTask binding; round-trip only)
+//   Call         attrs: ref  (the serviceTask/sendTask ash:call binding)
 //   Inputs       child: input
 //   Input        attrs: name, from
 //   Promote      child: signal
@@ -85,11 +85,13 @@ export const ashBpmnModdle = {
     },
     // --- serviceTask / sendTask -------------------------------------------
     // An ash:call binding: the callable the engine invokes, spelled "Domain.name".
-    // Vocabulary round-trip only -- the authoring panel is a later lane. Without this
-    // descriptor entry moddle drops the element on import, and a designer save/load
-    // silently erases the binding the compiler and engine read. Its declared inputs
-    // (ash:Inputs) and promoted signals (ash:Promote) are the shared vocabulary
-    // registered above -- the same elements a businessRuleTask uses.
+    // The service/send panel's Callable mode authors this element; the legacy
+    // Action mode authors ash:taskConfig instead, and the compiler accepts
+    // exactly one of the two. Without this descriptor entry moddle drops the
+    // element on import, and a designer save/load silently erases the binding
+    // the compiler and engine read. Its declared inputs (ash:Inputs) and
+    // promoted signals (ash:Promote) are the shared vocabulary registered
+    // above -- the same elements a businessRuleTask uses.
     {
       name: 'Call',
       superClass: ['Element'],
@@ -217,7 +219,8 @@ function pushError(hook, err) {
  *
  * The element type decides which ash: elements the panel owns:
  *   - BusinessRuleTask: ash:decision + ash:inputs + ash:promote
- *   - ServiceTask / SendTask: ash:taskConfig(action) + ash:inputs + ash:promote
+ *   - ServiceTask / SendTask: exactly one binding — ash:taskConfig(action) or
+ *     ash:call(ref) — plus ash:inputs + ash:promote
  *   - UserTask / EndEvent: ash:taskConfig(candidates/outcomes/…)
  *
  * Sequence flows and exclusive gateways carry no ash: vocabulary, but the
@@ -307,13 +310,27 @@ function readConfig(element) {
 
   if (type === 'bpmn:ServiceTask' || type === 'bpmn:SendTask') {
     const cfg = find('ash:TaskConfig');
-    if (!cfg) return {};
+    const call = find('ash:Call');
 
-    return {
-      action: cfg.action || '',
+    // Inputs and promotes are read regardless of which binding holds them:
+    // both bindings share that vocabulary, and dropping them here would render
+    // the panel blank for a call-bound task — the exact erasure readConfig
+    // exists to prevent.
+    const config = {
       inputs: readInputs(),
       promote: readPromote()
     };
+
+    if (call) {
+      // Exactly one binding per task. A hand-edited document carrying both is
+      // the compiler's to refuse; the panel shows the call, and the next Apply
+      // writes only it — the same cleanup the binding picker does.
+      config.call = { ref: call.ref || '' };
+    } else if (cfg) {
+      config.action = cfg.action || '';
+    }
+
+    return config;
   }
 
   const cfg = find('ash:TaskConfig');
@@ -417,7 +434,9 @@ function buildTaskConfig(moddle, config) {
 /**
  * Build the ash: elements a given element type owns, from a server config map.
  * Returns a list: for a BusinessRuleTask [ash:Decision, ash:Inputs?, ash:Promote?],
- * for everything taskConfig-shaped [ash:TaskConfig, ash:Inputs?, ash:Promote?].
+ * for a service/send task exactly one binding — [ash:Call] when the call ref is
+ * authored, [ash:TaskConfig] when the action is — plus [ash:Inputs?, ash:Promote?],
+ * and for everything taskConfig-shaped [ash:TaskConfig, ash:Inputs?, ash:Promote?].
  *
  * Optional attributes are omitted when blank: name unless set, version unless the
  * binding is pinned, from unless the signal redirects. binding and required get
@@ -438,6 +457,18 @@ function buildAshValues(moddle, type, config) {
       }
       if (nonBlank(d.name)) props.name = String(d.name);
       values.push(moddle.create('ash:Decision', props));
+    }
+  } else if (isServiceLike(type)) {
+    // Exactly one binding: a non-blank call ref writes the call and no
+    // taskConfig at all; the legacy action writes the taskConfig and no call.
+    // Neither authored writes neither — the compiler's "exactly one binding"
+    // error is the honest message for an unbound task, rather than an empty
+    // taskConfig that only half-names the problem.
+    const call = config.call;
+    if (call && nonBlank(call.ref)) {
+      values.push(moddle.create('ash:Call', { ref: String(call.ref).trim() }));
+    } else if (nonBlank(config.action)) {
+      values.push(buildTaskConfig(moddle, config));
     }
   } else {
     values.push(buildTaskConfig(moddle, config));
@@ -475,13 +506,17 @@ function buildAshValues(moddle, type, config) {
  * The ash: extension element types each element type OWNS — the ones Apply
  * replaces. Everything else in extensionElements (other namespaces' elements,
  * other tools' extensions) survives untouched.
+ *
+ * A service/send task owns both binding elements: switching a task from the
+ * legacy action to ash:call (or back) has to remove the one it no longer
+ * carries, or the next save would ship both and the compiler would refuse it.
  */
 function ownedAshTypes(type) {
   if (type === 'bpmn:BusinessRuleTask') {
     return ['ash:Decision', 'ash:Inputs', 'ash:Promote'];
   }
-  if (type === 'bpmn:ServiceTask' || type === 'bpmn:SendTask') {
-    return ['ash:TaskConfig', 'ash:Inputs', 'ash:Promote'];
+  if (isServiceLike(type)) {
+    return ['ash:TaskConfig', 'ash:Call', 'ash:Inputs', 'ash:Promote'];
   }
   return ['ash:TaskConfig'];
 }
@@ -551,6 +586,12 @@ function nonBlank(value) {
 
 function truthy(value) {
   return value === 'true' || value === '1' || value === true;
+}
+
+// A sendTask is a serviceTask with a different icon: same config, same
+// dispatch, same two bindings (usage rule 12).
+function isServiceLike(type) {
+  return type === 'bpmn:ServiceTask' || type === 'bpmn:SendTask';
 }
 
 // Every bpmn:* gateway type — none of them own ash: extension elements, and

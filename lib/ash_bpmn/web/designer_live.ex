@@ -45,6 +45,14 @@ defmodule AshBpmn.Web.DesignerLive do
       answer with an href (or nil) for editing that decision, which becomes the
       business rule panel's "Edit decision ↗" link.
 
+  The service/send panel additionally offers the `ash:call` binding beside the
+  legacy action: a dropdown of the callables the *configured* domains expose
+  (`callables do ... end`, see `AshBpmn.Domain`), with one FEEL row per the
+  callable's declared action argument. No option configures it — the list is
+  read from `AshBpmn.Runtime.DomainResolver.domains/0` at mount and on every
+  `handle_params`, the same cadence the catalogues use. Exactly one binding per
+  task is the compiler's rule; picking one in the panel clears the other.
+
   ## Testability
 
   Save and Publish are backed by hidden `<form>` elements so tests can use
@@ -320,7 +328,13 @@ defmodule AshBpmn.Web.DesignerLive do
       def handle_event("update-config", params, socket) do
         id = params["element_id"] || params["id"] || ""
         name = params["name"] || ""
-        config = build_config_from_params(params, socket.assigns[:actions] || [])
+
+        config =
+          build_config_from_params(
+            params,
+            socket.assigns[:actions] || [],
+            socket.assigns[:callables] || []
+          )
 
         payload = %{id: id, name: name, config: config}
 
@@ -376,7 +390,8 @@ defmodule AshBpmn.Web.DesignerLive do
               AshBpmn.Web.DesignerLive.merge_panel_config(
                 params,
                 selected.config,
-                socket.assigns[:actions] || []
+                socket.assigns[:actions] || [],
+                socket.assigns[:callables] || []
               )
 
             selected = %{
@@ -403,10 +418,15 @@ defmodule AshBpmn.Web.DesignerLive do
 
       # Refresh the catalogue assigns. Called from mount and handle_params: the
       # catalogues may be tenant-scoped, and the tenant can change between params.
+      # The callable list rides along on the same cadence — its domains are app
+      # config, but the refresh cost is one introspection pass and keeping the
+      # two in step means the panel never shows a callable a fresh catalogue
+      # disagrees with.
       defp ash_bpmn_load_catalogues(socket) do
         socket
         |> assign(:decisions, ash_bpmn_catalogue(@ash_bpmn_designer_decisions_mfa, socket))
         |> assign(:actions, ash_bpmn_catalogue(@ash_bpmn_designer_actions_mfa, socket))
+        |> assign(:callables, AshBpmn.Web.DesignerLive.callable_entries())
         |> assign(:decision_editor_href, ash_bpmn_editor_href_fn(socket))
       end
 
@@ -546,15 +566,15 @@ defmodule AshBpmn.Web.DesignerLive do
         end
       end
 
-      defp build_config_from_params(params, actions \\ []) do
+      defp build_config_from_params(params, actions, callables) do
         type = params["type"] || ""
 
         case type do
           "bpmn:ServiceTask" ->
-            service_task_config(params, actions)
+            service_task_config(params, actions, callables)
 
           "bpmn:SendTask" ->
-            service_task_config(params, actions)
+            service_task_config(params, actions, callables)
 
           "bpmn:BusinessRuleTask" ->
             version =
@@ -596,21 +616,38 @@ defmodule AshBpmn.Web.DesignerLive do
         end
       end
 
-      defp service_task_config(params, actions) do
-        %{
-          "action" => params["action"] || "",
-          # The rows the panel rendered for the selected action's declared arguments
-          # are ordinary ash:inputs whose name is the argument's name; only the rows
-          # the user filled are kept. No catalogue entry — no declared rows.
-          "inputs" => parse_arg_inputs(params, actions),
-          "promote" => parse_promote(params)
-        }
+      # A service or send task carries exactly one binding — the compiler's
+      # rule, mirrored here so what Apply writes can only ever be one: the
+      # binding picker's mode decides which field is read, and the other binding
+      # is authored empty. `binding_mode` rides in the config for the hook's
+      # benefit and for the panel's own re-renders; moddle never sees it.
+      defp service_task_config(params, actions, callables) do
+        if params["binding_mode"] == "call" do
+          %{
+            "action" => "",
+            "binding_mode" => "call",
+            "call" => %{"ref" => params["call_ref"] || ""},
+            "inputs" => parse_arg_inputs(params, "call_ref", callables),
+            "promote" => parse_promote(params)
+          }
+        else
+          %{
+            "action" => params["action"] || "",
+            "binding_mode" => "action",
+            "call" => %{"ref" => ""},
+            "inputs" => parse_arg_inputs(params, "action", actions),
+            "promote" => parse_promote(params)
+          }
+        end
       end
 
       # One positional `inputs_from[]` per declared argument row, in the order the
-      # panel rendered them.
-      defp parse_arg_inputs(params, actions) do
-        case Enum.find(actions, fn entry -> to_string(entry.ref) == params["action"] end) do
+      # panel rendered them — shared by both bindings, whose catalogue entries
+      # carry the same `args` shape.
+      defp parse_arg_inputs(params, ref_param, entries) do
+        ref = params[ref_param] || ""
+
+        case Enum.find(entries, fn entry -> to_string(entry.ref) == ref end) do
           nil ->
             []
 
@@ -883,6 +920,7 @@ defmodule AshBpmn.Web.DesignerLive do
                   selected={assigns.selected}
                   decisions={assigns[:decisions] || []}
                   actions={assigns[:actions] || []}
+                  callables={assigns[:callables] || []}
                   decision_editor_href={assigns[:decision_editor_href]}
                   feel={assigns[:feel]}
                 />
@@ -929,6 +967,9 @@ defmodule AshBpmn.Web.DesignerLive do
   attr(:selected, :map, required: true)
   attr(:decisions, :list, default: [])
   attr(:actions, :list, default: [])
+  # The `ash:call` dropdown's data: callables the configured domains expose,
+  # each with its action's declared arguments.
+  attr(:callables, :list, default: [])
   attr(:decision_editor_href, :any, default: nil)
   # Inline FEEL verdicts from the last phx-change, keyed "condition" and
   # "inputs:<row index>"; absent means "not validated yet".
@@ -1031,12 +1072,32 @@ defmodule AshBpmn.Web.DesignerLive do
     """
   end
 
-  # A service task and a send task are configured identically — an action, typed
-  # FEEL inputs, promoted signals — so they share one panel branch.
+  # A service task and a send task are configured identically — exactly one
+  # binding (the legacy action through the host's ActionInvoker, or a callable
+  # declared on a configured domain), typed FEEL inputs, promoted signals — so
+  # they share one panel branch. The binding picker offers both bindings the
+  # compiler accepts; whichever is chosen, the rows below it are the selected
+  # binding's declared arguments.
   def node_config(%{selected: %{type: type}} = assigns)
       when type in ["bpmn:ServiceTask", "bpmn:SendTask"] do
     action = assigns.selected.config["action"] || ""
-    entry = Enum.find(assigns.actions, fn a -> to_string(a.ref) == action end)
+    call_ref = call_ref(assigns.selected.config)
+
+    mode =
+      case assigns.selected.config["binding_mode"] do
+        "call" -> "call"
+        "action" -> "action"
+        _ -> if blank?(call_ref), do: "action", else: "call"
+      end
+
+    callables = List.wrap(assigns.callables)
+
+    entry =
+      if mode == "call" do
+        Enum.find(callables, fn c -> to_string(c.ref) == call_ref end)
+      else
+        Enum.find(assigns.actions, fn a -> to_string(a.ref) == action end)
+      end
 
     arg_rows =
       if entry do
@@ -1049,7 +1110,10 @@ defmodule AshBpmn.Web.DesignerLive do
 
     assigns =
       assigns
+      |> assign(:svc_mode, mode)
       |> assign(:svc_action, action)
+      |> assign(:svc_call_ref, call_ref)
+      |> assign(:svc_callables, callables)
       |> assign(:svc_entry, entry)
       |> assign(:svc_arg_rows, arg_rows)
       |> assign(
@@ -1063,35 +1127,88 @@ defmodule AshBpmn.Web.DesignerLive do
 
     ~H"""
     <div class="mb-3">
-      <label class={label_class()} for="config-action">Action</label>
-      <%= if @actions == [] do %>
-        <input
-          id="config-action"
-          type="text"
-          name="action"
-          value={@svc_action}
-          class={field_class()}
-          placeholder="my_app.do_something"
-        />
-      <% else %>
-        <select
-          id="config-action"
-          name="action"
-          phx-change="panel-changed"
-          class={select_class(@svc_entry != nil or @svc_action == "")}
-        >
-          <option value="" selected={@svc_action == ""}>— choose an action —</option>
-          <option :for={a <- @actions} value={a.ref} selected={to_string(a.ref) == @svc_action}>
-            {a.label}
-          </option>
-        </select>
-        <%= if @svc_action != "" and @svc_entry == nil do %>
-          <p class="mt-1 text-xs text-red-600 dark:text-red-400">
-            '{@svc_action}' is not in the action catalogue.
-          </p>
-        <% end %>
-      <% end %>
+      <label class={label_class()} for="config-binding-mode">Binding</label>
+      <select
+        id="config-binding-mode"
+        name="binding_mode"
+        phx-change="panel-changed"
+        class={field_class()}
+      >
+        <option value="action" selected={@svc_mode != "call"}>Action (host invoker)</option>
+        <option value="call" selected={@svc_mode == "call"}>Callable (ash:call)</option>
+      </select>
+      <p class="mt-1.5 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+        Exactly one binding per task — picking one clears the other.
+      </p>
     </div>
+
+    <%= if @svc_mode == "call" do %>
+      <div class="mb-3">
+        <label class={label_class()} for="config-call-ref">Callable</label>
+        <%= if @svc_callables == [] do %>
+          <p id="config-call-empty" class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+            No actions are exposed to diagrams — declare <code>callables</code> on a domain.
+          </p>
+          <%= if @svc_call_ref != "" do %>
+            <%!-- The stray ref stays visible and submittable: Apply must not
+                  silently erase a binding the panel was shown, and the publish
+                  error is the honest way out. --%>
+            <input type="hidden" name="call_ref" value={@svc_call_ref} />
+            <p class="mt-1 text-xs text-red-600 dark:text-red-400">
+              '{@svc_call_ref}' is not declared by any configured domain.
+            </p>
+          <% end %>
+        <% else %>
+          <select
+            id="config-call-ref"
+            name="call_ref"
+            phx-change="panel-changed"
+            class={select_class(@svc_entry != nil or @svc_call_ref == "")}
+          >
+            <option value="" selected={@svc_call_ref == ""}>— choose a callable —</option>
+            <option :for={c <- @svc_callables} value={c.ref} selected={to_string(c.ref) == @svc_call_ref}>
+              {c.label}
+            </option>
+          </select>
+          <%= if @svc_call_ref != "" and @svc_entry == nil do %>
+            <p class="mt-1 text-xs text-red-600 dark:text-red-400">
+              '{@svc_call_ref}' is not declared by any configured domain.
+            </p>
+          <% end %>
+        <% end %>
+      </div>
+    <% else %>
+      <div class="mb-3">
+        <label class={label_class()} for="config-action">Action</label>
+        <%= if @actions == [] do %>
+          <input
+            id="config-action"
+            type="text"
+            name="action"
+            value={@svc_action}
+            class={field_class()}
+            placeholder="my_app.do_something"
+          />
+        <% else %>
+          <select
+            id="config-action"
+            name="action"
+            phx-change="panel-changed"
+            class={select_class(@svc_entry != nil or @svc_action == "")}
+          >
+            <option value="" selected={@svc_action == ""}>— choose an action —</option>
+            <option :for={a <- @actions} value={a.ref} selected={to_string(a.ref) == @svc_action}>
+              {a.label}
+            </option>
+          </select>
+          <%= if @svc_action != "" and @svc_entry == nil do %>
+            <p class="mt-1 text-xs text-red-600 dark:text-red-400">
+              '{@svc_action}' is not in the action catalogue.
+            </p>
+          <% end %>
+        <% end %>
+      </div>
+    <% end %>
 
     <%= if @svc_entry != nil do %>
       <div class="mb-3">
@@ -1432,6 +1549,15 @@ defmodule AshBpmn.Web.DesignerLive do
 
   defp arg_input_value(_, _), do: ""
 
+  # The ash:call ref of a service/send config, blank when the task carries the
+  # legacy action binding (or nothing) instead.
+  defp call_ref(config) do
+    case Map.get(config || %{}, "call") do
+      %{"ref" => ref} when is_binary(ref) -> ref
+      _ -> ""
+    end
+  end
+
   defp decision_editor_href(fun, ref) when is_function(fun, 1) and ref != "", do: fun.(ref)
   defp decision_editor_href(_, _), do: nil
 
@@ -1569,8 +1695,8 @@ defmodule AshBpmn.Web.DesignerLive do
   # rows. The submit parsers drop blank rows on purpose; dropping them at
   # change time would delete the row the user is typing into the moment a
   # validation re-render lands.
-  @spec merge_panel_config(map(), map() | nil, list()) :: map()
-  def merge_panel_config(params, config, actions \\ []) do
+  @spec merge_panel_config(map(), map() | nil, list(), list()) :: map()
+  def merge_panel_config(params, config, actions \\ [], callables \\ []) do
     config = config || %{}
 
     config =
@@ -1578,11 +1704,14 @@ defmodule AshBpmn.Web.DesignerLive do
       |> merge_scalar(params, "action")
       |> merge_scalar(params, "outcome")
       |> merge_scalar(params, "condition")
+      |> merge_scalar(params, "binding_mode")
       |> merge_default_flow(params)
+      |> merge_call_ref(params)
+      |> enforce_single_binding(params)
 
     config
     |> merge_decision(params)
-    |> Map.put("inputs", merge_inputs(params, config, actions))
+    |> Map.put("inputs", merge_inputs(params, config, actions, callables))
     |> Map.put("promote", merge_promote(params, config))
     |> Map.put("candidates", merge_candidates(params, config))
     |> Map.put("exclusions", merge_exclusions(params, config))
@@ -1602,6 +1731,44 @@ defmodule AshBpmn.Web.DesignerLive do
     else
       config
     end
+  end
+
+  # The callable ref of the ash:call binding, the same merge-the-shown-field
+  # contract every other scalar follows.
+  defp merge_call_ref(config, params) do
+    if Map.has_key?(params, "call_ref") do
+      call = Map.get(config, "call") || empty_call()
+      Map.put(config, "call", Map.put(call, "ref", params["call_ref"] || ""))
+    else
+      config
+    end
+  end
+
+  # The binding picker's exactly-one rule, mirrored at change time: whichever
+  # mode the panel is authoring, the other binding is cleared, so what Apply
+  # eventually writes can only ever be one. The compiler polices what escapes;
+  # the panel never authors both.
+  defp enforce_single_binding(config, params) do
+    case params["type"] do
+      type when type in ["bpmn:ServiceTask", "bpmn:SendTask"] ->
+        if service_binding_mode(params, config) == "call" do
+          Map.put(config, "action", "")
+        else
+          Map.put(config, "call", empty_call())
+        end
+
+      _ ->
+        config
+    end
+  end
+
+  # Which binding a service/send panel is authoring: the picker's own value
+  # when the change carried it, then the persisted pick, then whatever the
+  # live config implies. A missing key must not guess "action" for a task the
+  # XML bound with ash:call.
+  defp service_binding_mode(params, config) do
+    params["binding_mode"] || config["binding_mode"] ||
+      if(blank?(call_ref(config)), do: "action", else: "call")
   end
 
   defp merge_decision(config, params) do
@@ -1624,20 +1791,13 @@ defmodule AshBpmn.Web.DesignerLive do
     end
   end
 
-  defp merge_inputs(params, config, actions) do
+  defp merge_inputs(params, config, actions, callables) do
     cond do
       params["type"] in ["bpmn:ServiceTask", "bpmn:SendTask"] ->
-        entry = Enum.find(actions, fn a -> to_string(a.ref) == (params["action"] || "") end)
-
-        if entry != nil and Map.has_key?(params, "inputs_from") do
-          froms = pad(List.wrap(params["inputs_from"] || []), length(entry.args))
-
-          entry.args
-          |> Enum.zip_with(froms, fn arg, from ->
-            %{"name" => to_string(arg.name), "from" => from || ""}
-          end)
+        if service_binding_mode(params, config) == "call" do
+          merge_arg_inputs(params, "call_ref", callables, config)
         else
-          Map.get(config, "inputs") || []
+          merge_arg_inputs(params, "action", actions, config)
         end
 
       Map.has_key?(params, "inputs_name") ->
@@ -1649,6 +1809,24 @@ defmodule AshBpmn.Web.DesignerLive do
 
       true ->
         Map.get(config, "inputs") || []
+    end
+  end
+
+  # The change-time mirror of the arg rows: blank froms are KEPT, or the row
+  # the user is typing into disappears under the validation re-render.
+  defp merge_arg_inputs(params, ref_param, entries, config) do
+    ref = params[ref_param] || ""
+    entry = Enum.find(entries, fn e -> to_string(e.ref) == ref end)
+
+    if entry != nil and Map.has_key?(params, "inputs_from") do
+      froms = pad(List.wrap(params["inputs_from"] || []), length(entry.args))
+
+      entry.args
+      |> Enum.zip_with(froms, fn arg, from ->
+        %{"name" => to_string(arg.name), "from" => from || ""}
+      end)
+    else
+      Map.get(config, "inputs") || []
     end
   end
 
@@ -1837,6 +2015,7 @@ defmodule AshBpmn.Web.DesignerLive do
     config
     |> then(&Map.merge(empty_config(), &1))
     |> Map.put("decision", normalize_decision(Map.get(config, "decision")))
+    |> Map.put("call", normalize_call(Map.get(config, "call")))
   end
 
   @doc false
@@ -1850,11 +2029,22 @@ defmodule AshBpmn.Web.DesignerLive do
   defp normalize_decision(decision) when is_map(decision),
     do: Map.merge(empty_decision(), decision)
 
+  @doc false
+  # The ash:call binding of a service/send task, with every key the panel reads.
+  def empty_call do
+    %{"ref" => ""}
+  end
+
+  defp normalize_call(nil), do: empty_call()
+
+  defp normalize_call(call) when is_map(call), do: Map.merge(empty_call(), call)
+
   defp empty_config do
     %{
       "action" => "",
       "outcome" => "",
       "decision" => empty_decision(),
+      "call" => empty_call(),
       "candidates" => [],
       "exclusions" => [],
       "outcomes" => [],
@@ -1869,4 +2059,65 @@ defmodule AshBpmn.Web.DesignerLive do
       "outgoing" => []
     }
   end
+
+  @doc """
+  Builds the callable catalogue the service/send panel's `ash:call` mode offers.
+
+  Walks the configured ash domains (`AshBpmn.Runtime.DomainResolver.domains/0`
+  — the same allowlist publish verification and the runtime resolve refs
+  against), reads each domain's declared `callables`, and renders each as the
+  diagram spelling `"Domain.name"` with the callable's action arguments
+  introspected alongside: `%{ref, label, description, args}`, the same entry
+  shape the action catalogue uses, so the panel's argument rows render
+  identically for both bindings.
+
+  Total: a domain that cannot be introspected is skipped, not fatal — a broken
+  callable degrades the dropdown by one entry, and an unreachable domain list
+  degrades it to the panel's quiet empty state. Never a raise, never the engine.
+  """
+  @spec callable_entries() :: [map()]
+  def callable_entries do
+    AshBpmn.Runtime.DomainResolver.domains()
+    |> Enum.flat_map(fn domain ->
+      domain
+      |> AshBpmn.Domain.callables()
+      |> Enum.map(&callable_entry(domain, &1))
+      |> Enum.reject(&is_nil/1)
+    end)
+  rescue
+    _ -> []
+  end
+
+  # One dropdown row per declared callable. The arguments come through the same
+  # `AshBpmn.Catalogue.AshActions` builder the action catalogue uses, so the
+  # type labels and required badges cannot drift between the two bindings.
+  defp callable_entry(domain, callable) do
+    args =
+      AshBpmn.Catalogue.AshActions.entries([
+        {callable.name, callable.resource, callable.action}
+      ])
+      |> hd()
+      |> Map.get(:args)
+
+    name = Atom.to_string(callable.name)
+    description = callable.description
+
+    %{
+      # `inspect`, not interpolation: a module's string form carries the
+      # `Elixir.` prefix, and the diagram spelling — what callable?/2 resolves
+      # and the compiler verifies — has none.
+      ref: "#{inspect(domain)}.#{callable.name}",
+      label: callable_label(name, description),
+      description: description,
+      args: args
+    }
+  rescue
+    # A callable whose action no longer introspects (stale compile, renamed
+    # action) is absent from the dropdown — which is also what publish will
+    # say about any diagram still spelling it.
+    _ -> nil
+  end
+
+  defp callable_label(name, nil), do: name
+  defp callable_label(name, description), do: name <> " — " <> description
 end
