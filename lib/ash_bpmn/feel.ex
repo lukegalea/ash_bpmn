@@ -68,11 +68,12 @@ defmodule AshBpmn.Feel do
   column on a single call and the arithmetic is entirely different. If gateway evaluation ever
   moves onto a hot path, the cache to copy is that one.
 
-  What is *not* stored is the engine version that validated the expression at publish time. A
-  definition therefore records what the author wrote but not what agreed it was valid, so an
-  engine upgrade that narrowed the accepted grammar would surface as a runtime failure on a
-  published definition rather than as a refused publish. Named here because it is the one part
-  of this argument that is aspirational.
+  What the snapshot records *about the engine* is stamped alongside the text: the compiler
+  writes a `feel_engine` entry (name and version) into every graph it builds, so a published
+  definition says which engine agreed its expressions were valid at publish time. The source
+  text still means an upgrade re-evaluates rather than breaks -- but the upgrade is now
+  visible in the snapshot instead of silent, and a definition compiled by a long-gone version
+  can be found, not guessed.
 
   ## Every expression is hostile input
 

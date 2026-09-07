@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-FileCopyrightText: 2026 Luke Galea
+  SPDX-License-Identifier: MIT
+
+  Refusal-corpus fixture (FR-1.2, process level). The offending construct is
+  a `bpmn:`-prefixed subProcess at process level. The document declares the
+  BPMN namespace under the `bpmn:` prefix - every tool that does so must get
+  identical refusals from the compiler, and at one point a `bpmn:`-prefixed
+  unsupported element was silently ignored here instead of refused.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_1"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_refusal" isExecutable="true">
+    <bpmn2:startEvent id="Start_1">
+      <bpmn2:outgoing>F1</bpmn2:outgoing>
+    </bpmn2:startEvent>
+    <bpmn:subProcess id="Sub_1" triggeredByEvent="false">
+      <bpmn2:incoming>F1</bpmn2:incoming>
+    </bpmn:subProcess>
+    <bpmn2:endEvent id="End_1">
+      <bpmn2:incoming>F2</bpmn2:incoming>
+    </bpmn2:endEvent>
+    <bpmn2:sequenceFlow id="F1" sourceRef="Start_1" targetRef="Sub_1"/>
+    <bpmn2:sequenceFlow id="F2" sourceRef="Sub_1" targetRef="End_1"/>
+  </bpmn2:process>
+</bpmn2:definitions>

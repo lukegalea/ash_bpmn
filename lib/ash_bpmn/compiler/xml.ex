@@ -12,6 +12,7 @@ defmodule AshBpmn.Compiler.Xml do
   # extension attributes arrive as prefixed atoms and are matched by prefix.
   @supported_node_types ~w(startEvent endEvent userTask serviceTask sendTask businessRuleTask exclusiveGateway parallelGateway)
   @supported_node_types_with_prefix Enum.map(@supported_node_types, &"bpmn2:#{&1}")
+  @supported_node_types_bpmn_prefix Enum.map(@supported_node_types, &"bpmn:#{&1}")
 
   @spec parse(String.t()) :: {:ok, tuple()} | {:error, String.t()}
   def parse(xml) when is_binary(xml) do
@@ -207,16 +208,21 @@ defmodule AshBpmn.Compiler.Xml do
   def collect_all_nodes(process) do
     xpath_base = ~c"//"
 
-    Enum.flat_map(@supported_node_types ++ @supported_node_types_with_prefix, fn type ->
-      xpath = xpath_base ++ String.to_charlist(type)
-      :xmerl_xpath.string(xpath, process)
-    end)
+    Enum.flat_map(
+      @supported_node_types ++
+        @supported_node_types_with_prefix ++ @supported_node_types_bpmn_prefix,
+      fn type ->
+        xpath = xpath_base ++ String.to_charlist(type)
+        :xmerl_xpath.string(xpath, process)
+      end
+    )
   end
 
   @spec collect_all_flows(tuple()) :: [tuple()]
   def collect_all_flows(process) do
     :xmerl_xpath.string(~c"//sequenceFlow", process) ++
-      :xmerl_xpath.string(~c"//bpmn2:sequenceFlow", process)
+      :xmerl_xpath.string(~c"//bpmn2:sequenceFlow", process) ++
+      :xmerl_xpath.string(~c"//bpmn:sequenceFlow", process)
   end
 
   @spec collect_all_gateways(tuple()) :: [tuple()]
@@ -275,6 +281,50 @@ defmodule AshBpmn.Compiler.Xml do
   @spec flow_type?(String.t()) :: boolean()
   def flow_type?("sequenceFlow"), do: true
   def flow_type?(_), do: false
+
+  # True when the raw element name carries an explicit BPMN prefix. Names
+  # under any *other* namespace -- `ash:`, host extensions -- are foreign
+  # content, not BPMN constructs. Bare names are classified by the callers,
+  # since whether a bare name means "BPMN in the default namespace" or "host
+  # content" depends on where in the document it sits.
+  @spec bpmn_prefixed?(String.t()) :: boolean()
+  def bpmn_prefixed?("bpmn2:" <> _), do: true
+  def bpmn_prefixed?("bpmn:" <> _), do: true
+  def bpmn_prefixed?(_), do: false
+
+  # The element children of the document root that sit *beside* the process --
+  # collaboration, message flows, root-level signal/message/error declarations.
+  # Empty when the root is not a definitions element (hand-written XML may
+  # anchor the process at the root, in which case there is nothing beside it).
+  @spec definitions_siblings(tuple()) :: [tuple()]
+  def definitions_siblings(doc) when is_element?(doc) do
+    case normalize_name(element_name(doc)) do
+      "definitions" ->
+        doc
+        |> get_element_children()
+        |> Enum.reject(&(normalize_name(element_name(&1)) == "process"))
+
+      _ ->
+        []
+    end
+  end
+
+  def definitions_siblings(_), do: []
+
+  # Every element under `elements` (any depth) whose normalized name matches.
+  @spec descendants([tuple()], String.t()) :: [tuple()]
+  def descendants(elements, local_name) when is_list(elements) do
+    Enum.flat_map(elements, fn el ->
+      matches =
+        if is_element?(el) and normalize_name(element_name(el)) == local_name,
+          do: [el],
+          else: []
+
+      matches ++ descendants(get_element_children(el), local_name)
+    end)
+  end
+
+  def descendants(_, _), do: []
 
   @spec di_element?(String.t()) :: boolean()
   def di_element?("BPMNDiagram"), do: true

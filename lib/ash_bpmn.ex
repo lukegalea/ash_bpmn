@@ -10,6 +10,7 @@ defmodule AshBpmn do
   """
 
   require Ash.Query
+  require Ash.Expr
 
   alias AshBpmn.Config
   alias AshBpmn.Runtime.{AdvanceWorker, DomainResolver, Oban}
@@ -211,11 +212,6 @@ defmodule AshBpmn do
         Scope.engine(scope)
       )
 
-    # Cancel timers
-    Enum.each(completed.timer_job_ids || [], fn job_id ->
-      AshBpmn.Runtime.Oban.cancel_job(job_id)
-    end)
-
     record_task_event(
       resources,
       completed,
@@ -227,6 +223,11 @@ defmodule AshBpmn do
       },
       scope
     )
+
+    # Usage rule 6: a completion path cancels the task's outstanding timers.
+    # The cancellation is also *recorded*, so the log shows not just that the
+    # task was decided but that its escalate/expire clocks were stopped with it.
+    cancel_task_timers(resources, completed, scope)
 
     # If this is a process task, advance the token
     if completed.token_id do
@@ -359,6 +360,24 @@ defmodule AshBpmn do
     record_task_event(resources, task, :task_claimed, %{"assignee_id" => actor.id}, scope)
   end
 
+  # Cancels every outstanding timer job on a task and records a
+  # `:timer_cancelled` event for it. A timer cancelled with its task is a fact
+  # about the task's history: the audit log should show that the escalation
+  # clock stopped *because* the task was decided, not leave a reader to infer
+  # it. Only fires when there is something to cancel -- a task without timers
+  # records nothing.
+  defp cancel_task_timers(resources, task, scope) do
+    case task.timer_job_ids || [] do
+      [] ->
+        :ok
+
+      job_ids ->
+        Enum.each(job_ids, &AshBpmn.Runtime.Oban.cancel_job/1)
+
+        record_task_event(resources, task, :timer_cancelled, %{"job_ids" => job_ids}, scope)
+    end
+  end
+
   defp reload_task!(resources, task, scope) do
     resources.human_task
     |> Ash.Query.for_read(:read)
@@ -447,8 +466,8 @@ defmodule AshBpmn do
       |> Ash.read!(Scope.engine(scope))
 
     Enum.each(open_tasks, fn task ->
-      Enum.each(task.timer_job_ids || [], &AshBpmn.Runtime.Oban.cancel_job/1)
       resources.human_task.cancel!(task, Scope.engine(scope))
+      cancel_task_timers(resources, task, scope)
     end)
 
     cancelled = resources.instance.cancel!(instance, Scope.engine(scope))
@@ -482,24 +501,28 @@ defmodule AshBpmn do
 
     {:ok, resources} = AshBpmn.Resources.for_domain(domain)
 
-    tasks =
-      resources.human_task
-      |> Ash.Query.for_read(:read)
-      |> Ash.Query.filter(status in [:open, :claimed])
-      |> Ash.read!(Scope.engine(scope))
+    # Usage rule 2: candidates are rows, and a task list is **one** indexed
+    # query joined on those rows. The join is an unrelated exists over
+    # `TaskCandidate` -- the candidate resource is resolved from the host's
+    # domain at runtime, so the exists is built as a value rather than written
+    # as a literal module in an expression.
+    candidate_is_mine = %Ash.Query.Exists{
+      path: [],
+      resource: resources.task_candidate,
+      at_path: [],
+      related?: false,
+      expr:
+        Ash.Expr.expr(
+          task_id == parent(id) and principal_type == :user and
+            principal_id in ^principal_ids
+        )
+    }
 
-    # Filter to tasks where user is a candidate
-    Enum.filter(tasks, fn task ->
-      candidates =
-        resources.task_candidate
-        |> Ash.Query.for_read(:read)
-        |> Ash.Query.filter(task_id == ^task.id)
-        |> Ash.Query.filter(principal_type == :user)
-        |> Ash.Query.filter(principal_id in ^principal_ids)
-        |> Ash.read!(Scope.engine(scope))
-
-      candidates != []
-    end)
+    resources.human_task
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(status in [:open, :claimed])
+    |> Ash.Query.filter(^candidate_is_mine)
+    |> Ash.read!(Scope.engine(scope))
   end
 
   @doc "Returns a full report of an instance (tokens, tasks, events)."

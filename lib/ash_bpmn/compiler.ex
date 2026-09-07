@@ -25,7 +25,9 @@ defmodule AshBpmn.Compiler do
         },
         "joins" => %{
           "Gateway_1" => %{"waits_for" => ["source_node_id", ...]}
-        }
+        },
+        "feel_engine" => %{"name" => "boxic_feel", "version" => "..."},
+        "warnings" => [%{path: "...", message: "..."}]
       }
   """
 
@@ -35,6 +37,11 @@ defmodule AshBpmn.Compiler do
   Compiles BPMN XML into a verified graph snapshot.
 
   Returns `{:ok, graph}` on success or `{:error, [%{path: _, message: _}]}` on failure.
+
+  The graph carries a `"warnings"` list (same `%{path, message}` shape as errors)
+  for definitions-level constructs -- a collaboration's message flows touching this
+  process, a participant pointing at it -- that the engine deliberately does not
+  execute. Warnings are recorded, never blocking: a publish with warnings succeeds.
   """
   @spec compile(String.t()) :: {:ok, map()} | {:error, [map()]}
   def compile(xml) when is_binary(xml) do
@@ -44,7 +51,8 @@ defmodule AshBpmn.Compiler do
       verify_errors = Verify.verify(graph)
 
       if verify_errors == [] do
-        {:ok, graph}
+        warnings = Graph.definitions_warnings(doc, process, graph)
+        {:ok, Map.put(graph, "warnings", warnings)}
       else
         {:error, verify_errors}
       end

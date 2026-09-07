@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-FileCopyrightText: 2026 Luke Galea
+  SPDX-License-Identifier: MIT
+
+  Refusal-corpus fixture. The offending construct in this document is:
+  dataInputAssociation, dataOutputAssociation and ioSpecification, nested
+  inside the serviceTask with id "Service_1".
+  The compiler must refuse the document naming that id and construct -
+  not execute the node as if the child were absent.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_1"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_refusal" isExecutable="true">
+    <bpmn2:startEvent id="Start_1">
+      <bpmn2:outgoing>F1</bpmn2:outgoing>
+    </bpmn2:startEvent>
+    <bpmn2:serviceTask id="Service_1">
+      <bpmn2:ioSpecification id="IOSpec_1">
+        <bpmn2:dataInput id="DataIn_1"/>
+        <bpmn2:dataOutput id="DataOut_1"/>
+      </bpmn2:ioSpecification>
+      <bpmn2:dataInputAssociation id="DIA_1"/>
+      <bpmn2:dataOutputAssociation id="DOA_1"/>
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="work"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F1</bpmn2:incoming>
+      <bpmn2:outgoing>F2</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:endEvent id="End_1">
+      <bpmn2:incoming>F2</bpmn2:incoming>
+    </bpmn2:endEvent>
+    <bpmn2:sequenceFlow id="F1" sourceRef="Start_1" targetRef="Service_1"/>
+    <bpmn2:sequenceFlow id="F2" sourceRef="Service_1" targetRef="End_1"/>
+  </bpmn2:process>
+</bpmn2:definitions>

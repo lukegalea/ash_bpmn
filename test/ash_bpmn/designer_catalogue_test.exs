@@ -211,6 +211,71 @@ defmodule AshBpmn.DesignerCatalogueTest do
       assert has_element?(view, "input[name='decision_ref']")
       assert html =~ ~s(value="my.risk")
     end
+
+    test "invalid FEEL input rows are flagged inline on change" do
+      {:ok, view, _html} = live_catalogue_designer()
+
+      render_hook(view, "selection_changed", %{
+        "id" => "AssessRisk",
+        "type" => "bpmn:BusinessRuleTask",
+        "name" => "Assess risk",
+        "config" => %{"decision" => %{"ref" => "access_request.risk", "binding" => "latest"}}
+      })
+
+      html =
+        view
+        |> element("#ash-bpmn-panel form")
+        |> render_change(%{
+          "element_id" => "AssessRisk",
+          "type" => "bpmn:BusinessRuleTask",
+          "name" => "Assess risk",
+          "decision_ref" => "access_request.risk",
+          "binding" => "latest",
+          "inputs_name" => ["amount", ""],
+          "inputs_from" => ["subject.amount ==", ""],
+          "promote_name" => [""],
+          "promote_from" => [""],
+          "promote_required" => ["false"]
+        })
+
+      assert has_element?(view, "#feel-feedback-inputs-0")
+      assert html =~ "expected expression"
+      assert html =~ "FEEL equality is =, not =="
+
+      # The half-typed row survives the validation re-render
+      assert html =~ ~s(value="amount")
+      assert html =~ "subject.amount =="
+    end
+
+    test "a parseable input row confirms itself quietly" do
+      {:ok, view, _html} = live_catalogue_designer()
+
+      render_hook(view, "selection_changed", %{
+        "id" => "AssessRisk",
+        "type" => "bpmn:BusinessRuleTask",
+        "name" => "Assess risk",
+        "config" => %{"decision" => %{"ref" => "access_request.risk", "binding" => "latest"}}
+      })
+
+      html =
+        view
+        |> element("#ash-bpmn-panel form")
+        |> render_change(%{
+          "element_id" => "AssessRisk",
+          "type" => "bpmn:BusinessRuleTask",
+          "name" => "Assess risk",
+          "decision_ref" => "access_request.risk",
+          "binding" => "latest",
+          "inputs_name" => ["amount"],
+          "inputs_from" => ["subject.amount > 100"],
+          "promote_name" => [""],
+          "promote_from" => [""],
+          "promote_required" => ["false"]
+        })
+
+      assert has_element?(view, "#feel-feedback-inputs-0")
+      assert html =~ "Valid FEEL"
+    end
   end
 
   # ── ServiceTask / SendTask panel ───────────────────────────────────────
@@ -355,6 +420,50 @@ defmodule AshBpmn.DesignerCatalogueTest do
 
       assert has_element?(view, "input[name='action']")
       assert html =~ ~s(value="my_app.record")
+    end
+
+    test "argument rows validate their FEEL on change" do
+      {:ok, view, _html} = live_catalogue_designer()
+
+      render_hook(view, "selection_changed", %{
+        "id" => "Record",
+        "type" => "bpmn:ServiceTask",
+        "name" => "Record",
+        "config" => %{"action" => "record_risk"}
+      })
+
+      html =
+        view
+        |> element("#ash-bpmn-panel form")
+        |> render_change(%{
+          "element_id" => "Record",
+          "type" => "bpmn:ServiceTask",
+          "name" => "Record",
+          "action" => "record_risk",
+          "inputs_from" => ["routing.tier ==", ""],
+          "promote_name" => ["", ""],
+          "promote_from" => ["", ""],
+          "promote_required" => ["false", "false"]
+        })
+
+      assert has_element?(view, "#feel-feedback-inputs-0")
+      assert html =~ "FEEL equality is =, not =="
+
+      html =
+        view
+        |> element("#ash-bpmn-panel form")
+        |> render_change(%{
+          "element_id" => "Record",
+          "type" => "bpmn:ServiceTask",
+          "name" => "Record",
+          "action" => "record_risk",
+          "inputs_from" => ["routing.tier", ""],
+          "promote_name" => ["", ""],
+          "promote_from" => ["", ""],
+          "promote_required" => ["false", "false"]
+        })
+
+      assert html =~ "Valid FEEL"
     end
   end
 

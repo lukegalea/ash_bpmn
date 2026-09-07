@@ -51,6 +51,10 @@ defmodule AshBpmn.WebTest do
 
   @invalid_xml "<bpmn2:definitions xmlns:bpmn2='http://www.omg.org/spec/BPMN/20100524/MODEL' id='D1'/>"
 
+  # The valid fixture with the userTask's only candidate removed: it compiles
+  # to exactly one error whose path is a canvas element id (Task_1).
+  @error_xml String.replace(@valid_xml, ~s|<ash:candidate kind="user" of="actor"/>|, "")
+
   # ── Setup ──────────────────────────────────────────────────────────────
 
   setup do
@@ -218,6 +222,295 @@ defmodule AshBpmn.WebTest do
 
       # Should still be rendering
       assert has_element?(view, "#ash-bpmn-designer")
+    end
+  end
+
+  # ── Gateway conditions & default flows (FR-2.1) ────────────────────────
+
+  describe "designer: sequence flow conditions" do
+    test "panel shows the flow's condition with the equality hint" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      html =
+        render_hook(view, "selection_changed", %{
+          "id" => "Flow_2",
+          "type" => "bpmn:SequenceFlow",
+          "name" => "",
+          "config" => %{"condition" => "subject.amount > 100", "default_of" => nil}
+        })
+
+      assert has_element?(view, "#config-condition")
+      # The stored source text, as the panel shows it (> is HTML-escaped)
+      assert html =~ "subject.amount &gt; 100"
+      # The documented FEEL footgun, stated where it is typed
+      assert html =~ "equality is =, not =="
+    end
+
+    test "invalid conditions surface the FEEL error inline, with the == hint" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      render_hook(view, "selection_changed", %{
+        "id" => "Flow_2",
+        "type" => "bpmn:SequenceFlow",
+        "name" => "",
+        "config" => %{"condition" => "", "default_of" => nil}
+      })
+
+      html =
+        view
+        |> element("#ash-bpmn-panel form")
+        |> render_change(%{
+          "element_id" => "Flow_2",
+          "type" => "bpmn:SequenceFlow",
+          "name" => "",
+          "condition" => "subject.amount == 100"
+        })
+
+      assert has_element?(view, "#condition-feel-feedback")
+      assert html =~ "expected expression"
+      assert html =~ "FEEL equality is =, not =="
+
+      # And the typed source survives the validation re-render
+      assert html =~ "subject.amount == 100</textarea>"
+    end
+
+    test "a parseable condition confirms itself quietly" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      render_hook(view, "selection_changed", %{
+        "id" => "Flow_2",
+        "type" => "bpmn:SequenceFlow",
+        "name" => "",
+        "config" => %{"condition" => "", "default_of" => nil}
+      })
+
+      html =
+        view
+        |> element("#ash-bpmn-panel form")
+        |> render_change(%{
+          "element_id" => "Flow_2",
+          "type" => "bpmn:SequenceFlow",
+          "name" => "",
+          "condition" => "subject.amount > 100"
+        })
+
+      assert has_element?(view, "#condition-feel-feedback")
+      assert html =~ "Valid FEEL"
+    end
+
+    test "apply carries the condition beside the config" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      render_hook(view, "selection_changed", %{
+        "id" => "Flow_2",
+        "type" => "bpmn:SequenceFlow",
+        "name" => "Approved",
+        "config" => %{"condition" => "", "default_of" => nil}
+      })
+
+      view
+      |> element("#ash-bpmn-panel form")
+      |> render_submit(%{
+        "element_id" => "Flow_2",
+        "type" => "bpmn:SequenceFlow",
+        "name" => "Approved",
+        "condition" => "task.outcome = \"approved\""
+      })
+
+      assert_push_event(view, "apply_config", %{
+        condition: "task.outcome = \"approved\"",
+        config: %{}
+      })
+    end
+
+    test "a default flow explains itself instead of offering the editor" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      html =
+        render_hook(view, "selection_changed", %{
+          "id" => "Flow_low",
+          "type" => "bpmn:SequenceFlow",
+          "name" => "Low",
+          "config" => %{"condition" => "", "default_of" => "Route"}
+        })
+
+      refute has_element?(view, "#config-condition")
+      assert html =~ "Default flow of"
+      assert html =~ "Route"
+
+      # Apply on a default flow still clears any stray condition
+      view
+      |> element("#ash-bpmn-panel form")
+      |> render_submit(%{
+        "element_id" => "Flow_low",
+        "type" => "bpmn:SequenceFlow",
+        "name" => "Low"
+      })
+
+      assert_push_event(view, "apply_config", %{condition: ""})
+    end
+  end
+
+  describe "designer: exclusive gateway default flow" do
+    test "panel lists outgoing flows with their condition state" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      html =
+        render_hook(view, "selection_changed", %{
+          "id" => "Route",
+          "type" => "bpmn:ExclusiveGateway",
+          "name" => "Route?",
+          "config" => %{
+            "default" => "Flow_low",
+            "outgoing" => [
+              %{"id" => "Flow_low", "name" => "Low", "condition" => false},
+              %{"id" => "Flow_high", "name" => "High", "condition" => true}
+            ]
+          }
+        })
+
+      assert has_element?(view, "#config-default-flow")
+      assert html =~ ~s(value="Flow_low" selected)
+      # Each option states the flow's condition state
+      assert html =~ "Low — no condition"
+      assert html =~ "High — has condition"
+      # The badges: indigo for the chosen default, emerald for a conditioned flow
+      assert html =~ "bg-indigo-100"
+      assert html =~ "bg-emerald-100"
+      # The compiler's default-or-all-conditioned rule, gently
+      assert html =~ "must not also carry a condition"
+    end
+
+    test "picking a flow updates the badges before Apply" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      render_hook(view, "selection_changed", %{
+        "id" => "Route",
+        "type" => "bpmn:ExclusiveGateway",
+        "name" => "Route?",
+        "config" => %{
+          "default" => "Flow_low",
+          "outgoing" => [
+            %{"id" => "Flow_low", "name" => "Low", "condition" => false},
+            %{"id" => "Flow_high", "name" => "High", "condition" => true}
+          ]
+        }
+      })
+
+      html =
+        view
+        |> element("#config-default-flow")
+        |> render_change(%{"default_flow" => "Flow_high"})
+
+      # The impossible combination is named for what it is
+      assert html =~ "default + condition"
+    end
+
+    test "apply carries the chosen default flow beside the config" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      render_hook(view, "selection_changed", %{
+        "id" => "Route",
+        "type" => "bpmn:ExclusiveGateway",
+        "name" => "Route?",
+        "config" => %{
+          "default" => "",
+          "outgoing" => [
+            %{"id" => "Flow_low", "name" => "Low", "condition" => false}
+          ]
+        }
+      })
+
+      view
+      |> element("#ash-bpmn-panel form")
+      |> render_submit(%{
+        "element_id" => "Route",
+        "type" => "bpmn:ExclusiveGateway",
+        "name" => "Route?",
+        "default_flow" => "Flow_low"
+      })
+
+      assert_push_event(view, "apply_config", %{default_flow: "Flow_low", config: %{}})
+    end
+  end
+
+  # ── Publish errors in the designer (FR-2.3) ────────────────────────────
+
+  describe "designer: errors surface" do
+    test "a failed save lists the errors and highlights their elements" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      view
+      |> element("#ash-bpmn-save-form")
+      |> render_submit(%{"xml" => @error_xml})
+
+      assert has_element?(view, "#bpmn-errors-count")
+      assert has_element?(view, "#bpmn-error-0")
+      assert render(view) =~ "at least one candidate"
+
+      # Every named element is highlighted — the broken task and the flows
+      # that cascade from it (their references no longer resolve).
+      assert_push_event(view, "highlight", %{node_ids: node_ids})
+      assert "Task_1" in node_ids
+      assert "Flow_1" in node_ids
+    end
+
+    test "errors that do not name an element are listed but not jumpable" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      # No <process> at all — the error path is the synthetic "xml"
+      view
+      |> element("#ash-bpmn-save-form")
+      |> render_submit(%{"xml" => @invalid_xml})
+
+      assert has_element?(view, "#bpmn-error-0")
+      refute has_element?(view, "#bpmn-error-jump-0")
+      assert_push_event(view, "highlight", %{node_ids: []})
+    end
+
+    test "clicking an error jumps to the element" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      view
+      |> element("#ash-bpmn-save-form")
+      |> render_submit(%{"xml" => @error_xml})
+
+      view
+      |> element("#ash-bpmn-errors button[phx-value-path='Task_1']")
+      |> render_click()
+
+      assert_push_event(view, "select_element", %{id: "Task_1"})
+    end
+
+    test "a successful save clears the surface and the canvas markers" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      view
+      |> element("#ash-bpmn-save-form")
+      |> render_submit(%{"xml" => @error_xml})
+
+      assert has_element?(view, "#bpmn-errors-count")
+
+      view
+      |> element("#ash-bpmn-save-form")
+      |> render_submit(%{"xml" => @valid_xml})
+
+      refute has_element?(view, "#bpmn-errors-count")
+      refute has_element?(view, "#bpmn-error-0")
+      # An empty push is what clears the markers on the canvas
+      assert_push_event(view, "highlight", %{node_ids: []})
     end
   end
 
