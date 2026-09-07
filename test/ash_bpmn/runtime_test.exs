@@ -190,6 +190,184 @@ defmodule AshBpmn.RuntimeTest do
       assert task1.id in task_ids
       assert task2.id not in task_ids
     end
+
+    test "matches any of the given principal ids" do
+      defn =
+        create_published_definition!(
+          "my_tasks_multi_principal",
+          File.read!("test/fixtures/linear.bpmn")
+        )
+
+      inst =
+        Instance.create!(
+          %{
+            definition_id: defn.id,
+            subject_type: "TestSubject",
+            subject_id: Ash.UUID.generate()
+          },
+          authorize?: false
+        )
+
+      token =
+        Token.create!(
+          %{
+            instance_id: inst.id,
+            node_id: "Start_1",
+            status: :active
+          },
+          authorize?: false
+        )
+
+      user_id = Ash.UUID.generate()
+      other_id = Ash.UUID.generate()
+
+      task =
+        HumanTask.create!(
+          %{
+            instance_id: inst.id,
+            token_id: token.id,
+            node_id: "task_1",
+            name: "Task for later principal"
+          },
+          authorize?: false
+        )
+
+      TaskCandidate.create!(%{task_id: task.id, principal_type: :user, principal_id: user_id},
+        authorize?: false
+      )
+
+      tasks =
+        AshBpmn.my_tasks(AshBpmn.Test.Domain, principal_ids: [other_id, user_id, other_id])
+
+      assert Enum.map(tasks, & &1.id) == [task.id]
+    end
+
+    test "team-type candidates do not match user principal ids" do
+      defn =
+        create_published_definition!(
+          "my_tasks_team_type",
+          File.read!("test/fixtures/linear.bpmn")
+        )
+
+      inst =
+        Instance.create!(
+          %{
+            definition_id: defn.id,
+            subject_type: "TestSubject",
+            subject_id: Ash.UUID.generate()
+          },
+          authorize?: false
+        )
+
+      token =
+        Token.create!(
+          %{
+            instance_id: inst.id,
+            node_id: "Start_1",
+            status: :active
+          },
+          authorize?: false
+        )
+
+      principal_id = Ash.UUID.generate()
+
+      task =
+        HumanTask.create!(
+          %{
+            instance_id: inst.id,
+            token_id: token.id,
+            node_id: "task_1",
+            name: "Task for a team"
+          },
+          authorize?: false
+        )
+
+      # Same id, but the candidate row is a *team*, not a user: my_tasks is
+      # the user's work list, and this must not come back.
+      TaskCandidate.create!(
+        %{task_id: task.id, principal_type: :team, principal_id: principal_id},
+        authorize?: false
+      )
+
+      assert AshBpmn.my_tasks(AshBpmn.Test.Domain, principal_ids: [principal_id]) == []
+    end
+
+    test "includes claimed tasks but excludes decided ones" do
+      defn =
+        create_published_definition!("my_tasks_statuses", File.read!("test/fixtures/linear.bpmn"))
+
+      inst =
+        Instance.create!(
+          %{
+            definition_id: defn.id,
+            subject_type: "TestSubject",
+            subject_id: Ash.UUID.generate()
+          },
+          authorize?: false
+        )
+
+      token =
+        Token.create!(
+          %{
+            instance_id: inst.id,
+            node_id: "Start_1",
+            status: :active
+          },
+          authorize?: false
+        )
+
+      user_id = Ash.UUID.generate()
+
+      open_task =
+        HumanTask.create!(
+          %{
+            instance_id: inst.id,
+            token_id: token.id,
+            node_id: "task_open",
+            name: "Open"
+          },
+          authorize?: false
+        )
+
+      claimed_task =
+        HumanTask.create!(
+          %{
+            instance_id: inst.id,
+            token_id: token.id,
+            node_id: "task_claimed",
+            name: "Claimed",
+            status: :claimed,
+            assignee_type: :user,
+            assignee_id: user_id
+          },
+          authorize?: false
+        )
+
+      done_task =
+        HumanTask.create!(
+          %{
+            instance_id: inst.id,
+            token_id: token.id,
+            node_id: "task_done",
+            name: "Done",
+            status: :completed
+          },
+          authorize?: false
+        )
+
+      for task <- [open_task, claimed_task, done_task] do
+        TaskCandidate.create!(%{task_id: task.id, principal_type: :user, principal_id: user_id},
+          authorize?: false
+        )
+      end
+
+      task_ids =
+        AshBpmn.my_tasks(AshBpmn.Test.Domain, principal_ids: [user_id])
+        |> Enum.map(& &1.id)
+        |> Enum.sort()
+
+      assert task_ids == Enum.sort([open_task.id, claimed_task.id])
+    end
   end
 
   # Dummy worker for testing the Oban shim

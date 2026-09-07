@@ -33,6 +33,12 @@ defmodule AshBpmn.Compiler.Graph do
     # not sequenceFlow, and not DI
     errors = errors ++ check_unsupported_process_children(process.xml, supported_nodes, flows_xml)
 
+    # Check the children of supported nodes: a construct nested *inside* a node
+    # we support changes what that node means (a timerEventDefinition turns a
+    # none-start into a timed start), so an unimplemented one must refuse the
+    # publish rather than execute as if it were not there.
+    errors = errors ++ check_node_children(supported_nodes)
+
     # Build nodes map
     {nodes, node_errors} = build_nodes(supported_nodes)
     errors = errors ++ node_errors
@@ -53,10 +59,27 @@ defmodule AshBpmn.Compiler.Graph do
         "start" => start_node,
         "nodes" => nodes,
         "flows" => flows,
-        "joins" => joins
+        "joins" => joins,
+        # Conditions are stored as source text so an in-flight instance keeps
+        # evaluating across engine upgrades -- but *which* engine validated
+        # them at publish time is a fact about the definition, stamped here so
+        # the upgrade is visible in the snapshot rather than silent.
+        "feel_engine" => %{
+          "name" => "boxic_feel",
+          "version" => engine_version(:boxic_feel)
+        }
       }
 
       {:ok, graph}
+    end
+  end
+
+  # Mirrors how ash_decisions stamps its engines: the OTP app version at the
+  # time of the build, or "unknown" when the app cannot be introspected.
+  defp engine_version(app) do
+    case Application.spec(app, :vsn) do
+      nil -> "unknown"
+      vsn -> to_string(vsn)
     end
   end
 
@@ -80,41 +103,214 @@ defmodule AshBpmn.Compiler.Graph do
     {supported, unsupported_errors}
   end
 
+  # ── Unsupported-construct classification ─────────────────────────────────
+  #
+  # The compiler is honest about what it does not implement. Constructs nested
+  # in a document fall into three classes:
+  #
+  #   * *Benign* -- consumed by the engine (`incoming`/`outgoing`,
+  #     `extensionElements`, `conditionExpression`) or carrying no execution
+  #     semantics to lose (`documentation`, `laneSet`, annotations, host
+  #     extensions under foreign namespaces). Ignored, deliberately.
+  #   * *Known-and-unimplemented* -- BPMN constructs with execution semantics
+  #     (event definitions, loop characteristics, data IO, unimplemented
+  #     activity and gateway kinds). These get an explicit "not supported"
+  #     refusal, because executing the node as if the construct were absent
+  #     would publish a process that means something else than it says.
+  #   * *Unrecognized* -- anything else in the BPMN namespace. Also refused;
+  #     the message says so rather than pretending the element was understood.
+
+  @benign_process_children MapSet.new(
+                             Xml.supported_node_types() ++
+                               ~w(sequenceFlow extensionElements documentation laneSet textAnnotation group association auditing monitoring)
+                           )
+
+  # Children of a supported flow node. `incoming`/`outgoing` are the standard
+  # serialization of the flow references -- flows are collected from
+  # `sequenceFlow` elements, so these are redundant, but every bpmn-js document
+  # carries them and they say nothing the flows do not.
+  @benign_node_children MapSet.new(~w(incoming outgoing documentation extensionElements))
+
+  @known_unimplemented MapSet.new(~w(
+    timerEventDefinition messageEventDefinition signalEventDefinition
+    errorEventDefinition escalationEventDefinition conditionalEventDefinition
+    compensationEventDefinition terminateEventDefinition cancelEventDefinition
+    linkEventDefinition multiInstanceLoopCharacteristics standardLoopCharacteristics
+    dataInputAssociation dataOutputAssociation dataStore dataStoreReference
+    ioSpecification dataInput dataOutput inputSet outputSet property
+    callActivity subProcess adHocSubProcess transaction
+    receiveTask scriptTask manualTask task
+    complexGateway eventBasedGateway intermediateCatchEvent
+    intermediateThrowEvent boundaryEvent
+  ))
+
   defp check_unsupported_process_children(process_xml, _supported_nodes, _flows_xml) do
     # Get all direct children of the process
-    all_children = Xml.get_element_children(process_xml)
-
-    supported_local_names =
-      MapSet.new(Xml.supported_node_types() ++ ["sequenceFlow", "extensionElements"])
-
-    Enum.flat_map(all_children, fn child ->
-      type = Xml.local_name(child)
-      normalized = Xml.normalize_name(type)
+    process_xml
+    |> Xml.get_element_children()
+    |> Enum.flat_map(fn child ->
+      # Normalize *before* classifying: `<bpmn:subProcess>` and
+      # `<bpmn2:subProcess>` are the same element and must refuse the same way.
+      normalized = Xml.normalize_name(Xml.local_name(child))
       id = Xml.element_attr(child, "id") || "unknown"
 
       cond do
         Xml.di_element?(normalized) ->
           []
 
-        normalized in supported_local_names ->
+        normalized in @benign_process_children ->
           []
 
-        String.starts_with?(type, "bpmn2:") ->
-          if normalized in supported_local_names do
-            []
-          else
-            [
-              Errors.error(
-                id,
-                "Node '#{id}' of type '#{type}' is not supported; the executable subset is: #{Xml.supported_subset_message()}"
-              )
-            ]
-          end
+        Xml.bpmn_prefixed?(Xml.local_name(child)) ->
+          [unsupported_process_child_error(id, normalized)]
 
         true ->
-          # Unknown extension - ignore silently (hosts may carry other extensions)
+          # Foreign namespace or bare name at process level - ignore silently
+          # (hosts may carry other extensions)
           []
       end
+    end)
+  end
+
+  defp unsupported_process_child_error(id, normalized) do
+    subset = Xml.supported_subset_message()
+
+    if MapSet.member?(@known_unimplemented, normalized) do
+      Errors.error(
+        id,
+        "Node '#{id}' of type '#{normalized}' is not supported; the executable subset is: #{subset}"
+      )
+    else
+      Errors.error(
+        id,
+        "Unknown BPMN element '#{normalized}' (id '#{id}'); the executable subset is: #{subset}"
+      )
+    end
+  end
+
+  # Every direct child of a supported node -- and every direct child of that
+  # node's `extensionElements` -- must be something the compiler implements.
+  # The ash: vocabulary inside extensionElements is parsed by the node config
+  # builders (which do their own unknown-element refusals); anything else in
+  # the BPMN namespace would silently change the node's meaning.
+  defp check_node_children(nodes_xml) do
+    Enum.flat_map(nodes_xml, fn node ->
+      id = Xml.element_attr(node, "id") || "unknown"
+      type = Xml.node_type(node)
+
+      direct = Xml.get_element_children(node)
+
+      inside_extensions =
+        direct
+        |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "extensionElements"))
+        |> Enum.flat_map(&Xml.get_element_children/1)
+
+      Enum.flat_map(direct, &node_child_error(id, type, &1, :direct)) ++
+        Enum.flat_map(inside_extensions, &node_child_error(id, type, &1, :extensions))
+    end)
+  end
+
+  # Classifies one child of a supported node. `:direct` children and children
+  # of the node's `extensionElements` differ in where foreign content may sit:
+  # extensionElements is *the* place hosts put their own extensions (foreign
+  # and bare names there are left to the config parsers), while directly under
+  # a node only the known-inert serialization elements are allowed -- a bare
+  # or BPMN-prefixed child there is BPMN content and must be recognized.
+  defp node_child_error(id, type, child, placement) do
+    raw = Xml.local_name(child)
+    normalized = Xml.normalize_name(raw)
+
+    bpmn? =
+      case placement do
+        :direct -> bpmn_prefixed_or_bare?(raw)
+        :extensions -> Xml.bpmn_prefixed?(raw)
+      end
+
+    cond do
+      placement == :direct and normalized in @benign_node_children ->
+        []
+
+      not bpmn? ->
+        []
+
+      MapSet.member?(@known_unimplemented, normalized) ->
+        [
+          Errors.error(
+            id,
+            "#{type} '#{id}' has a '#{normalized}' child, which is not supported; " <>
+              "the node would execute as if it were not there"
+          )
+        ]
+
+      true ->
+        [
+          Errors.error(
+            id,
+            "#{type} '#{id}' has an unrecognized BPMN child '#{normalized}'"
+          )
+        ]
+    end
+  end
+
+  # A BPMN-namespace name: explicitly prefixed with bpmn2:/bpmn:, or bare (a
+  # document using BPMN as its default namespace).
+  defp bpmn_prefixed_or_bare?("bpmn2:" <> _), do: true
+  defp bpmn_prefixed_or_bare?("bpmn:" <> _), do: true
+  defp bpmn_prefixed_or_bare?(name), do: not String.contains?(name, ":")
+
+  @doc false
+  def definitions_warnings(doc, process, graph) do
+    siblings = Xml.definitions_siblings(doc)
+
+    if siblings == [] do
+      []
+    else
+      referenced_ids =
+        graph["nodes"]
+        |> Map.keys()
+        |> Enum.concat([process.id])
+        |> MapSet.new()
+
+      message_flow_warnings(siblings, referenced_ids) ++
+        participant_warnings(siblings, referenced_ids)
+    end
+  end
+
+  defp message_flow_warnings(siblings, referenced_ids) do
+    siblings
+    |> Xml.descendants("messageFlow")
+    |> Enum.filter(fn flow ->
+      Enum.any?(["sourceRef", "targetRef"], fn attr ->
+        ref = Xml.element_attr(flow, attr)
+        ref != nil and MapSet.member?(referenced_ids, ref)
+      end)
+    end)
+    |> Enum.map(fn flow ->
+      id = Xml.element_attr(flow, "id") || "unknown"
+
+      Errors.error(
+        id,
+        "messageFlow '#{id}' connects to this process; message flows are not executed " <>
+          "and have been ignored"
+      )
+    end)
+  end
+
+  defp participant_warnings(siblings, referenced_ids) do
+    siblings
+    |> Xml.descendants("participant")
+    |> Enum.filter(fn participant ->
+      ref = Xml.element_attr(participant, "processRef")
+      ref != nil and MapSet.member?(referenced_ids, ref)
+    end)
+    |> Enum.map(fn participant ->
+      id = Xml.element_attr(participant, "id") || "unknown"
+
+      Errors.error(
+        id,
+        "participant '#{id}' references this process; collaborations are not executed " <>
+          "and have been ignored"
+      )
     end)
   end
 

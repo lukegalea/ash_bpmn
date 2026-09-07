@@ -385,6 +385,72 @@ defmodule AshBpmn.EngineTest do
 
       # Some timers should have been removed (at least the ones for this task)
       assert timers_after < timers_before
+
+      # And the cancellation is *recorded*: one timer_cancelled event per
+      # cancelled timer, carrying the job ids that were stopped (Hygiene #7).
+      {:ok, reloaded} = fetch_task(task.id)
+
+      cancelled_events =
+        ProcessEvent
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(instance_id == ^instance.id)
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.Query.filter(kind == :timer_cancelled)
+        |> Ash.read!(authorize?: false)
+
+      assert length(cancelled_events) == 1
+
+      cancelled = hd(cancelled_events)
+      assert cancelled.node_id == "ManagerApproval"
+
+      assert cancelled.data["job_ids"] == reloaded.timer_job_ids
+      assert reloaded.timer_job_ids != []
+    end
+
+    test "cancelling an instance cancels its open tasks' timers and records them" do
+      xml = File.read!("test/fixtures/access_request.bpmn")
+      _defn = create_published_definition!("timer_cancel_instance_engine", xml)
+
+      manager_id = Ash.UUID.generate()
+
+      subject =
+        create_test_subject!("timer_cancel_instance",
+          is_privileged: false,
+          created_by_id: manager_id
+        )
+
+      {:ok, instance} =
+        AshBpmn.start_instance(AshBpmn.Test.Domain,
+          process: "timer_cancel_instance_engine",
+          subject: subject
+        )
+
+      task =
+        HumanTask
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(instance_id == ^instance.id)
+        |> Ash.Query.filter(node_id == "ManagerApproval")
+        |> Ash.read_one!(authorize?: false)
+
+      assert task.timer_job_ids != []
+
+      timers_before = length(TestJobs.all())
+      assert timers_before >= length(task.timer_job_ids)
+
+      AshBpmn.cancel_instance!(instance)
+
+      assert length(TestJobs.all()) < timers_before
+
+      cancelled_events =
+        ProcessEvent
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(instance_id == ^instance.id)
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.Query.filter(kind == :timer_cancelled)
+        |> Ash.read!(authorize?: false)
+
+      assert length(cancelled_events) == 1
+      assert hd(cancelled_events).data["job_ids"] == task.timer_job_ids
     end
   end
 

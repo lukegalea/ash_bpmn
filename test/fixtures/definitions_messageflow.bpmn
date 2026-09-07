@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-FileCopyrightText: 2026 Luke Galea
+  SPDX-License-Identifier: MIT
+
+  FR-1.3 fixture. The collaboration and its message flow sit beside the
+  process, under definitions. The engine does not execute them - the publish
+  must *succeed* - but because the message flow's target and the participant's
+  processRef both reference this process, the compiled graph carries warnings
+  naming them. The root-level signal and message declarations reference
+  nothing in this process and stay silent.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_1"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:message id="Message_request" name="request"/>
+  <bpmn2:signal id="Signal_done" name="done"/>
+
+  <bpmn2:collaboration id="Collaboration_1">
+    <bpmn2:participant id="Participant_requester" name="Requester" processRef="Process_warned"/>
+    <bpmn2:messageFlow id="MessageFlow_submit" name="Submit"
+                       sourceRef="Participant_requester" targetRef="Start_1"
+                       messageRef="Message_request"/>
+  </bpmn2:collaboration>
+
+  <bpmn2:process id="Process_warned" name="Warned process" isExecutable="true">
+    <bpmn2:startEvent id="Start_1">
+      <bpmn2:outgoing>F1</bpmn2:outgoing>
+    </bpmn2:startEvent>
+    <bpmn2:serviceTask id="Service_1">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="work"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F1</bpmn2:incoming>
+      <bpmn2:outgoing>F2</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:endEvent id="End_1">
+      <bpmn2:incoming>F2</bpmn2:incoming>
+    </bpmn2:endEvent>
+    <bpmn2:sequenceFlow id="F1" sourceRef="Start_1" targetRef="Service_1"/>
+    <bpmn2:sequenceFlow id="F2" sourceRef="Service_1" targetRef="End_1"/>
+  </bpmn2:process>
+</bpmn2:definitions>

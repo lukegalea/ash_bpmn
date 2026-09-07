@@ -536,14 +536,30 @@ outcome `:expired`, record `:task_expired`, then advance the token with
 cancels remaining timer jobs (`Oban.cancel_job/1`) — the bookkeeping the plan §6.4
 demands.
 
-Join semantics: when a token arrives at a join node, do not consume-and-advance;
-instead within one transaction set it :consumed, then count :active tokens at same
-node with same fork_id — wait, simpler and per contract: count tokens with same
-`instance_id`, `node_id`, `fork_id`, status :active; if count == `waits_for` size
-(minus self already consumed) → mint one fresh :active token at join and enqueue
-advance. Otherwise just record event and wait. **Deadlock honesty:** if any sibling
-token is :dead, the join can never fire — the compiler forbids mixed patterns that
-create this, and the sweep (§6.4) reports stuck joins.
+Join semantics (corrected to match the implementation, 2026-09-07 — the previous
+paragraph said a dead sibling meant the join could never fire; the code has never
+behaved that way): when a token arrives at a join node, do not consume-and-advance;
+within one transaction set it :consumed, then:
+
+1. Count tokens at the same node (same instance, same fork) with status :consumed
+   **or :dead** — a dead token counts as arrived. When the count reaches the
+   `waits_for` size, mint one fresh :active token at the join and enqueue its advance.
+2. Otherwise ask whether the missing siblings can still arrive: does any source node
+   of a not-yet-arrived wait hold a token with status :active or :executing? If yes →
+   wait (a parked human task keeps its branch live and its join waiting). If no →
+   **dead-branch reconciliation**: the missing siblings can never arrive — an
+   upstream exclusive gateway pruned their branch — and the join releases
+   immediately.
+
+This is BPMN dead-path elimination, implemented structurally (query the sibling
+branches for live tokens) rather than by propagating dead tokens through the graph.
+It is deliberately *not* a strict AND-join: the compiler permits
+fork → exclusive-branch-prune → join, and a strict join without reconciliation would
+deadlock in every such graph. Note the consequence: this join already behaves like an
+inclusive join over its incoming flows. If `inclusiveGateway` is ever added, this rule
+*is* its join semantics and should be promoted to the shared implementation — recorded
+here (and in `docs/bpmn-event-dimension/05-hygiene.md` #9) so that decision is made
+deliberately, not discovered by accretion.
 
 Sweep (`AshBpmn.Runtime.SweepWorker`): plain Oban worker the host may cron
 (`config :ash_oban`/Oban plugins). Finds instances :running whose :active tokens
