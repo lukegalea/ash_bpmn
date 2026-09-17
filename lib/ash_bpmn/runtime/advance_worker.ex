@@ -47,16 +47,15 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       |> Ash.Query.filter(id == ^instance_id)
       |> Ash.read_one!(Scope.engine(scope))
 
-    # Find the active token at this node. We look by instance+node+status
-    # rather than by token_id because the token_id in job args may reference
-    # the parent (consumed) token; the actual token to advance is the new one.
-    token =
-      resources.token
-      |> Ash.Query.for_read(:read)
-      |> Ash.Query.filter(instance_id == ^instance_id)
-      |> Ash.Query.filter(node_id == ^node_id)
-      |> Ash.Query.filter(status == :active)
-      |> Ash.read_one!(Scope.engine(scope))
+    # The token to advance, by id when the id names a live one and by position otherwise.
+    #
+    # This used to look by instance+node+status only, on the stated grounds that the
+    # `token_id` in job args may name the parent that was just consumed. That was true of
+    # every job the engine emitted, because a node held one token -- and it stopped being true
+    # with multi-instance, where N tokens sit at the same node and a position lookup finds all
+    # of them and raises. Preferring the id when it resolves keeps the old behaviour exactly
+    # where it was right and makes a fan-out addressable.
+    token = resolve_token(resources, args["token_id"], instance_id, node_id, scope)
 
     # Idempotent: skip if token is not active
     if token.status != :active do
@@ -251,6 +250,36 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     end
   end
 
+  defp resolve_token(resources, token_id, instance_id, node_id, scope) do
+    by_id =
+      token_id &&
+        resources.token
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(id == ^token_id and status == :active and node_id == ^node_id)
+        |> Ash.read_one!(Scope.engine(scope))
+
+    by_id ||
+      resources.token
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(
+        instance_id == ^instance_id and node_id == ^node_id and status == :active
+      )
+      |> Ash.read!(Scope.engine(scope))
+      |> case do
+        [token] ->
+          token
+
+        [] ->
+          nil
+
+        many ->
+          # Several live tokens at one node and nothing in the job naming which. That is a
+          # fan-out whose job lost its id, and guessing would advance an arbitrary instance
+          # twice while leaving another untouched.
+          raise "#{length(many)} active tokens at #{node_id} and no token_id in the job args"
+      end
+  end
+
   # ── Context building ───────────────────────────────────────────────────
 
   defp build_context(instance, token, scope, task_outcome \\ nil, load \\ []) do
@@ -399,6 +428,55 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
             raise "signal throw #{spec.node_id} failed: #{inspect(reason)}"
         end
 
+      {:multi_instance_fan, token_attrs} ->
+        # Created and enqueued together, so each job names the token it is for. Everything
+        # else in this module can key a job by node id because a node holds one token; a
+        # fan-out is the one place that is not true.
+        # Every token first, then every job. The two loops are not interchangeable: the join
+        # asks whether any siblings are still live, so an instance that starts before its
+        # siblings exist sees none, joins immediately, and carries the branch on while the
+        # rest of the fan-out is still being created. Inline mode makes that certain by
+        # running each job as it is inserted; in production it is a crash window rather than a
+        # certainty, which is worse to debug.
+        tokens =
+          Enum.map(token_attrs, fn attrs ->
+            {attrs, resources.token.create!(attrs, Scope.engine(scope))}
+          end)
+
+        Enum.each(tokens, fn {attrs, token} ->
+          AshBpmn.Runtime.Oban.insert(
+            AshBpmn.Runtime.AdvanceWorker,
+            Scope.to_job_args(scope, %{
+              "instance_id" => attrs.instance_id,
+              "token_id" => token.id,
+              "node_id" => attrs.node_id
+            })
+          )
+        end)
+
+      {:multi_instance_join, spec} ->
+        # The current token is consumed by an earlier effect in this same list, so "are any
+        # siblings left?" is the whole question -- the same shape as deciding whether an end
+        # event finishes the instance or just its branch.
+        siblings =
+          resources.token
+          |> Ash.Query.for_read(:read)
+          |> Ash.Query.filter(
+            instance_id == ^ctx[:instance].id and fork_id == ^spec.fork_id and
+              status in [:active, :executing, :waiting]
+          )
+          |> Ash.read!(Scope.engine(scope))
+
+        if siblings == [] do
+          record_event(resources, ctx, :node_completed, %{"multi_instance" => "joined"})
+          Enum.each(spec.targets, &continue_from_join(resources, ctx, &1, spec.as, scope))
+        else
+          record_event(resources, ctx, :branch_completed, %{
+            "multi_instance" => "instance",
+            "instances_remaining" => length(siblings)
+          })
+        end
+
       {:terminate_instance, outcome} ->
         killed = kill_live_tokens(resources, ctx, scope)
 
@@ -541,6 +619,35 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         data: %{"reason" => "max_attempts_exceeded"}
       },
       Scope.engine(scope)
+    )
+  end
+
+  # Mints the token the fan-out was holding back, once the last instance has finished.
+  #
+  # Routing comes from the *joining* token, minus the element key -- which is deliberate. Each
+  # instance ran for one element and carrying any single one of them past the join would make
+  # the continuation look like it belonged to whichever branch happened to finish last.
+  defp continue_from_join(resources, ctx, target_node_id, element_key, scope) do
+    routing = Map.drop((ctx[:token] && ctx[:token].routing) || %{}, [element_key])
+
+    new_token =
+      resources.token.create!(
+        %{
+          instance_id: ctx[:instance].id,
+          node_id: target_node_id,
+          status: :active,
+          routing: routing
+        },
+        Scope.engine(scope)
+      )
+
+    AshBpmn.Runtime.Oban.insert(
+      AshBpmn.Runtime.AdvanceWorker,
+      Scope.to_job_args(scope, %{
+        "instance_id" => ctx[:instance].id,
+        "token_id" => new_token.id,
+        "node_id" => target_node_id
+      })
     )
   end
 

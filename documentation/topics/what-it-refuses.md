@@ -22,7 +22,7 @@ The compiler rejects, each with the offending element's id in the error:
   timer boundary events on user tasks, interrupting or not, message catch
   events, conditional catch events, signal
   throw and catch events, error end events, exclusive and parallel gateways,
-  conditional and default flows. Call activities, ad-hoc and
+  conditional and default flows, and parallel multi-instance activities. Call activities, ad-hoc and
   transactional sub-processes, throw events,
   the rest of the event-definition taxonomy (message on anything but an
   intermediate catch event, signal on anything but an intermediate throw or
@@ -111,6 +111,17 @@ The compiler rejects, each with the offending element's id in the error:
   for a following gateway to read, a boundary leaves down its own flow with no
   outcome — so the same picture would mean something different after an
   upgrade. The two are made mutually exclusive on a user task instead.
+- **Sequential multi-instance**, and a collection that is not a list of scalars.
+  Sequential execution is a loop, and a loop whose body can wait for a person
+  needs a cursor on the token that parallel fan-out does not — so it is refused
+  rather than approximated. The scalar rule is the load-bearing one: a token
+  carries routing, not business data, and fanning out records would copy the
+  subject's contents onto N tokens and make the process a second source of truth
+  about them. Fan out ids and let each instance read its own record, which is
+  also what survives the records changing while the branches run. A collection
+  that evaluates to `null` is an error rather than an empty fan-out, because a
+  path that does not resolve and a list with nothing in it are different facts
+  and treating the first as the second silently skips work somebody drew.
 - **Event sub-processes**, and this one is a deferral with a date rather than a
   principled refusal. An event sub-process is a scoped set of catch events with
   a body — very nearly a boundary event attached to the whole process, on

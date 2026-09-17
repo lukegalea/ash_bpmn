@@ -48,6 +48,7 @@ defmodule AshBpmn.Runtime.Interpreter do
   `task_ref` is an opaque placeholder that ties the three task effects together;
   the worker resolves it to the created row's real id.
     * `{:consume_token, true}` — consume the current token
+    * `{:multi_instance_join, spec}` — consume; the last instance of the fan-out follows on
     * `{:terminate_instance, outcome}` — kill every other live token, then complete
     * `{:error_instance, {outcome, error}}` — the same, but ending `:errored` not completed
     * `{:park_token, attrs}` — park the token as `:waiting`, recording what it listens
@@ -58,6 +59,58 @@ defmodule AshBpmn.Runtime.Interpreter do
   def dispatch(graph, node_id, node, ctx) do
     type = node["type"]
 
+    # A multi-instance activity is dispatched twice in two different senses. The first token
+    # to arrive carries no element, and fans out one token per element of the collection. Each
+    # of those *does* carry one, and runs the activity body exactly as an ordinary token
+    # would. The marker in `routing` is what tells them apart, which is why fanning out has to
+    # be checked before the node type is.
+    cond do
+      node["multi_instance"] && not multi_instance_element?(node, ctx) ->
+        fan_out(graph, node_id, node, ctx)
+
+      node["multi_instance"] ->
+        with {:ok, effects} <- dispatch_node(graph, node_id, node, type, ctx) do
+          {:ok, join_instead_of_following(effects, node, ctx)}
+        end
+
+      true ->
+        dispatch_node(graph, node_id, node, type, ctx)
+    end
+  end
+
+  # An instance of a multi-instance activity does everything an ordinary token does *except*
+  # carry the branch onward: only the last of the fan-out may do that.
+  #
+  # So the tokens and jobs `follow_flows/3` produced are replaced by one join effect naming
+  # where they were going. The alternative -- letting each instance follow the flow and
+  # deduplicating afterwards -- would run whatever comes next N times before anything noticed.
+  defp join_instead_of_following(effects, node, ctx) do
+    targets =
+      effects
+      |> Keyword.get_values(:tokens)
+      |> List.flatten()
+      |> Enum.map(& &1.node_id)
+
+    # Appended, not `Keyword.put`, which prepends -- and order is the whole of it. The join
+    # asks whether any siblings are still live, and the answer is only meaningful once this
+    # token has been consumed by the `consume_token` effect earlier in the list. Put first, it
+    # counts itself and no fan-out ever joins.
+    (effects
+     |> Keyword.delete(:tokens)
+     |> Keyword.delete(:jobs)) ++
+      [
+        multi_instance_join: %{
+          fork_id: ctx[:token] && ctx[:token].fork_id,
+          node_id: ctx[:token] && ctx[:token].node_id,
+          # Carried on the effect rather than read back off the context, because the worker
+          # has no other way to know which routing key was the element's.
+          as: get_in(node, ["multi_instance", "as"]),
+          targets: targets
+        }
+      ]
+  end
+
+  defp dispatch_node(graph, node_id, node, type, ctx) do
     case type do
       "startEvent" ->
         start_event(graph, node_id, node, ctx)
@@ -804,6 +857,100 @@ defmodule AshBpmn.Runtime.Interpreter do
        "token_id" => ctx[:token].id,
        "node_id" => node_id
      }, [scheduled_at: DateTime.add(DateTime.utc_now(), seconds, :second)]}
+  end
+
+  # ── multi-instance ───────────────────────────────────────────────────────
+
+  defp multi_instance_element?(node, ctx) do
+    as = get_in(node, ["multi_instance", "as"])
+    Map.has_key?(current_routing(ctx), as)
+  end
+
+  # One token per element, all at the same node, sharing a fork id.
+  #
+  # They sit at the *same* node rather than at a synthetic inner one, because inventing a node
+  # would put something in the graph that is not on the diagram -- and the diagram is the
+  # single artifact. What distinguishes them is the element in `routing`, which is also what
+  # the activity reads to know which one it is.
+  #
+  # An empty collection consumes the token and carries straight on. That is the honest answer:
+  # "do this for each of none" is done, and refusing it would make a perfectly ordinary
+  # empty-list case a runtime failure.
+  defp fan_out(graph, node_id, node, ctx) do
+    spec = node["multi_instance"]
+    expr_ctx = build_expr_ctx(ctx)
+
+    case AshBpmn.Feel.evaluate(spec["from"], expr_ctx) do
+      {:error, reason} ->
+        {:error, "multi-instance #{node_id}: collection failed: #{reason}"}
+
+      {:ok, elements} when is_list(elements) ->
+        fan_out_elements(graph, node_id, spec, elements, ctx)
+
+      {:ok, nil} ->
+        {:error,
+         "multi-instance #{node_id}: collection produced null, which is not an empty list " <>
+           "-- a path that does not resolve and a list with nothing in it are different facts"}
+
+      {:ok, other} ->
+        {:error,
+         "multi-instance #{node_id}: collection produced #{inspect(other)}, which is not a list"}
+    end
+  end
+
+  defp fan_out_elements(graph, node_id, _spec, [], ctx) do
+    effects = [
+      consume_token: true,
+      events: [event_attrs(ctx, node_id, :node_completed, %{"instances" => 0})]
+    ]
+
+    {:ok, effects ++ follow_flows(graph, find_outgoing_flows(graph, node_id), ctx)}
+  end
+
+  defp fan_out_elements(_graph, node_id, spec, elements, ctx) do
+    fork_id = Ash.UUID.generate()
+    routing = current_routing(ctx)
+
+    tokens =
+      Enum.map(elements, fn element ->
+        %{
+          instance_id: ctx[:instance].id,
+          node_id: node_id,
+          status: :active,
+          fork_id: fork_id,
+          parent_token_id: ctx[:token] && ctx[:token].id,
+          routing: Map.put(routing, spec["as"], scalar!(element, node_id))
+        }
+      end)
+
+    effects = [
+      consume_token: true,
+      events: [
+        event_attrs(ctx, node_id, :node_entered, %{
+          "instances" => length(elements),
+          "as" => spec["as"]
+        })
+      ],
+      # One effect rather than `tokens:` plus `jobs:`, because the ordinary pairing routes the
+      # new token's id through a map keyed by *node id* -- and every instance of a fan-out
+      # sits at the same node, so that map collapses to one and the advance worker then
+      # resolves the token by node id and finds N of them.
+      multi_instance_fan: tokens
+    ]
+
+    {:ok, effects}
+  end
+
+  # Scalars only, and this is where the rule is enforced rather than merely documented. A
+  # token carries routing, not business data; fanning out records would copy the subject's
+  # contents onto N tokens and make the process a second source of truth about them.
+  defp scalar!(element, _node_id) when is_binary(element) or is_number(element), do: element
+  defp scalar!(element, _node_id) when is_boolean(element), do: element
+  defp scalar!(%Decimal{} = element, _node_id), do: Decimal.to_string(element)
+
+  defp scalar!(element, node_id) do
+    raise "multi-instance #{node_id}: collection element #{inspect(element)} is not a scalar. " <>
+            "Fan out ids and let each instance read its own record"
   end
 
   # ── intermediateThrowEvent ───────────────────────────────────────────────

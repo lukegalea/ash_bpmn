@@ -153,6 +153,14 @@ defmodule AshBpmn.Test.Subject do
       public? true
     end
 
+    # A list of scalars, which is what a multi-instance collection must yield. Deliberately
+    # ids rather than embedded records: fanning out records would put business data on N
+    # tokens, and each instance is supposed to read its own.
+    attribute :property_ids, {:array, :string} do
+      default []
+      public? true
+    end
+
     attribute :created_by_id, :uuid do
       public? true
     end
@@ -166,11 +174,11 @@ defmodule AshBpmn.Test.Subject do
     end
 
     create :create do
-      accept [:name, :amount, :is_privileged, :created_by_id]
+      accept [:name, :amount, :is_privileged, :created_by_id, :property_ids]
     end
 
     update :update do
-      accept [:name, :amount, :is_privileged, :created_by_id]
+      accept [:name, :amount, :is_privileged, :created_by_id, :property_ids]
     end
   end
 

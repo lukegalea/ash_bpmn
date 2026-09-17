@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+One onboarding per awarded property. The collection yields ids, not records: a token carries
+routing rather than business data, so each instance reads its own record.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_multi_instance"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_multi_instance" name="Multi instance" isExecutable="true">
+
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>Flow_1</bpmn2:outgoing></bpmn2:startEvent>
+
+    <bpmn2:serviceTask id="Onboard" name="Onboard">
+      <bpmn2:extensionElements><ash:taskConfig action="onboard"/></bpmn2:extensionElements>
+      <bpmn2:multiInstanceLoopCharacteristics isSequential="false">
+        <ash:collection from="subject.property_ids" as="property_id"/>
+      </bpmn2:multiInstanceLoopCharacteristics>
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:serviceTask id="Notify" name="Notify">
+      <bpmn2:extensionElements><ash:taskConfig action="notify"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_2</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_3</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>Flow_3</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Onboard"/>
+    <bpmn2:sequenceFlow id="Flow_2" sourceRef="Onboard" targetRef="Notify"/>
+    <bpmn2:sequenceFlow id="Flow_3" sourceRef="Notify" targetRef="End_1"/>
+  </bpmn2:process>
+</bpmn2:definitions>

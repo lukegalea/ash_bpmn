@@ -157,7 +157,7 @@ defmodule AshBpmn.Compiler.Graph do
     timerEventDefinition messageEventDefinition conditionalEventDefinition
     errorEventDefinition escalationEventDefinition
     compensationEventDefinition cancelEventDefinition
-    linkEventDefinition multiInstanceLoopCharacteristics standardLoopCharacteristics
+    linkEventDefinition standardLoopCharacteristics
     dataInputAssociation dataOutputAssociation dataStore dataStoreReference
     ioSpecification dataInput dataOutput inputSet outputSet property
     dataObject dataObjectReference resourceRole performer humanPerformer
@@ -278,6 +278,102 @@ defmodule AshBpmn.Compiler.Graph do
   defp maybe_put_load(config, []), do: config
   defp maybe_put_load(config, load), do: Map.put(config, "load", load)
 
+  # `multiInstanceLoopCharacteristics` runs an activity once per element of a list:
+  #
+  #     <bpmn2:serviceTask id="Onboard">
+  #       <bpmn2:multiInstanceLoopCharacteristics isSequential="false">
+  #         <ash:collection from="subject.awarded_property_ids" as="property_id"/>
+  #       </bpmn2:multiInstanceLoopCharacteristics>
+  #     </bpmn2:serviceTask>
+  #
+  # The collection is a FEEL expression over the subject and **must yield scalars**, which is
+  # the one rule worth arguing. A token carries routing, not business data, so fanning out
+  # records would put the subject's contents on N tokens and make the process a second source
+  # of truth about them -- the thing the live-subject read exists to prevent. Yielding ids and
+  # letting each instance read its own record keeps that line intact, and it is also what
+  # makes a fan-out survivable: the records may change while the branches run.
+  #
+  # `as` names where the element lands in `routing`, so the activity's own expressions and any
+  # following gateway read it as ordinary FEEL.
+  defp build_multi_instance(id, node, type) do
+    characteristics =
+      node
+      |> Xml.get_element_children()
+      |> Enum.find(
+        &(Xml.normalize_name(Xml.local_name(&1)) == "multiInstanceLoopCharacteristics")
+      )
+
+    cond do
+      is_nil(characteristics) ->
+        {:ok, nil}
+
+      type not in ["serviceTask", "sendTask", "businessRuleTask", "userTask", "callActivity"] ->
+        {:error,
+         Errors.error(
+           id,
+           "multiInstanceLoopCharacteristics on a #{type}; it is supported on activities " <>
+             "only. A gateway or an event run once per element is not a shape BPMN defines"
+         )}
+
+      true ->
+        build_multi_instance_spec(id, characteristics)
+    end
+  end
+
+  defp build_multi_instance_spec(id, characteristics) do
+    collection =
+      characteristics
+      |> Xml.get_element_children()
+      |> Enum.find(&(Xml.normalize_name(Xml.local_name(&1)) == "collection"))
+
+    sequential? = Xml.element_attr(characteristics, "isSequential") in ["true", "1"]
+
+    cond do
+      sequential? ->
+        {:error,
+         Errors.error(
+           id,
+           "multi-instance '#{id}' is sequential, which is not supported. Sequential " <>
+             "execution is a loop, and a loop whose body can wait for a person needs a " <>
+             "cursor on the token that parallel fan-out does not"
+         )}
+
+      is_nil(collection) ->
+        {:error,
+         Errors.error(
+           id,
+           "multi-instance '#{id}' has no ash:collection, so nothing says what it runs once " <>
+             "per element of"
+         )}
+
+      blank?(Xml.element_attr(collection, "from")) ->
+        {:error, Errors.error(id, "ash:collection on '#{id}' has no from expression")}
+
+      blank?(Xml.element_attr(collection, "as")) ->
+        {:error,
+         Errors.error(
+           id,
+           "ash:collection on '#{id}' has no `as`, so each instance would have no name for " <>
+             "the element it is running for"
+         )}
+
+      true ->
+        case AshBpmn.Feel.compile(Xml.element_attr(collection, "from")) do
+          {:ok, stored} ->
+            {:ok,
+             %{
+               "from" => stored,
+               "as" => String.trim(Xml.element_attr(collection, "as")),
+               "sequential" => false
+             }}
+
+          {:error, reason} ->
+            {:error,
+             Errors.error(id, "ash:collection on '#{id}' has an invalid expression: #{reason}")}
+        end
+    end
+  end
+
   # Every direct child of a supported node -- and every direct child of that
   # node's `extensionElements` -- must be something the compiler implements.
   # The ash: vocabulary inside extensionElements is parsed by the node config
@@ -321,6 +417,11 @@ defmodule AshBpmn.Compiler.Graph do
         []
 
       not bpmn? ->
+        []
+
+      # Implemented, and not an event definition -- it is a loop characteristic, so it has no
+      # entry in the definitions map and would otherwise fall through to "unrecognized".
+      normalized == "multiInstanceLoopCharacteristics" ->
         []
 
       Map.has_key?(@implemented_event_definitions, normalized) ->
@@ -460,8 +561,14 @@ defmodule AshBpmn.Compiler.Graph do
       # loaded is orthogonal to what kind of node it is -- a gateway, a user task and a
       # business rule task all read the subject the same way.
       with {:ok, load} <- build_load(id, node),
+           {:ok, multi} <- build_multi_instance(id, node, type),
            {:ok, config} <- build_node_config(node, type, declarations) do
-        {:ok, {id, base |> Map.merge(config) |> maybe_put_load(load)}}
+        {:ok,
+         {id,
+          base
+          |> Map.merge(config)
+          |> maybe_put_load(load)
+          |> maybe_put("multi_instance", multi)}}
       end
     end
   end

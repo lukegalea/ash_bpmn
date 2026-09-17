@@ -914,7 +914,6 @@ defmodule AshBpmn.CompilerTest do
     {"refusal_escalation_end.bpmn", "End_1", "escalationEventDefinition"},
     {"refusal_signal_end.bpmn", "End_1", "signalEventDefinition"},
     {"refusal_message_end.bpmn", "End_1", "messageEventDefinition"},
-    {"refusal_multi_instance.bpmn", "Approval_1", "multiInstanceLoopCharacteristics"},
     {"refusal_standard_loop.bpmn", "Service_1", "standardLoopCharacteristics"},
     {"refusal_data_association.bpmn", "Service_1", "dataInputAssociation"},
     {"refusal_data_association.bpmn", "Service_1", "dataOutputAssociation"},
@@ -1017,6 +1016,34 @@ defmodule AshBpmn.CompilerTest do
       assert {:ok, graph} = Compiler.compile(xml)
       assert graph["nodes"]["UT"]["type"] == "userTask"
       assert graph["nodes"]["UT"]["outcomes"] == ["approved"]
+    end
+  end
+
+  describe "multi-instance" do
+    test "a loop characteristic with no collection is refused, not ignored" do
+      # This fixture used to be in the refusal corpus, back when the marker itself was
+      # refused. Now the marker compiles and what is refused is the thing missing from it,
+      # which is a better error: the modeller drew a fan-out and did not say what over.
+      errors = compile_fixture_errors("refusal_multi_instance.bpmn")
+
+      assert Enum.any?(errors, fn e ->
+               e.path == "Approval_1" and String.contains?(e.message, "no ash:collection")
+             end),
+             "got: #{inspect(errors)}"
+    end
+
+    test "a sequential multi-instance is refused with its reason" do
+      xml =
+        String.replace(
+          File.read!("test/fixtures/multi_instance.bpmn"),
+          ~s(isSequential="false"),
+          ~s(isSequential="true")
+        )
+
+      assert {:error, errors} = Compiler.compile(xml)
+      message = Enum.map_join(errors, " ", & &1.message)
+      assert message =~ "sequential"
+      assert message =~ "cursor"
     end
   end
 
