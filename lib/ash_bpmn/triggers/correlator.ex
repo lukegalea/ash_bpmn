@@ -171,6 +171,26 @@ defmodule AshBpmn.Triggers.Correlator do
     end
   end
 
+  @doc """
+  Attempts one event against one already-parked token.
+
+  Public because the lookback scan needs exactly this and nothing else: it has a token, it
+  has a historical event, and it wants the same decision the live path makes. Duplicating
+  that decision is how the two drift until an event delivers live and not on replay.
+  """
+  @spec deliver_one(struct(), map(), map(), map()) :: :ok
+  def deliver_one(token, graph, feel_ctx, ctx) do
+    case expected_key(graph, token.node_id, feel_ctx) do
+      {:ok, key} ->
+        if token.correlation_key == key, do: wake(token, token.node_id, feel_ctx, ctx)
+
+      :skip ->
+        :ok
+    end
+
+    :ok
+  end
+
   defp deliver_to_running(instance, tokens, feel_ctx, ctx) do
     graph =
       AshBpmn.DefinitionLoader.load!(

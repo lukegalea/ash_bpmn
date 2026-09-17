@@ -132,6 +132,105 @@ defmodule AshBpmn.MessageCatchTest do
     end
   end
 
+  describe "lookback" do
+    test "the default is BPMN-strict: no window, and an early event is missed" do
+      {instance, _subject} = start!()
+
+      token = token_at(instance, "AwaitPayment")
+      refute token.lookback_until
+
+      # And nothing is armed to go looking for one.
+      assert TestJobs.all() == []
+    end
+
+    test "a declared window is stored as a watermark, resolved at park" do
+      # The instant, not the minutes. A token that parked an hour ago keeps the window it
+      # parked with rather than one measured from whenever somebody looks.
+      {instance, _subject} = start_with_lookback!(30)
+
+      token = token_at(instance, "AwaitPayment")
+      assert token.lookback_until
+
+      age = DateTime.diff(DateTime.utc_now(), token.lookback_until, :second)
+      assert age >= 30 * 60 - 5 and age <= 30 * 60 + 5
+    end
+
+    test "an event that arrived before the token parked is delivered" do
+      # The whole point. Without a window this event is lost: it happened while nothing was
+      # listening, and BPMN says that is the end of it. With one, the token re-scans that much
+      # history as it parks and finds it.
+      with_seeded_source(fn ->
+        invoice_id = Ash.UUID.generate()
+
+        AshBpmn.Test.SeededEventSource.put(%{
+          data: %{invoice_id: invoice_id},
+          occurred_at: DateTime.add(DateTime.utc_now(), -60, :second)
+        })
+
+        instance = start_correlated!(invoice_id, lookback: 30)
+
+        assert reload(instance).status == :completed
+        assert token_at(instance, "AwaitPayment").status == :consumed
+        assert [_] = Enum.filter(events(instance), &(&1.kind == :message_received))
+      end)
+    end
+
+    test "an event older than the window is still missed, which is the default behaviour" do
+      with_seeded_source(fn ->
+        invoice_id = Ash.UUID.generate()
+
+        AshBpmn.Test.SeededEventSource.put(%{
+          data: %{invoice_id: invoice_id},
+          occurred_at: DateTime.add(DateTime.utc_now(), -2, :hour)
+        })
+
+        instance = start_correlated!(invoice_id, lookback: 30)
+
+        # Parked, not woken. A window is a window, not "everything that ever happened".
+        assert token_at(instance, "AwaitPayment").status == :waiting
+        assert reload(instance).status == :running
+      end)
+    end
+
+    test "with no window declared, the same early event is missed" do
+      # The control. Same event, same correlation, no lookback -- and the strict behaviour.
+      with_seeded_source(fn ->
+        invoice_id = Ash.UUID.generate()
+
+        AshBpmn.Test.SeededEventSource.put(%{
+          data: %{invoice_id: invoice_id},
+          occurred_at: DateTime.add(DateTime.utc_now(), -60, :second)
+        })
+
+        instance = start_correlated!(invoice_id, lookback: nil)
+
+        assert token_at(instance, "AwaitPayment").status == :waiting
+      end)
+    end
+
+    test "a lookback that is not a whole number of minutes is refused" do
+      # "30min" is the one that matters: it *parses*, as 30 with a remainder, so a guard that
+      # only checks the number would accept it and quietly mean thirty minutes when the
+      # modeller may well have meant something else. "soon" does not parse at all and is the
+      # easy case.
+      for value <- ["soon", "30min", "-5", "1.5"] do
+        xml =
+          String.replace(
+            File.read!("test/fixtures/message_catch.bpmn"),
+            ~s(match="data.invoice_id"),
+            ~s(match="data.invoice_id" lookback="#{value}")
+          )
+
+        defn = Definition.create!(%{key: unique_key(), name: "M", xml: xml})
+        refute defn.graph, "lookback=#{value} should be refused"
+
+        message = Enum.map_join(defn.errors, " ", & &1["message"])
+        assert message =~ "invalid lookback"
+        assert message =~ "BPMN-strict"
+      end
+    end
+  end
+
   describe "refusing" do
     test "a message catch with no ash:subscribe is refused" do
       xml =
@@ -187,6 +286,66 @@ defmodule AshBpmn.MessageCatchTest do
       resources: resources,
       scope: AshBpmn.Scope.system(:sweep)
     })
+  end
+
+  # The subject's id is the correlation key, so a seeded event carrying it as `invoice_id`
+  # correlates. Creating the subject with a chosen id is how the event can be seeded *before*
+  # the instance exists, which is the ordering the whole feature is about.
+  defp start_correlated!(invoice_id, opts) do
+    {:ok, subject} =
+      AshBpmn.Test.Subject.create!(%{name: "look", amount: 0, is_privileged: false})
+
+    xml =
+      File.read!("test/fixtures/message_catch.bpmn")
+      |> String.replace(~s(correlate="subject.id"), ~s(correlate="&quot;#{invoice_id}&quot;"))
+
+    xml =
+      case opts[:lookback] do
+        nil ->
+          xml
+
+        m ->
+          String.replace(
+            xml,
+            ~s(match="data.invoice_id"),
+            ~s(match="data.invoice_id" lookback="#{m}")
+          )
+      end
+
+    {:ok, instance} =
+      AshBpmn.start_instance(AshBpmn.Test.Domain, definition: publish_xml!(xml), subject: subject)
+
+    instance
+  end
+
+  defp with_seeded_source(fun) do
+    previous = Application.get_env(:ash_bpmn, :event_source)
+    Application.put_env(:ash_bpmn, :event_source, AshBpmn.Test.SeededEventSource)
+    AshBpmn.Test.SeededEventSource.clear()
+
+    try do
+      fun.()
+    after
+      Application.put_env(:ash_bpmn, :event_source, previous)
+      AshBpmn.Test.SeededEventSource.clear()
+    end
+  end
+
+  defp start_with_lookback!(minutes) do
+    xml =
+      String.replace(
+        File.read!("test/fixtures/message_catch.bpmn"),
+        ~s(match="data.invoice_id"),
+        ~s(match="data.invoice_id" lookback="#{minutes}")
+      )
+
+    {:ok, subject} =
+      AshBpmn.Test.Subject.create!(%{name: "msg", amount: 0, is_privileged: false})
+
+    {:ok, instance} =
+      AshBpmn.start_instance(AshBpmn.Test.Domain, definition: publish_xml!(xml), subject: subject)
+
+    {instance, subject}
   end
 
   defp start! do

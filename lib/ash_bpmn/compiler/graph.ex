@@ -739,6 +739,7 @@ defmodule AshBpmn.Compiler.Graph do
     action = Xml.element_attr(subscribe, "action")
     correlate = Xml.element_attr(subscribe, "correlate")
     match = Xml.element_attr(subscribe, "match")
+    lookback = Xml.element_attr(subscribe, "lookback")
 
     cond do
       blank?(resource) ->
@@ -757,7 +758,8 @@ defmodule AshBpmn.Compiler.Graph do
         # Both parse at publish time, for the same reason flow conditions do: an expression
         # that cannot parse should be a compile error naming the node, not a token that parks
         # and is never woken because its key could not be computed at three in the morning.
-        with {:ok, correlate_stored} <- AshBpmn.Feel.compile(correlate),
+        with {:ok, minutes} <- parse_lookback(id, lookback),
+             {:ok, correlate_stored} <- AshBpmn.Feel.compile(correlate),
              {:ok, match_stored} <- AshBpmn.Feel.compile(match) do
           {:ok,
            %{
@@ -766,14 +768,46 @@ defmodule AshBpmn.Compiler.Graph do
                "resource" => resource,
                "action" => action,
                "correlate" => correlate_stored,
-               "match" => match_stored
+               "match" => match_stored,
+               "lookback_minutes" => minutes
              }
            }}
         else
+          # `parse_lookback/2` already builds a located error; the FEEL compiler returns a
+          # bare reason that still needs one.
+          {:error, %{} = located} ->
+            {:error, located}
+
           {:error, reason} ->
             {:error,
              Errors.error(id, "ash:subscribe on '#{id}' has an invalid expression: #{reason}")}
         end
+    end
+  end
+
+  # `lookback` buys back a race BPMN loses by design. A catch event receives what arrives
+  # while it is listening, and an event that came first is missed -- right for a message meant
+  # to be awaited, wrong for a reply that can legitimately beat the wait, because a process
+  # that starts, does a little work and only then reaches its catch event can lose a response
+  # that came back in between.
+  #
+  # Zero is the default and is BPMN-strict. Opting in is per node because it is a per-node
+  # judgement: whether a reply can precede the wait is a property of that interaction, not of
+  # the process.
+  defp parse_lookback(_id, nil), do: {:ok, 0}
+
+  defp parse_lookback(id, value) do
+    case Integer.parse(String.trim(value)) do
+      {minutes, ""} when minutes >= 0 ->
+        {:ok, minutes}
+
+      _ ->
+        {:error,
+         Errors.error(
+           id,
+           "ash:subscribe on '#{id}' has an invalid lookback '#{value}'; it is a whole " <>
+             "number of minutes, and zero means BPMN-strict"
+         )}
     end
   end
 

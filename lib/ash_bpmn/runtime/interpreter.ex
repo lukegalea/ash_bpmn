@@ -676,13 +676,21 @@ defmodule AshBpmn.Runtime.Interpreter do
          "message catch #{node_id}: correlate produced null, so this token has no address"}
 
       {:ok, value} ->
+        # The watermark, not the window: an instant events must have occurred at or after to
+        # be eligible. Storing the resolved instant rather than the declared minutes means a
+        # token that parked an hour ago keeps the window it parked with, rather than one
+        # measured from whenever somebody happens to look.
+        minutes = catch_spec["lookback_minutes"] || 0
+
         park = %{
           subscription_signature: message_signature(catch_spec),
-          correlation_key: to_string(value)
+          correlation_key: to_string(value),
+          lookback_until: if(minutes > 0, do: DateTime.add(DateTime.utc_now(), -minutes, :minute))
         }
 
         effects = [
           park_token: park,
+          jobs: lookback_jobs(ctx, node_id, minutes),
           events: [
             event_attrs(ctx, node_id, :node_entered, %{
               "waiting_for" => "message",
@@ -694,6 +702,20 @@ defmodule AshBpmn.Runtime.Interpreter do
 
         {:ok, effects}
     end
+  end
+
+  # A token with no lookback arms nothing, which is the ordinary case and the default.
+  defp lookback_jobs(_ctx, _node_id, 0), do: []
+
+  defp lookback_jobs(ctx, node_id, _minutes) do
+    [
+      {AshBpmn.Runtime.LookbackWorker,
+       %{
+         "instance_id" => ctx[:instance].id,
+         "token_id" => ctx[:token].id,
+         "catch_node_id" => node_id
+       }, []}
+    ]
   end
 
   # The coarse key the correlator queries on, and the reason a waiting token is findable

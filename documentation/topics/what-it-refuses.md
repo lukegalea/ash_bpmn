@@ -101,6 +101,15 @@ The compiler rejects, each with the offending element's id in the error:
   `bpmn:error` declaration beside the process; and an end event carrying both a
   terminate and an error marker, which are two different endings where one would
   be ignored.
+- **Promoting `ash:timer kind="expire"` into a boundary event automatically.**
+  The roadmap proposed it and it cannot be done wholesale: `RequireApproval`
+  schedules expire timers for standalone approvals, which have no process
+  instance and no graph to draw a boundary on, so expire has to survive
+  regardless. Where a graph does exist, rewriting would change routing
+  silently — expire leaves down the task's own flow with `outcome: :expired`
+  for a following gateway to read, a boundary leaves down its own flow with no
+  outcome — so the same picture would mean something different after an
+  upgrade. The two are made mutually exclusive on a user task instead.
 - **A message catch that does not say what it is waiting for.** A
   `messageEventDefinition` says only *that* the token waits; the `ash:subscribe`
   element says what for, because BPMN's own message plumbing describes messages

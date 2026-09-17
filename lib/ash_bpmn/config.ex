@@ -53,6 +53,16 @@ defmodule AshBpmn.Config do
   end
 
   @doc """
+  The configured event source, or `nil`.
+
+  `event_source!/0` raises because the sweep must not start without one. This one exists for
+  callers doing bookkeeping *after* a durable state change, where an unconfigured host is a
+  reason to do nothing rather than a reason to fail.
+  """
+  @spec event_source() :: module() | nil
+  def event_source, do: Application.get_env(:ash_bpmn, :event_source)
+
+  @doc """
   Returns the configured `AshBpmn.EventSource` module.  Raises if unset.
   """
   @spec event_source!() :: module()
