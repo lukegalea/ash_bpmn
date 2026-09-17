@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+A parallel fork whose branches each have their own end event, which is ordinary BPMN and
+could not run at all until the instance learned to finish on the last branch rather than the
+first. It is also the shape every non-interrupting boundary event produces.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_fork_two_ends"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_fork_two_ends" name="Fork, two ends" isExecutable="true">
+    <bpmn2:startEvent id="S"><bpmn2:outgoing>F1</bpmn2:outgoing></bpmn2:startEvent>
+    <bpmn2:parallelGateway id="Fork">
+      <bpmn2:incoming>F1</bpmn2:incoming>
+      <bpmn2:outgoing>FA</bpmn2:outgoing><bpmn2:outgoing>FB</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+    <bpmn2:serviceTask id="A">
+      <bpmn2:extensionElements><ash:taskConfig action="a"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FA</bpmn2:incoming><bpmn2:outgoing>FAO</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:serviceTask id="B">
+      <bpmn2:extensionElements><ash:taskConfig action="b"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FB</bpmn2:incoming><bpmn2:outgoing>FBO</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:endEvent id="EA"><bpmn2:incoming>FAO</bpmn2:incoming></bpmn2:endEvent>
+    <bpmn2:endEvent id="EB"><bpmn2:incoming>FBO</bpmn2:incoming></bpmn2:endEvent>
+    <bpmn2:sequenceFlow id="F1" sourceRef="S" targetRef="Fork"/>
+    <bpmn2:sequenceFlow id="FA" sourceRef="Fork" targetRef="A"/>
+    <bpmn2:sequenceFlow id="FB" sourceRef="Fork" targetRef="B"/>
+    <bpmn2:sequenceFlow id="FAO" sourceRef="A" targetRef="EA"/>
+    <bpmn2:sequenceFlow id="FBO" sourceRef="B" targetRef="EB"/>
+  </bpmn2:process>
+</bpmn2:definitions>

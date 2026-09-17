@@ -127,6 +127,11 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         :action_invoked,
                         :action_failed,
                         :instance_completed,
+                        # One branch of a parallel process reached an end event while others
+                        # were still live. Not `:instance_completed`: the process is not
+                        # finished, and conflating the two makes a stuck parallel instance
+                        # look like a completed one in the log.
+                        :branch_completed,
                         :instance_failed,
                         # The process reached an error end event: it ended badly by design,
                         # which is not the same finding as `:instance_failed` and must not be

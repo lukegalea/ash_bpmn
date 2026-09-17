@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+A fork where one branch parks on an approval and the other runs to its own end event. The
+instance must keep running: a branch waiting for a person has not finished, and completing
+the process around it would strand the token.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_fork_wait"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_fork_wait" name="Fork with a wait" isExecutable="true">
+
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>Flow_1</bpmn2:outgoing></bpmn2:startEvent>
+
+    <bpmn2:parallelGateway id="Fork_1">
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_Approval</bpmn2:outgoing>
+      <bpmn2:outgoing>Flow_Fast</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+
+    <bpmn2:userTask id="SlowApproval" name="Slow approval">
+      <bpmn2:extensionElements>
+        <ash:taskConfig>
+          <ash:candidates><ash:candidate kind="role" of="approver"/></ash:candidates>
+          <ash:outcomes><ash:outcome name="approved"/></ash:outcomes>
+        </ash:taskConfig>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Approval</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_ApprovalOut</bpmn2:outgoing>
+    </bpmn2:userTask>
+
+    <bpmn2:endEvent id="End_approved"><bpmn2:incoming>Flow_ApprovalOut</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:serviceTask id="FastCheck" name="Fast check">
+      <bpmn2:extensionElements><ash:taskConfig action="fast_check"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Fast</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_FastOut</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_fast"><bpmn2:incoming>Flow_FastOut</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Fork_1"/>
+    <bpmn2:sequenceFlow id="Flow_Approval" sourceRef="Fork_1" targetRef="SlowApproval"/>
+    <bpmn2:sequenceFlow id="Flow_ApprovalOut" sourceRef="SlowApproval" targetRef="End_approved"/>
+    <bpmn2:sequenceFlow id="Flow_Fast" sourceRef="Fork_1" targetRef="FastCheck"/>
+    <bpmn2:sequenceFlow id="Flow_FastOut" sourceRef="FastCheck" targetRef="End_fast"/>
+  </bpmn2:process>
+</bpmn2:definitions>

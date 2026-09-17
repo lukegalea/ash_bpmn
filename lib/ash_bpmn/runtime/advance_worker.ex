@@ -422,13 +422,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         record_event(resources, ctx, :instance_completed, %{"outcome" => outcome})
 
       {:complete_instance, outcome} ->
-        resources.instance.mark_completed!(
-          ctx[:instance],
-          to_outcome(outcome),
-          Scope.engine(scope)
-        )
-
-        record_event(resources, ctx, :instance_completed, %{"outcome" => outcome})
+        complete_when_last(resources, ctx, outcome, scope)
 
       {:tasks, _task_specs} ->
         # Already handled in phase 1
@@ -548,6 +542,42 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       },
       Scope.engine(scope)
     )
+  end
+
+  # An end event ends *its branch*. The instance is finished when the last branch reaches one.
+  #
+  # This used to complete unconditionally, and the interpreter's own comment claimed
+  # `complete_instance` was "idempotent about that". It was not: the first branch to reach an
+  # end completed the instance and the second failed `StatusIsRunning`, so an ordinary
+  # parallel fork whose branches have their own end events -- legal BPMN, and what every
+  # non-interrupting boundary produces -- could not run at all. The job then retried and
+  # failed the same way until `max_attempts`.
+  #
+  # The current token has already been consumed by the `consume_token` effect, which is
+  # applied earlier in the same list, so "are any live tokens left?" is the whole question.
+  # `:waiting` counts as live: a branch parked on an approval has not finished, and completing
+  # the instance around it would strand it exactly as a cancel used to.
+  defp complete_when_last(resources, ctx, outcome, scope) do
+    remaining =
+      resources.token
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(
+        instance_id == ^ctx[:instance].id and status in [:active, :executing, :waiting]
+      )
+      |> Ash.read!(Scope.engine(scope))
+
+    if remaining == [] do
+      resources.instance.mark_completed!(ctx[:instance], to_outcome(outcome), Scope.engine(scope))
+      record_event(resources, ctx, :instance_completed, %{"outcome" => outcome})
+    else
+      # Recorded, because "this branch finished and the process did not" is a fact somebody
+      # reading the log will want, and its absence is what makes a stuck parallel process hard
+      # to reason about.
+      record_event(resources, ctx, :branch_completed, %{
+        "outcome" => outcome,
+        "branches_remaining" => length(remaining)
+      })
+    end
   end
 
   # Every live branch of the instance except the one that just terminated it.
