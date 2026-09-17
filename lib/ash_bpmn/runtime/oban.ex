@@ -45,6 +45,55 @@ defmodule AshBpmn.Runtime.Oban do
     end
   end
 
+  @doc """
+  Cancels every pending job whose `meta` contains `match`.
+
+  The answer to "cancel every timer this token owns" without keeping a second index of job
+  ids. Oban stores `meta` as `jsonb` and ships a **GIN index on it**, so a containment lookup
+  is indexed rather than a scan — which is why this is a query and not a stored id list.
+
+  That matters more than it sounds. The existing id-list approach (`HumanTask.timer_job_ids`)
+  has a window: the jobs are inserted, then the ids are written to the row, and a crash in
+  between leaves live jobs that nothing can name. A `meta` query has no such window, because
+  the identifying data is written *into the job itself*, in the same statement that creates it.
+
+  Every timer this library inserts must therefore carry its owner in `meta`. A timer inserted
+  without it is uncancellable by query, and becomes a ghost that fires against a token that
+  moved on. `timer_meta/2` is the one constructor for that, and it exists so the invariant has
+  a single place to hold.
+
+  Only pending states are cancelled (`scheduled`, `available`, `retryable`): a job already
+  running cannot be reliably stopped — Oban's kill signal is best-effort and loses the race
+  when the job completes first — so the handler's own guard, not this call, is what keeps a
+  fired timer from acting on a stale token.
+  """
+  @spec cancel_all(map()) :: {:ok, non_neg_integer()}
+  def cancel_all(match) when is_map(match) and map_size(match) > 0 do
+    if AshBpmn.Config.oban_testing() == :inline do
+      AshBpmn.Runtime.Oban.TestJobs.remove_matching(match)
+    else
+      import Ecto.Query, only: [where: 3]
+
+      Oban.Job
+      |> where([j], j.state in ["scheduled", "available", "retryable"])
+      |> where([j], fragment("? @> ?", j.meta, ^match))
+      |> Oban.cancel_all_jobs()
+    end
+  end
+
+  @doc """
+  The `meta` every timer job must carry, so `cancel_all/1` can find it again.
+
+  `kind` is included so a caller can cancel one kind of timer without touching the others --
+  defusing an escalation while leaving a reminder armed, for instance.
+  """
+  @spec timer_meta(map()) :: map()
+  def timer_meta(fields) when is_map(fields) do
+    fields
+    |> Map.new(fn {k, v} -> {to_string(k), v} end)
+    |> Map.put("ash_bpmn", true)
+  end
+
   # ── Inline mode ──────────────────────────────────────────────────────────
 
   defp insert_inline(worker_module, args, opts) do
@@ -54,13 +103,25 @@ defmodule AshBpmn.Runtime.Oban do
       # Timer — store, do NOT execute
       id = System.unique_integer([:positive])
       scheduled_at = Keyword.get(opts, :scheduled_at)
-      job = %Oban.Job{id: id, args: args, scheduled_at: scheduled_at, worker: worker_module}
+      meta = Keyword.get(opts, :meta, %{})
 
+      job = %Oban.Job{
+        id: id,
+        args: args,
+        scheduled_at: scheduled_at,
+        worker: worker_module,
+        meta: meta
+      }
+
+      # `meta` is carried through deliberately. It is what `cancel_all/1` matches on, so a
+      # store that dropped it would make cancel-by-owner work in production and silently do
+      # nothing in tests -- the worst possible split, because the tests would still be green.
       AshBpmn.Runtime.Oban.TestJobs.store(%{
         id: id,
         worker: worker_module,
         args: args,
-        scheduled_at: scheduled_at
+        scheduled_at: scheduled_at,
+        meta: meta
       })
 
       {:ok, job}
@@ -69,6 +130,10 @@ defmodule AshBpmn.Runtime.Oban do
       id = System.unique_integer([:positive])
       job = %Oban.Job{id: id, args: args}
 
+      # Every shape `Oban.Worker.perform/1` is allowed to return, because a worker that snoozes
+      # or cancels itself is ordinary and used to crash the suite with a `CaseClauseError` --
+      # which made "check again later", the natural idiom for a timer whose condition has not
+      # arrived, untestable.
       case worker_module.perform(job) do
         :ok ->
           {:ok, job}
@@ -76,8 +141,19 @@ defmodule AshBpmn.Runtime.Oban do
         {:ok, _result} ->
           {:ok, job}
 
-        {:discard, _} ->
+        :discard ->
           {:ok, job}
+
+        {:discard, _reason} ->
+          {:ok, job}
+
+        {:cancel, _reason} ->
+          {:ok, job}
+
+        # Inline mode has no clock to snooze against. Recording it rather than re-running keeps
+        # the call total and lets a test assert the worker asked to be retried.
+        {:snooze, seconds} ->
+          {:ok, %{job | meta: Map.put(job.meta || %{}, "snoozed_for", seconds)}}
 
         {:error, reason} ->
           raise "AshBpmn inline Oban worker #{inspect(worker_module)} returned {:error, #{inspect(reason)}}"
@@ -101,6 +177,26 @@ defmodule AshBpmn.Runtime.Oban do
     opts = Keyword.put_new(opts, :queue, AshBpmn.Config.queue())
 
     changeset = worker_module.new(args, opts)
-    Oban.insert(changeset)
+
+    case Oban.insert(changeset) do
+      # The unique-insert trap, and it is a quiet one.
+      #
+      # `insert_unique` takes `pg_try_advisory_xact_lock` to serialize the conflict check. When
+      # that lock is *not* granted, Oban does not error -- it applies the changeset in memory
+      # and hands back `{:ok, %Job{conflict?: true, id: nil}}`. No row was written. A caller
+      # that reads `{:ok, _}` as "the job is armed" silently loses it, and for a timer that
+      # means a token waits forever for something that was never scheduled.
+      #
+      # A non-nil id with `conflict?: true` is the ordinary dedupe outcome and is a success --
+      # that is the nudge's debounce doing its job.
+      {:ok, %Oban.Job{id: nil, conflict?: true}} ->
+        {:error,
+         {:not_inserted,
+          "unique insert for #{inspect(worker_module)} could not take the advisory lock; " <>
+            "no row was written"}}
+
+      other ->
+        other
+    end
   end
 end
