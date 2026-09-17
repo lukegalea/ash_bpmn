@@ -36,6 +36,20 @@ defmodule AshBpmn.Resources.Signal do
   ever delivered. A host installing signals on a plain base gets a table that fills up and
   does nothing at all.
 
+  There is a specific way to get this wrong, and it is the likely one. The nearest structural
+  sibling to copy an instantiation from is `AshBpmn.Resources.ProcessEvent`, which is
+  deliberately `audit?: false` — a process event log auditing itself into the host's event log
+  is a strange loop, and it double-records. So the single flag a Signal must *not* inherit
+  from its most obvious template is precisely the one that decides whether signals work at
+  all. Copied wholesale, the resource compiles, the table is created, throws succeed, rows
+  accumulate, and nothing is ever delivered to anything.
+
+      # ProcessEvent: correct
+      base_opts: [ownership: :organization_owned, lifecycle?: false, audit?: false, ...]
+
+      # Signal: audit? must be true, and that is the whole of adopting signals
+      base_opts: [ownership: :organization_owned, audit?: true]
+
   **The event must reach the log carrying the tenant the way that log partitions by** — which
   is not always the obvious column. In the reference application the audit chain's trigger
   does `NEW.organization_id := NULLIF(NEW.metadata->>'organization_id', '')::uuid`, taking the
