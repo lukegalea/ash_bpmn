@@ -112,6 +112,8 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         # A signal catch was woken by a throw. Names the signal and the row it
                         # came from, so "why did this resume?" is answerable.
                         :signal_received,
+                        # A conditional catch's condition became true and woke its token.
+                        :condition_met,
                         # A throw found no signal resource installed. Recorded rather than
                         # raised: the diagram and the host disagree about what is installed,
                         # which retrying cannot fix.

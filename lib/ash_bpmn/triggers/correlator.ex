@@ -145,7 +145,8 @@ defmodule AshBpmn.Triggers.Correlator do
     signatures =
       [
         "message:#{event["resource"]}:#{event["action"]}",
-        "message:#{event["resource"]}:*"
+        "message:#{event["resource"]}:*",
+        "conditional:#{event["resource"]}"
       ] ++ signal_signatures(feel_ctx, ctx)
 
     token_resource
@@ -235,10 +236,22 @@ defmodule AshBpmn.Triggers.Correlator do
       # signal wakes every token listening for that name -- there is no key to compare, and
       # asking which token it was "for" is a question with no answer. The signature has
       # already narrowed the set to tokens listening for this exact name.
-      if signal_node?(graph, node_id) do
-        Enum.each(node_tokens, &wake(&1, node_id, feel_ctx, ctx, graph))
-      else
-        deliver_addressed(node_tokens, graph, node_id, feel_ctx, ctx)
+      case catch_kind(graph, node_id) do
+        # Broadcast. A signal wakes every token listening for that name -- there is no key to
+        # compare, and asking which token it was "for" is a question with no answer.
+        "signal" ->
+          Enum.each(node_tokens, &wake(&1, node_id, feel_ctx, ctx, graph))
+
+        # The subject changed. Correlate on its identity first, then ask the condition -- and
+        # ask it of the subject as it now is, read live, not of the event's snapshot. The
+        # snapshot is what the write contained; the condition is about the record.
+        "conditional" ->
+          node_tokens
+          |> Enum.filter(&(&1.correlation_key == to_string(feel_ctx[@event]["record_id"])))
+          |> Enum.each(&maybe_wake_conditional(&1, node_id, graph, feel_ctx, ctx))
+
+        _ ->
+          deliver_addressed(node_tokens, graph, node_id, feel_ctx, ctx)
       end
     end)
   end
@@ -246,6 +259,14 @@ defmodule AshBpmn.Triggers.Correlator do
   # The key this event carries, by the node's own `match` expression. A null or an error means
   # this event is not addressed to anything at this node -- an event of the right kind that
   # simply does not carry the field -- which is an ordinary no, not a condition to report.
+  defp wake_kind(graph, node_id) do
+    case catch_kind(graph, node_id) do
+      "signal" -> :signal_received
+      "conditional" -> :condition_met
+      _ -> :message_received
+    end
+  end
+
   defp deliver_addressed(tokens, graph, node_id, feel_ctx, ctx) do
     case expected_key(graph, node_id, feel_ctx) do
       {:ok, key} ->
@@ -258,8 +279,43 @@ defmodule AshBpmn.Triggers.Correlator do
     end
   end
 
-  defp signal_node?(graph, node_id) do
-    get_in(graph, ["nodes", node_id, "catch", "kind"]) == "signal"
+  defp catch_kind(graph, node_id), do: get_in(graph, ["nodes", node_id, "catch", "kind"])
+
+  # The condition is evaluated against the subject loaded *now*, through the same path every
+  # other node reads it by -- including the node's own `ash:load`. An event's `data` is the
+  # snapshot of what that write contained, which is not the same thing and would answer a
+  # different question on a partial update.
+  defp maybe_wake_conditional(token, node_id, graph, feel_ctx, ctx) do
+    instance =
+      ctx.resources.instance
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(id == ^token.instance_id)
+      |> Ash.read_one!(AshBpmn.Scope.engine(ctx.scope))
+
+    subject =
+      AshBpmn.Subject.load(
+        instance,
+        ctx.scope,
+        get_in(graph, ["nodes", node_id, "load"]) || []
+      )
+
+    expr_ctx = %{
+      "subject" => Feel.to_feel_value(subject),
+      "routing" => Feel.to_feel_value(token.routing || %{})
+    }
+
+    condition = get_in(graph, ["nodes", node_id, "catch", "condition"])
+
+    case Feel.evaluate_condition(condition, expr_ctx) do
+      {:ok, true} ->
+        wake(token, node_id, feel_ctx, ctx, graph)
+
+      # False is the ordinary answer -- most updates to a watched record do not satisfy the
+      # condition -- and null means the condition could not be answered, which is not a reason
+      # to wake. Neither is recorded: one row per non-matching write would bury the log.
+      _ ->
+        :ok
+    end
   end
 
   defp expected_key(graph, node_id, feel_ctx) do
@@ -294,7 +350,7 @@ defmodule AshBpmn.Triggers.Correlator do
             instance_id: token.instance_id,
             token_id: token.id,
             node_id: node_id,
-            kind: if(signal_node?(graph, node_id), do: :signal_received, else: :message_received),
+            kind: wake_kind(graph, node_id),
             data: %{
               "event_id" => feel_ctx[@event]["id"],
               "resource" => feel_ctx[@event]["resource"],

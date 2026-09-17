@@ -143,7 +143,8 @@ defmodule AshBpmn.Compiler.Graph do
     "timerEventDefinition" => ["intermediateCatchEvent", "boundaryEvent"],
     "errorEventDefinition" => ["endEvent"],
     "messageEventDefinition" => ["intermediateCatchEvent"],
-    "signalEventDefinition" => ["intermediateCatchEvent", "intermediateThrowEvent"]
+    "signalEventDefinition" => ["intermediateCatchEvent", "intermediateThrowEvent"],
+    "conditionalEventDefinition" => ["intermediateCatchEvent"]
   }
 
   # Children of a `timerEventDefinition`. Only `timeDuration` is implemented; the other two are
@@ -153,8 +154,8 @@ defmodule AshBpmn.Compiler.Graph do
   @timer_definition_children MapSet.new(~w(timeDuration timeDate timeCycle))
 
   @known_unimplemented MapSet.new(~w(
-    timerEventDefinition messageEventDefinition
-    errorEventDefinition escalationEventDefinition conditionalEventDefinition
+    timerEventDefinition messageEventDefinition conditionalEventDefinition
+    errorEventDefinition escalationEventDefinition
     compensationEventDefinition cancelEventDefinition
     linkEventDefinition multiInstanceLoopCharacteristics standardLoopCharacteristics
     dataInputAssociation dataOutputAssociation dataStore dataStoreReference
@@ -659,7 +660,8 @@ defmodule AshBpmn.Compiler.Graph do
         &(Xml.normalize_name(Xml.local_name(&1)) in [
             "timerEventDefinition",
             "messageEventDefinition",
-            "signalEventDefinition"
+            "signalEventDefinition",
+            "conditionalEventDefinition"
           ])
       )
 
@@ -672,7 +674,7 @@ defmodule AshBpmn.Compiler.Graph do
            id,
            "intermediateCatchEvent '#{id}' has no event definition; the token would wait " <>
              "for something that can never arrive. Supported: timerEventDefinition, " <>
-             "messageEventDefinition, signalEventDefinition"
+             "messageEventDefinition, signalEventDefinition, conditionalEventDefinition"
          )}
 
       [_, _ | _] ->
@@ -684,6 +686,7 @@ defmodule AshBpmn.Compiler.Graph do
           "timerEventDefinition" -> build_timer_catch(id, definition)
           "messageEventDefinition" -> build_message_catch(id, node)
           "signalEventDefinition" -> build_signal_catch(id, definition)
+          "conditionalEventDefinition" -> build_conditional_catch(id, node, definition)
         end
     end
   end
@@ -702,6 +705,77 @@ defmodule AshBpmn.Compiler.Graph do
   defp build_node_config(_node, type, _declarations)
        when type in ["startEvent", "parallelGateway"] do
     {:ok, %{}}
+  end
+
+  # A conditional catch waits for the subject to become something. It parks, and every update
+  # to that subject re-evaluates the condition against the record as it now is; the token
+  # wakes the first time the answer is true.
+  #
+  #     <bpmn2:intermediateCatchEvent id="AwaitFunding">
+  #       <bpmn2:conditionalEventDefinition>
+  #         <bpmn2:condition xsi:type="bpmn2:tFormalExpression"
+  #           language="feel">subject.balance >= 1000</bpmn2:condition>
+  #       </bpmn2:conditionalEventDefinition>
+  #       <bpmn2:extensionElements>
+  #         <ash:subscribe resource="Account"/>
+  #       </bpmn2:extensionElements>
+  #     </bpmn2:intermediateCatchEvent>
+  #
+  # The resource must be declared even though the subject's type is known at run time, because
+  # the correlator has to find these tokens *before* loading anything -- the signature is what
+  # makes that a partial-index lookup rather than evaluating every parked condition against
+  # every write in the system.
+  #
+  # Unlike a message catch there is no `match`: the correlation is the subject's own identity,
+  # so the token's key is the subject id and the arriving event's `record_id` is what it is
+  # compared against. Nothing for a modeller to get wrong, because there is nothing to write.
+  defp build_conditional_catch(id, node, definition) do
+    condition =
+      definition
+      |> Xml.get_element_children()
+      |> Enum.find(&(Xml.normalize_name(Xml.local_name(&1)) == "condition"))
+
+    ext = Xml.find_extension_elements(node)
+    resource = Xml.find_ash_elements(ext, "subscribe") |> List.first()
+    resource_name = resource && Xml.element_attr(resource, "resource")
+
+    cond do
+      is_nil(condition) ->
+        {:error,
+         Errors.error(
+           id,
+           "conditionalEventDefinition on '#{id}' has no condition; the token would park " <>
+             "waiting for nothing to become true"
+         )}
+
+      blank?(resource_name) ->
+        {:error,
+         Errors.error(
+           id,
+           "conditional catch '#{id}' needs an ash:subscribe naming the resource whose " <>
+             "updates it watches. Without one the correlator would have to evaluate every " <>
+             "parked condition against every write in the system"
+         )}
+
+      true ->
+        source = condition |> Xml.element_text() |> to_string() |> String.trim()
+
+        case AshBpmn.Feel.compile(source) do
+          {:ok, stored} ->
+            {:ok,
+             %{
+               "catch" => %{
+                 "kind" => "conditional",
+                 "resource" => resource_name,
+                 "condition" => stored
+               }
+             }}
+
+          {:error, reason} ->
+            {:error,
+             Errors.error(id, "conditional catch '#{id}' has an invalid condition: #{reason}")}
+        end
+    end
   end
 
   # A signal throw broadcasts a name and waits for nothing: the token carries straight on

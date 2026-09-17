@@ -653,6 +653,9 @@ defmodule AshBpmn.Runtime.Interpreter do
       "signal" ->
         signal_catch(node_id, catch_spec, ctx)
 
+      "conditional" ->
+        conditional_catch(node_id, catch_spec, ctx)
+
       other ->
         {:error, "intermediate catch event #{node_id} has unsupported kind: #{inspect(other)}"}
     end
@@ -732,6 +735,39 @@ defmodule AshBpmn.Runtime.Interpreter do
     ]
 
     {:ok, effects}
+  end
+
+  # A conditional catch parks on the subject's own identity. There is no key for a modeller
+  # to write: the token waits for *this* subject to become something, so the correlation is
+  # the subject id and the arriving event's `record_id` is what it is compared against.
+  #
+  # The condition is evaluated at delivery, not here. Evaluating it now would answer whether
+  # the subject already satisfies it, which is a different question -- BPMN's conditional
+  # catch waits for a *change*, and a process that skipped its own wait because the condition
+  # happened to hold on arrival would be a surprising thing to draw.
+  defp conditional_catch(node_id, catch_spec, ctx) do
+    subject_id = ctx[:instance] && ctx[:instance].subject_id
+
+    if subject_id do
+      effects = [
+        park_token: %{
+          subscription_signature: "conditional:#{catch_spec["resource"]}",
+          correlation_key: to_string(subject_id)
+        },
+        events: [
+          event_attrs(ctx, node_id, :node_entered, %{
+            "waiting_for" => "condition",
+            "resource" => catch_spec["resource"]
+          })
+        ]
+      ]
+
+      {:ok, effects}
+    else
+      # A process about nothing cannot wait for its subject to change. Better to fail where
+      # somebody can see it than to park a token whose condition can never be evaluated.
+      {:error, "conditional catch #{node_id}: the instance has no subject to watch"}
+    end
   end
 
   # A token with no lookback arms nothing, which is the ordinary case and the default.

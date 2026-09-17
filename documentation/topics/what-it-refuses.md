@@ -20,13 +20,14 @@ The compiler rejects, each with the offending element's id in the error:
   start events, end events — including terminate end events — user, service,
   send and business rule tasks, intermediate catch events carrying a timer,
   timer boundary events on user tasks, interrupting or not, message catch
-  events, signal
+  events, conditional catch events, signal
   throw and catch events, error end events, exclusive and parallel gateways,
   conditional and default flows. Call activities, ad-hoc and
   transactional sub-processes, throw events,
   the rest of the event-definition taxonomy (message on anything but an
   intermediate catch event, signal on anything but an intermediate throw or
-  catch, error on anything but an end event,
+  catch, conditional on anything but an intermediate catch, error on anything
+  but an end event,
   escalation, conditional, compensation, cancel, link), complex and
   event-based gateways, loop and multi-instance markers: rejected, loudly. A
   notation element a business analyst drew and a system silently ignored is how
@@ -110,6 +111,12 @@ The compiler rejects, each with the offending element's id in the error:
   for a following gateway to read, a boundary leaves down its own flow with no
   outcome — so the same picture would mean something different after an
   upgrade. The two are made mutually exclusive on a user task instead.
+- **A conditional catch with no condition, or none naming the resource it
+  watches.** The first would park a token waiting for nothing to become true.
+  The second is refused even though the subject's type is known at run time,
+  because the correlator has to *find* parked tokens before it loads anything —
+  the declared resource is what makes that a partial-index lookup instead of
+  evaluating every parked condition against every write in the system.
 - **A signal event with no `signalRef`, or a ref with no declaration.** A catch
   with no name would hear every signal thrown anywhere, which is not listening.
   A `bpmn:signal` is declared beside the process, like `bpmn:error`, and the
