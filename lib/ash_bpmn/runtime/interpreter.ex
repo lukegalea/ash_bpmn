@@ -84,6 +84,9 @@ defmodule AshBpmn.Runtime.Interpreter do
       "parallelGateway" ->
         parallel_gateway(graph, node_id, node, ctx)
 
+      "intermediateCatchEvent" ->
+        intermediate_catch_event(graph, node_id, node, ctx)
+
       other ->
         {:error, "unsupported node type: #{other}"}
     end
@@ -578,6 +581,62 @@ defmodule AshBpmn.Runtime.Interpreter do
     ]
 
     {:ok, effects}
+  end
+
+  # ── intermediateCatchEvent ───────────────────────────────────────────────
+
+  # The token stops here and waits. Today the only thing it waits for is time.
+  #
+  # Nothing about the wait is held in memory: the token is parked in the database and the wake
+  # is an Oban job with a `scheduled_at`. A node restart, a deploy, a week-long outage -- the
+  # row and the job both survive them, which is the whole reason a durable wait is not a
+  # `Process.send_after/3`.
+  defp intermediate_catch_event(graph, node_id, node, ctx) do
+    catch_spec = node["catch"] || %{}
+
+    case catch_spec["kind"] do
+      "timer" ->
+        # The signature is what the correlator filters on, and a timer has no correlated event
+        # to be found by -- it is woken by its own job, which names the token. It is set anyway,
+        # and deliberately: a parked token with no signature at all is indistinguishable from a
+        # user task's, and an operator asking "what is this instance waiting for?" should get an
+        # answer from the row rather than from the diagram.
+        park = %{
+          subscription_signature: "timer:#{node_id}",
+          correlation_key: nil
+        }
+
+        effects = [
+          park_token: park,
+          events: [
+            event_attrs(ctx, node_id, :node_entered, %{
+              "waiting_for" => "timer",
+              "duration" => catch_spec["duration"]
+            })
+          ],
+          jobs: [timer_catch_job(ctx, node_id, catch_spec)]
+        ]
+
+        _ = graph
+        {:ok, effects}
+
+      other ->
+        {:error, "intermediate catch event #{node_id} has unsupported kind: #{inspect(other)}"}
+    end
+  end
+
+  # Scheduled from *now*, which is when the token actually arrived. Computing it at compile
+  # time would make the delay relative to publication, so every instance of a published
+  # definition would fire at the same instant.
+  defp timer_catch_job(ctx, node_id, catch_spec) do
+    seconds = catch_spec["seconds"]
+
+    {AshBpmn.Runtime.CatchTimerWorker,
+     %{
+       "instance_id" => ctx[:instance].id,
+       "token_id" => ctx[:token].id,
+       "node_id" => node_id
+     }, [scheduled_at: DateTime.add(DateTime.utc_now(), seconds, :second)]}
   end
 
   # ── exclusiveGateway ─────────────────────────────────────────────────────

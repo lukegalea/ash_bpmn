@@ -137,8 +137,15 @@ defmodule AshBpmn.Compiler.Graph do
   # carry a marker the engine ignores -- which is the failure mode the unsupported-child
   # check exists to prevent, arriving through the door marked "supported".
   @implemented_event_definitions %{
-    "terminateEventDefinition" => ["endEvent"]
+    "terminateEventDefinition" => ["endEvent"],
+    "timerEventDefinition" => ["intermediateCatchEvent"]
   }
+
+  # Children of a `timerEventDefinition`. Only `timeDuration` is implemented; the other two are
+  # listed so they refuse with their own name rather than as an unrecognized element, because a
+  # modeller who drew a timer with a cycle needs to be told that *cycles* are not supported, not
+  # that BPMN contains no such element.
+  @timer_definition_children MapSet.new(~w(timeDuration timeDate timeCycle))
 
   @known_unimplemented MapSet.new(~w(
     timerEventDefinition messageEventDefinition signalEventDefinition
@@ -149,7 +156,7 @@ defmodule AshBpmn.Compiler.Graph do
     ioSpecification dataInput dataOutput inputSet outputSet property
     callActivity subProcess adHocSubProcess transaction
     receiveTask scriptTask manualTask task
-    complexGateway eventBasedGateway intermediateCatchEvent
+    complexGateway eventBasedGateway
     intermediateThrowEvent boundaryEvent
   ))
 
@@ -246,10 +253,16 @@ defmodule AshBpmn.Compiler.Graph do
         if type in @implemented_event_definitions[normalized] do
           []
         else
+          # Deliberately not "meaningless". A timer *start* event is perfectly good BPMN that
+          # this engine does not implement, while a terminate marker on a start event is not
+          # BPMN at all -- and the compiler has no business ruling on which is which. What it
+          # can say truthfully in both cases is where the marker is supported, which is also
+          # the thing the modeller needs in order to redraw it.
           [
             Errors.error(
               id,
-              "#{type} '#{id}' carries a '#{normalized}', which is only meaningful on " <>
+              "#{type} '#{id}' has a '#{normalized}', which is not supported there; " <>
+                "#{normalized} is supported on: " <>
                 Enum.join(@implemented_event_definitions[normalized], ", ")
             )
           ]
@@ -572,6 +585,41 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
+  # An intermediate catch event: the token stops here until something happens. Today the only
+  # something is a timer.
+  #
+  # The delay is an ISO 8601 duration, read straight from `bpmn:timeDuration`, because that is
+  # what BPMN specifies and what every modelling tool writes. Inventing `hours="4"` here would
+  # mean a diagram drawn in Camunda or bpmn.io carries a delay this compiler cannot see -- the
+  # single-artifact rule turned inside out.
+  defp build_node_config(node, "intermediateCatchEvent") do
+    id = Xml.element_attr(node, "id")
+
+    definitions =
+      node
+      |> Xml.get_element_children()
+      |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "timerEventDefinition"))
+
+    case definitions do
+      [] ->
+        # A catch event with no definition is a catch with nothing to catch: the token would
+        # park and never be woken by anything. Refused rather than compiled into a deadlock.
+        {:error,
+         Errors.error(
+           id,
+           "intermediateCatchEvent '#{id}' has no event definition; the token would wait " <>
+             "for something that can never arrive. Supported: timerEventDefinition"
+         )}
+
+      [_, _ | _] ->
+        {:error,
+         Errors.error(id, "intermediateCatchEvent '#{id}' has more than one event definition")}
+
+      [definition] ->
+        build_timer_catch(id, definition)
+    end
+  end
+
   defp build_node_config(node, "exclusiveGateway") do
     default_flow = Xml.element_attr(node, "default")
     {:ok, Map.filter(%{"default_flow" => default_flow}, fn {_, v} -> v != nil end)}
@@ -579,6 +627,72 @@ defmodule AshBpmn.Compiler.Graph do
 
   defp build_node_config(_node, type) when type in ["startEvent", "parallelGateway"] do
     {:ok, %{}}
+  end
+
+  defp build_timer_catch(id, definition) do
+    children =
+      definition
+      |> Xml.get_element_children()
+      |> Enum.map(&{Xml.normalize_name(Xml.local_name(&1)), &1})
+
+    unsupported =
+      Enum.filter(children, fn {name, _} ->
+        name in @timer_definition_children and name != "timeDuration"
+      end)
+
+    case {unsupported, List.keyfind(children, "timeDuration", 0)} do
+      {[{name, _} | _], _} ->
+        {:error,
+         Errors.error(
+           id,
+           "timer '#{id}' uses '#{name}', which is not supported; use timeDuration " <>
+             "(an ISO 8601 duration such as PT4H or P2D)"
+         )}
+
+      {[], nil} ->
+        {:error,
+         Errors.error(id, "timer '#{id}' has no timeDuration; an ISO 8601 duration is required")}
+
+      {[], {_, element}} ->
+        source = element |> Xml.element_text() |> to_string() |> String.trim()
+
+        # Parsed at publish time, not at three in the morning when the token arrives. A
+        # duration that cannot be read is a compile error naming the node; a duration read
+        # lazily is a process that parks and then fails to ever wake.
+        case parse_duration(source) do
+          {:ok, seconds} ->
+            {:ok, %{"catch" => %{"kind" => "timer", "duration" => source, "seconds" => seconds}}}
+
+          {:error, reason} ->
+            {:error,
+             Errors.error(id, "timer '#{id}' has an invalid duration '#{source}': #{reason}")}
+        end
+    end
+  end
+
+  # Months and years are refused rather than approximated. ISO 8601 allows them, but their
+  # length depends on when you start counting, and a process that fires "in one month" at a
+  # different instant depending on the day it parked is not a thing to hand an auditor. A
+  # modeller who wants a month writes P30D and means it.
+  defp parse_duration(source) do
+    case Duration.from_iso8601(source) do
+      {:ok, %Duration{month: m, year: y}} when m != 0 or y != 0 ->
+        {:error, "months and years are not supported because their length is not fixed; use days"}
+
+      {:ok, duration} ->
+        seconds =
+          duration.week * 604_800 + duration.day * 86_400 + duration.hour * 3600 +
+            duration.minute * 60 + duration.second
+
+        if seconds > 0 do
+          {:ok, seconds}
+        else
+          {:error, "a timer must wait for a positive amount of time"}
+        end
+
+      {:error, reason} ->
+        {:error, to_string(reason)}
+    end
   end
 
   # An `ash:call` names a callable the host declared in a domain's `callables` block —

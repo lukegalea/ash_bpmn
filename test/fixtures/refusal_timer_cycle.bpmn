@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   id="Definitions_timer_cycle"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_timer_cycle" name="Timer cycle" isExecutable="true">
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>Flow_1</bpmn2:outgoing></bpmn2:startEvent>
+    <bpmn2:intermediateCatchEvent id="Wait_1">
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
+      <bpmn2:timerEventDefinition id="Timer_1">
+        <bpmn2:timeCycle xsi:type="bpmn2:tFormalExpression">R3/PT1H</bpmn2:timeCycle>
+      </bpmn2:timerEventDefinition>
+    </bpmn2:intermediateCatchEvent>
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>Flow_2</bpmn2:incoming></bpmn2:endEvent>
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Wait_1"/>
+    <bpmn2:sequenceFlow id="Flow_2" sourceRef="Wait_1" targetRef="End_1"/>
+  </bpmn2:process>
+</bpmn2:definitions>
