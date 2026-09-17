@@ -1,0 +1,182 @@
+# SPDX-FileCopyrightText: 2026 Luke Galea
+# SPDX-License-Identifier: MIT
+
+defmodule AshBpmn.Resources.Signal do
+  @moduledoc """
+  Resource macro for emitted signals.
+
+  A signal is a broadcast: throwing one wakes **every** catch event listening for that name,
+  and consumes nothing. That is what makes it different from a message, which is addressed to
+  one waiting token by a correlation key, and it is why the two cannot share a delivery path
+  however similar they look on a diagram.
+
+  ## Why a row rather than a PubSub broadcast
+
+  The obvious implementation is `Phoenix.PubSub`, and it is wrong here for a reason worth
+  stating plainly: a broadcast is delivered to whoever is listening *at that instant*. A node
+  restarting, a deploy rolling, a consumer three seconds behind — each of those silently turns
+  "every listener" into "every listener that happened to be up", and nothing anywhere records
+  which it was. A process that missed a signal it was waiting for looks exactly like one that
+  is still waiting.
+
+  So a throw writes a row, through an audited action, into the host's log. The sweep delivers
+  it the same way it delivers every other event: in sequence, at least once, with a dispatch
+  row per subscription saying what happened. Replaying a tenant's log replays its signals,
+  and "who caught this?" is a query rather than a guess.
+
+  This is the one place the engine **writes** to the host's event log rather than reading it,
+  and that asymmetry is deliberate: the signal *is* the event. Emitting it any other way would
+  put a second, weaker ordering next to the one the log already provides.
+
+  ## Payload, and what it is not
+
+  `payload` carries the signal's own data, which is not the subject's. A catch event reads the
+  subject live, exactly as every other node does; the payload is for what the *throw* knew and
+  the catch cannot look up — an external reference, a reason code. Keeping business data out
+  of it is the same rule tokens follow, one layer out.
+
+  ## Required options
+
+    * `:domain` — the Ash domain.
+    * `:repo` — the `AshPostgres.Repo`.
+
+  ## Optional options
+
+    * `:table` — (default `"bpmn_signals"`).
+    * `:tenant?` — (default `false`).
+    * `:base` / `:base_opts` — the host's base resource. See `AshBpmn.Resources.Base`.
+      **This is the option that matters for signals**: without an audited base the row is
+      written and no event reaches the log, so nothing is ever delivered. A host installing
+      signals without audit gets a table that fills up and does nothing.
+    * `:policies?` — emit the engine bypass policy (default `true`).
+  """
+
+  defmacro __using__(opts) do
+    repo = Keyword.fetch!(opts, :repo)
+    table = Keyword.get(opts, :table, "bpmn_signals")
+    tenant? = AshBpmn.Resources.Base.own_tenancy?(opts)
+    policies? = Keyword.get(opts, :policies?, true)
+
+    base_use = AshBpmn.Resources.Base.use_call(opts)
+
+    quote do
+      unquote(base_use)
+
+      @ash_bpmn_kind :signal
+
+      def ash_bpmn_kind, do: @ash_bpmn_kind
+
+      postgres do
+        table unquote(table)
+        repo unquote(repo)
+
+        custom_indexes do
+          # Signals are read by name, and only ever recent ones -- the sweep works forward
+          # from a cursor and nothing queries history by name. Name plus time is therefore
+          # the shape, and it is declared here so a host gets it from `mix ash.codegen`.
+          index [:name, :emitted_at], name: "#{unquote(table)}_name_index"
+        end
+      end
+
+      if unquote(tenant?) do
+        multitenancy do
+          strategy :attribute
+          attribute :organization_id
+          global? true
+        end
+      end
+
+      if unquote(policies?) do
+        policies do
+          bypass AshBpmn.Checks.AshBpmnInteraction do
+            authorize_if always()
+          end
+        end
+      end
+
+      attributes do
+        uuid_primary_key :id
+
+        attribute :name, :string do
+          allow_nil? false
+          public? true
+          constraints min_length: 1, max_length: 200
+
+          description "The signal thrown. Catch events listen by this and nothing else."
+        end
+
+        attribute :payload, :map do
+          default %{}
+          allow_nil? false
+          public? true
+
+          description "What the throw knew and a catch cannot look up. Not the subject."
+        end
+
+        # Recorded rather than derived from `inserted_at`, because the audited base may or may
+        # not provide timestamps and the delivery window must not depend on which.
+        attribute :emitted_at, :utc_datetime_usec do
+          allow_nil? false
+          default &DateTime.utc_now/0
+          public? true
+        end
+
+        # Nullable on purpose. A signal thrown by a process names the instance that threw it,
+        # which is what makes "why did this start?" answerable; a signal a host emits from its
+        # own code has no instance and must still be legal, because a signal the engine is the
+        # only possible source of would be a much smaller feature.
+        attribute :instance_id, :uuid do
+          public? true
+        end
+
+        attribute :node_id, :string do
+          public? true
+        end
+
+        # The lap counter, carried by the signal rather than by the dispatch that delivers it.
+        #
+        # A process started by a signal that throws a signal is a cycle, and it is the one
+        # cycle the design deliberately leaves open -- signals are how a process talks to
+        # processes it does not know about, so forbidding it would remove the feature. What
+        # bounds it is this: a throw inherits the instance's `trigger_depth` and adds one, and
+        # the correlator refuses past the configured maximum.
+        #
+        # On the row and not in the payload, because the payload is the modeller's and this is
+        # the engine's. A modeller who wrote `depth` into a payload would otherwise silently
+        # change how far their own signals travel.
+        attribute :depth, :integer do
+          default 0
+          allow_nil? false
+          public? true
+        end
+
+        if unquote(tenant?) do
+          attribute :organization_id, :uuid do
+            allow_nil? false
+            public? true
+            writable? false
+          end
+        end
+      end
+
+      actions do
+        read :read do
+          primary? true
+        end
+
+        # One action, and no update or destroy. A signal is something that happened: editing
+        # one would rewrite history that subscriptions have already acted on, and deleting one
+        # would leave dispatch rows pointing at nothing.
+        create :emit do
+          primary? true
+          accept [:name, :payload, :instance_id, :node_id, :depth]
+        end
+      end
+
+      code_interface do
+        define :emit, action: :emit, args: [:name]
+        define :read, action: :read
+      end
+    end
+  end
+end

@@ -89,6 +89,15 @@ defmodule AshBpmn.TenantTest.TimerJob do
     tenant?: true
 end
 
+defmodule AshBpmn.TenantTest.Signal do
+  @moduledoc false
+  use AshBpmn.Resources.Signal,
+    domain: AshBpmn.TenantTest.Domain,
+    repo: AshBpmn.TestRepo,
+    table: "tenant_bpmn_signals",
+    tenant?: true
+end
+
 defmodule AshBpmn.TenantTest.Subscription do
   @moduledoc false
   use AshBpmn.Resources.Subscription,
@@ -133,5 +142,6 @@ defmodule AshBpmn.TenantTest.Domain do
     resource AshBpmn.TenantTest.Cursor
     resource AshBpmn.TenantTest.Dispatch
     resource AshBpmn.TenantTest.TimerJob
+    resource AshBpmn.TenantTest.Signal
   end
 end

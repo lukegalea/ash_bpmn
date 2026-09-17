@@ -116,6 +116,21 @@ defmodule AshBpmn.Resources.Instance do
         # This was an `:atom`, and no fixture ever set an outcome, so every definition that
         # declared one would have failed at the moment it completed. Storage is unchanged --
         # Ash writes both to text.
+        # How many trigger hops produced this instance. Zero means a person or a host call
+        # started it; higher means a chain of subscriptions did.
+        #
+        # It lives on the instance because the bound has to survive the gap between one event
+        # and the next. `Dispatch` carries depth for the hop it records, which is enough while
+        # every hop is subscription-to-instance -- but a process that *throws* a signal starts
+        # a new event with nothing linking it to the one that started the process, so the
+        # count restarted at zero on every lap and the bound never fired. That is precisely
+        # the cycle signals make possible.
+        attribute :trigger_depth, :integer do
+          default 0
+          allow_nil? false
+          public? true
+        end
+
         attribute :outcome, :string do
           public? true
         end
@@ -150,7 +165,8 @@ defmodule AshBpmn.Resources.Instance do
             :correlation_id,
             :started_by_id,
             :outcome,
-            :definition_id
+            :definition_id,
+            :trigger_depth
           ]
         end
 

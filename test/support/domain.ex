@@ -14,6 +14,7 @@ defmodule AshBpmn.Test.Domain do
     resource AshBpmn.Test.TaskCandidate
     resource AshBpmn.Test.ProcessEvent
     resource AshBpmn.Test.TimerJob
+    resource AshBpmn.Test.Signal
     resource AshBpmn.Test.Subject
     resource AshBpmn.Test.CatalogueResource
     resource AshBpmn.Test.UndocumentedActionResource

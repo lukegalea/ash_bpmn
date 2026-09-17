@@ -625,6 +625,53 @@ defmodule AshBpmn do
     }
   end
 
+  @doc """
+  Throws a signal: a broadcast every catch event listening for `name` will receive.
+
+  Unlike a message, which is addressed to one waiting token by a correlation key, a signal is
+  consumed by nobody and delivered to everybody. Throwing one into an empty room is not an
+  error — it is the ordinary case, and a signal nothing catches is a fact that happened.
+
+  Hosts call this directly; a signal throw node calls it through the engine. Both write a row
+  through the host's audited base, so the throw *is* an event in the host's log rather than a
+  message beside it — which is what makes delivery replayable and "who caught this?" a query.
+
+  ## Options
+
+    * `:payload` — the signal's own data. Not the subject's; a catch reads that live.
+    * `:instance` — the instance throwing, when a process is. Its `trigger_depth` is
+      inherited and incremented, which is what bounds a signal that starts a process that
+      throws a signal.
+    * `:tenant` / `:actor` — as everywhere else.
+
+  Returns `{:error, :signals_not_installed}` when the host has not registered a signal
+  resource. That is a configuration answer rather than a failure: the kind is optional, and a
+  host that throws no signals carries no table for them.
+  """
+  @spec emit_signal(String.t(), keyword()) :: {:ok, struct()} | {:error, term()}
+  def emit_signal(name, opts \\ []) when is_binary(name) do
+    resources = DomainResolver.resolve!()
+    instance = opts[:instance]
+    scope = Scope.from_record(instance || %{}, opts)
+
+    if resources.signal do
+      resources.signal.emit(
+        name,
+        %{
+          payload: opts[:payload] || %{},
+          instance_id: instance && instance.id,
+          node_id: opts[:node_id],
+          # The lap counter. A host throwing a signal from its own code starts at one, because
+          # its call is the first hop; a process inherits the depth it was started at.
+          depth: ((instance && instance.trigger_depth) || 0) + 1
+        },
+        Scope.engine(scope)
+      )
+    else
+      {:error, :signals_not_installed}
+    end
+  end
+
   @doc "Retries a failed instance by reactivating dead tokens."
   @spec retry_instance!(map(), keyword()) :: map()
   def retry_instance!(instance, opts \\ []) do

@@ -28,7 +28,7 @@ defmodule AshBpmn.Resources do
   # The timer ledger is its own optional kind rather than a seventh core one, because a host
   # that never draws a timer should not carry a table for them -- and because every writer
   # already has to tolerate its absence the same way the trigger kinds are tolerated.
-  @ledger_kinds [:timer_job]
+  @ledger_kinds [:timer_job, :signal]
   @kinds @core_kinds ++ @trigger_kinds ++ @ledger_kinds
 
   @doc "The kinds every BPMN domain must register."
@@ -39,7 +39,13 @@ defmodule AshBpmn.Resources do
   @spec trigger_kinds() :: [atom()]
   def trigger_kinds, do: @trigger_kinds
 
-  @doc "The timer ledger's kinds, which a domain may omit."
+  @doc """
+  Kinds a domain may omit: the timer ledger and the signal log.
+
+  Both are opt-in for the same reason -- a host that draws no timers and throws no signals
+  should carry no tables for them -- and both are therefore `nil` in the resolved map, which
+  every reader must treat as "not installed" rather than as a failure.
+  """
   @spec ledger_kinds() :: [atom()]
   def ledger_kinds, do: @ledger_kinds
 

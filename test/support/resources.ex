@@ -105,6 +105,19 @@ defmodule AshBpmn.Test.TimerJob do
   end
 end
 
+defmodule AshBpmn.Test.Signal do
+  @moduledoc false
+  use AshBpmn.Resources.Signal,
+    domain: AshBpmn.Test.Domain,
+    repo: AshBpmn.TestRepo
+
+  policies do
+    bypass do
+      authorize_if always()
+    end
+  end
+end
+
 # A simple subject resource for engine / approval tests.
 # No authorizer — open access in test contexts.
 defmodule AshBpmn.Test.Subject do
