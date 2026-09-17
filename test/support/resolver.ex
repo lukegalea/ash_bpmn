@@ -47,6 +47,42 @@ defmodule AshBpmn.Test.Resolver do
     {:ok, ids}
   end
 
+  @doc """
+  Handles an escalation, recording that it happened.
+
+  Implemented here on purpose, and its absence was a real bug rather than an omission: while
+  this module had no `escalate/2`, every escalation in the suite raised
+  `UndefinedFunctionError` inside `TimerWorker`'s clause-level rescue and reported success.
+  The test named "escalation timer fires" passed throughout, because all it asserted was that
+  the task was still open -- which is exactly what happens when nothing happens.
+
+  `set_escalate_result/1` stages a failure so the unhappy paths are reachable too. A double
+  that can only succeed tests only half of a contract whose interesting half is failure.
+
+  Callback: `escalate(task :: map(), ctx :: map()) :: :ok | {:ok, map()} | {:error, term()}`
+  """
+  def escalate(task, _ctx) do
+    Process.put({__MODULE__, :escalations}, escalations() ++ [task.id])
+
+    case Process.get({__MODULE__, :escalate_result}, :ok) do
+      {:__raise__, message} -> raise message
+      result -> result
+    end
+  end
+
+  @doc "Stages what `escalate/2` returns. `{:__raise__, msg}` makes it raise."
+  def set_escalate_result(result), do: Process.put({__MODULE__, :escalate_result}, result)
+
+  @doc "Task ids `escalate/2` has been called with, in order."
+  @spec escalations() :: [Ash.UUID.t()]
+  def escalations, do: Process.get({__MODULE__, :escalations}, [])
+
+  @doc "Forgets staged results and recorded escalations."
+  def clear_escalations do
+    Process.delete({__MODULE__, :escalations})
+    Process.delete({__MODULE__, :escalate_result})
+  end
+
   @doc "The specs the last `candidates/2` call received."
   @spec last_candidate_specs() :: [map()]
   def last_candidate_specs, do: Process.get({__MODULE__, :candidates}, [])
@@ -103,4 +139,17 @@ defmodule AshBpmn.Test.Resolver do
 
     Map.get(subject, field)
   end
+end
+
+defmodule AshBpmn.Test.NoEscalateResolver do
+  @moduledoc """
+  A resolver that implements the required callbacks and declines the optional one.
+
+  It exists so "the host did not implement escalation" is a state the suite can actually
+  reach. Before `AshBpmn.Test.Resolver` grew an `escalate/2`, *every* resolver in the suite
+  was this one by accident, and nothing noticed.
+  """
+
+  defdelegate candidates(specs, ctx), to: AshBpmn.Test.Resolver
+  defdelegate exclusions(specs, ctx), to: AshBpmn.Test.Resolver
 end

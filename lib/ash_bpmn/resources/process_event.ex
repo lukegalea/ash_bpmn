@@ -108,6 +108,12 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         :task_expired,
                         :timer_fired,
                         :timer_cancelled,
+                        # An escalation timer fired and its handler failed. Deliberately not
+                        # `:action_failed`, which is what a failed service task passes to
+                        # `mark_instance_failed/5` -- anything grepping the log for failed
+                        # instances would otherwise start counting escalations that merely
+                        # failed to notify while the process ran on perfectly well.
+                        :escalation_failed,
                         :action_invoked,
                         :action_failed,
                         :instance_completed,

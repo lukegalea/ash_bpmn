@@ -154,6 +154,8 @@ defmodule AshBpmn.Compiler.Graph do
     linkEventDefinition multiInstanceLoopCharacteristics standardLoopCharacteristics
     dataInputAssociation dataOutputAssociation dataStore dataStoreReference
     ioSpecification dataInput dataOutput inputSet outputSet property
+    dataObject dataObjectReference resourceRole performer humanPerformer
+    potentialOwner correlationSubscription supports
     callActivity subProcess adHocSubProcess transaction
     receiveTask scriptTask manualTask task
     complexGateway eventBasedGateway
@@ -177,12 +179,27 @@ defmodule AshBpmn.Compiler.Graph do
         normalized in @benign_process_children ->
           []
 
-        Xml.bpmn_prefixed?(Xml.local_name(child)) ->
+        bpmn_prefixed_or_bare?(Xml.local_name(child)) ->
           [unsupported_process_child_error(id, normalized)]
 
         true ->
-          # Foreign namespace or bare name at process level - ignore silently
-          # (hosts may carry other extensions)
+          # Foreign *namespace* only -- a prefixed name under something that is not BPMN.
+          # Hosts carry their own vocabularies here (`ash:`, `camunda:`, `zeebe:`) and those
+          # are not the compiler's to rule on.
+          #
+          # This used to read `Xml.bpmn_prefixed?` and treat a bare name as foreign, which was
+          # exactly backwards. `Xml.parse/1` scans without `:namespace_conform`, so a document
+          # binding BPMN as its *default* namespace writes `<subProcess>` with no prefix, and
+          # every such element fell through here unrefused. That is not merely "ignored": the
+          # node collector uses a `//` xpath, so any supported node inside a bare subprocess is
+          # hoisted and compiled as a direct child of the process, with the subprocess boundary
+          # silently erased. A prefixed `<bpmn:subProcess>` could never do that, because this
+          # check refused it first.
+          #
+          # The one case this now gets wrong is a child that re-declares a default xmlns onto
+          # itself (`<thing xmlns="urn:vendor">`), which reads as bare and is refused. No BPMN
+          # tool writes that, and without `:namespace_conform` there is nothing to tell it
+          # apart -- so it is accepted as the price of closing the hole.
           []
       end
     end)

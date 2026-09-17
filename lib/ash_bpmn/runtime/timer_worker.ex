@@ -64,6 +64,25 @@ defmodule AshBpmn.Runtime.TimerWorker do
     {:ok, :reminded}
   end
 
+  # Escalation had a clause-level `rescue _ -> {:ok, :escalated}`, which reported success for
+  # every possible failure. That was not a hypothetical: `escalate/2` is an optional callback
+  # and this repository's own test resolver does not implement it, so every escalation in the
+  # suite raised `UndefinedFunctionError`, was swallowed, and wrote no event -- while the test
+  # named "escalation timer fires" passed, because all it asserted was that the task was still
+  # open, which is true precisely when nothing happens.
+  #
+  # Three outcomes, told apart without a rescue where possible:
+  #
+  #   * the host did not implement the optional callback -- a configuration fact, not a
+  #     failure, and detectable with `function_exported?/3` rather than by raising;
+  #   * the handler ran;
+  #   * the handler failed.
+  #
+  # Only the third is an error, and it is a *survivable* one: escalation is a notification and
+  # never touches task state, so the process carries on regardless. It returns `{:error, _}`
+  # so Oban retries the notification -- which is the whole point of having armed it -- and the
+  # append-only log gets one row per attempt, which is a fair record of three attempts rather
+  # than a duplicate.
   defp fire_timer(resources, task, "escalate", scope) do
     resolver = Config.assignment_resolver!()
 
@@ -75,25 +94,19 @@ defmodule AshBpmn.Runtime.TimerWorker do
       assigns: %{}
     }
 
-    _ = resolver.escalate(task, ctx)
+    outcome = invoke_escalation(resolver, task, ctx)
 
-    resources.process_event.create!(
-      %{
-        instance_id: task.instance_id,
-        token_id: task.token_id,
-        node_id: task.node_id,
-        task_id: task.id,
-        kind: :timer_fired,
-        data: %{"timer_kind" => "escalate"}
-      },
-      Scope.engine(scope)
-    )
-
+    # Outside any rescue, and unconditional. The old code wrapped this write too, so a failure
+    # to record the escalation also reported success -- strictly worse than the handler case,
+    # because the row that would let anyone notice is the thing that went missing.
+    record_escalation(resources, task, outcome, scope)
     record_fire(resources, task, :escalate, scope)
 
-    {:ok, :escalated}
-  rescue
-    _ -> {:ok, :escalated}
+    case outcome do
+      :ok -> {:ok, :escalated}
+      :no_handler -> {:ok, :no_escalation_handler}
+      {:failed, message} -> {:error, message}
+    end
   end
 
   defp fire_timer(resources, task, "expire", scope) do
@@ -194,6 +207,44 @@ defmodule AshBpmn.Runtime.TimerWorker do
 
   defp fire_timer(_resources, _task, kind, _scope) do
     {:error, "unknown timer kind: #{kind}"}
+  end
+
+  defp invoke_escalation(resolver, task, ctx) do
+    if Code.ensure_loaded?(resolver) and function_exported?(resolver, :escalate, 2) do
+      case resolver.escalate(task, ctx) do
+        :ok -> :ok
+        {:ok, _} -> :ok
+        {:error, reason} -> {:failed, inspect(reason)}
+        other -> {:failed, "escalate/2 returned an undeclared shape: #{inspect(other)}"}
+      end
+    else
+      :no_handler
+    end
+  rescue
+    # Narrow by construction: this wraps the host's callback and nothing else, so what it
+    # catches is a handler that blew up and never a failure of ours.
+    e -> {:failed, Exception.message(e)}
+  end
+
+  defp record_escalation(resources, task, outcome, scope) do
+    {kind, data} =
+      case outcome do
+        :ok -> {:timer_fired, %{"timer_kind" => "escalate", "handler" => "resolver"}}
+        :no_handler -> {:timer_fired, %{"timer_kind" => "escalate", "handler" => "none"}}
+        {:failed, msg} -> {:escalation_failed, %{"timer_kind" => "escalate", "error" => msg}}
+      end
+
+    resources.process_event.create!(
+      %{
+        instance_id: task.instance_id,
+        token_id: task.token_id,
+        node_id: task.node_id,
+        task_id: task.id,
+        kind: kind,
+        data: data
+      },
+      Scope.engine(scope)
+    )
   end
 
   # Terminates the ledger row for a timer that has just fired.

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+BPMN bound as the DEFAULT namespace, with no prefix anywhere. Every other fixture binds
+bpmn2: or bpmn:, which is why the bare-name hole survived so long.
+
+The event subprocess has no sequence flows on purpose. A bare subprocess wired into the
+path was already refused, but by the wrong error: build_flow complains that a sequence flow
+references a non-existent node, and a modeller told their arrow is broken redraws the arrow.
+A flowless one produced no error at all.
+-->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             id="Definitions_default_ns"
+             targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <process id="Process_default_ns" name="Default namespace" isExecutable="true">
+    <startEvent id="Start_1"><outgoing>Flow_1</outgoing></startEvent>
+
+    <subProcess id="Sub_1" triggeredByEvent="true">
+      <startEvent id="Sub_Start"/>
+    </subProcess>
+
+    <endEvent id="End_1"><incoming>Flow_1</incoming></endEvent>
+    <sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="End_1"/>
+  </process>
+</definitions>

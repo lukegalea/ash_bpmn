@@ -923,6 +923,11 @@ defmodule AshBpmn.CompilerTest do
     # `bpmn2:` was matched, so a `bpmn:`-prefixed document silently ignored
     # exactly these elements.
     {"refusal_bpmn_prefix_subprocess.bpmn", "Sub_1", "subProcess"},
+    # The third spelling a conformant tool writes: BPMN as the default namespace, no prefix
+    # at all. It refused nothing until the process-level check stopped treating a bare name
+    # as foreign -- and this shape, an event subprocess with no sequence flows, is the one
+    # that produced no error of any kind.
+    {"refusal_default_ns_subprocess.bpmn", "Sub_1", "subProcess"},
     {"refusal_bpmn_prefix_timer_start.bpmn", "Start_1", "timerEventDefinition"}
   ]
 
@@ -1013,6 +1018,32 @@ defmodule AshBpmn.CompilerTest do
       assert {:ok, graph} = Compiler.compile(xml)
       assert graph["nodes"]["UT"]["type"] == "userTask"
       assert graph["nodes"]["UT"]["outcomes"] == ["approved"]
+    end
+  end
+
+  describe "the accusation the refusal makes" do
+    test "a legal-but-unimplemented process child is 'not supported', not 'Unknown'" do
+      # The two messages send a modeller to different places. `dataObject` is perfectly good
+      # BPMN that this engine does not execute; telling them it is an unknown element sends
+      # them hunting for a typo in a word they spelled correctly.
+      xml = ~s(<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL">
+        <bpmn2:process id="P" isExecutable="true">
+          <bpmn2:startEvent id="S"><bpmn2:outgoing>F</bpmn2:outgoing></bpmn2:startEvent>
+          <bpmn2:dataObject id="D" name="Invoice"/>
+          <bpmn2:endEvent id="E"><bpmn2:incoming>F</bpmn2:incoming></bpmn2:endEvent>
+          <bpmn2:sequenceFlow id="F" sourceRef="S" targetRef="E"/>
+        </bpmn2:process>
+      </bpmn2:definitions>)
+
+      assert {:error, errors} = Compiler.compile(xml)
+
+      message =
+        errors
+        |> Enum.filter(&(&1.path == "D"))
+        |> Enum.map_join(" ", & &1.message)
+
+      assert message =~ "not supported"
+      refute message =~ "Unknown BPMN element"
     end
   end
 

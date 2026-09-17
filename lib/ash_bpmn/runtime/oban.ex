@@ -7,6 +7,8 @@ defmodule AshBpmn.Runtime.Oban do
 
   When `AshBpmn.Config.oban_testing() == :inline`:
     * `insert/3` without `scheduled_at` — executes `worker.perform/1` synchronously.
+    * `unique:` is **not** honoured; see the comment on `insert_inline/3` for why
+      implementing it would not make the only two callers testable.
     * `insert/3` with `scheduled_at` — stores in TestJobs ETS table (does NOT execute).
     * `cancel_job/1` — removes from TestJobs.
 
@@ -96,6 +98,21 @@ defmodule AshBpmn.Runtime.Oban do
 
   # ── Inline mode ──────────────────────────────────────────────────────────
 
+  # `unique:` is read by production and ignored here, and that is a limitation rather than an
+  # oversight -- but it is one that has to be written down, because the obvious fix is worse
+  # than the gap.
+  #
+  # Inline mode has no queue. An immediate job goes straight from insert to executed; it is
+  # never `:available` and never `:scheduled`. Both callers that pass `unique:` restrict it to
+  # exactly those states (`triggers/nudge.ex` and `triggers/sweep_worker.ex`), so a faithful
+  # inline implementation would correctly dedupe nothing and the two tests anyone would write
+  # against it -- "the second nudge inside five seconds is dropped" -- still could not pass.
+  #
+  # The trap is what comes next: faced with a test that will not go green, the temptation is
+  # to widen the states until it does, at which point inline dedupes where production does
+  # not and the suite is asserting a behaviour the system does not have. Better an
+  # acknowledged blind spot than a green test for a fiction. The debounce is production
+  # behaviour and needs a test with a real Oban queue behind it.
   defp insert_inline(worker_module, args, opts) do
     AshBpmn.Runtime.Oban.TestJobs.ensure_started()
 
