@@ -46,6 +46,23 @@ defmodule AshBpmn.Resources.Token do
       postgres do
         table unquote(table)
         repo unquote(repo)
+
+        custom_indexes do
+          # Declared here rather than only in a migration because a host instantiating this
+          # resource gets its schema from `mix ash.codegen`, and an index that exists only in
+          # ash_bpmn's own test migrations would reach nobody's production database.
+          #
+          # Partial, on purpose: the correlator asks "which tokens are parked waiting for
+          # something like this?" once per matching event. Over the full table that is a scan
+          # of every token ever created, nearly all of them consumed; restricted to
+          # `status = 'waiting'` it is proportional to the tokens actually parked.
+          #
+          # Under attribute multitenancy AshPostgres prepends `organization_id` to the key
+          # list, so the tenant copy comes out tenant-leading without being written twice.
+          index [:subscription_signature, :instance_id],
+            where: "status = 'waiting'",
+            name: "#{unquote(table)}_waiting_index"
+        end
       end
 
       if unquote(tenant?) do
@@ -77,8 +94,16 @@ defmodule AshBpmn.Resources.Token do
           public? true
         end
 
+        # `:waiting` is not a flavour of `:executing`, and the distinction is load-bearing.
+        #
+        # A token at a catch node is *parked*: no job is queued for it, nothing will advance it
+        # until an event arrives, and that is a correct steady state it may sit in for months.
+        # An `:executing` token is mid-flight and its job is either running or lost. Collapsing
+        # the two -- which is what parking as `:executing` did -- makes "stuck" and "waiting"
+        # indistinguishable, which is why `Runtime.SweepWorker` recovers only `:active` tokens
+        # and silently abandons both.
         attribute :status, :atom do
-          constraints one_of: [:active, :executing, :consumed, :dead]
+          constraints one_of: [:active, :executing, :waiting, :consumed, :dead]
           default :active
           allow_nil? false
           public? true
@@ -109,6 +134,46 @@ defmodule AshBpmn.Resources.Token do
         attribute :routing, :map do
           default %{}
           public? true
+        end
+
+        # ── The waiting state ────────────────────────────────────────────────
+        #
+        # Routing data, not business data: usage rule 5's boundary explicitly includes
+        # correlation keys. A parked token records *what it is listening for*, never what the
+        # subject said.
+
+        attribute :parked_at, :utc_datetime_usec do
+          public? true
+          description "When this token began waiting. Diagnostics, and the age of a stuck wait."
+        end
+
+        # Frozen at park, on purpose. The key is computed once from the subject as it was when
+        # the token arrived, so a subject edited while the token waits cannot silently change
+        # what the token is listening for -- which would be a correlation that works or fails
+        # depending on when you look.
+        attribute :correlation_key, :string do
+          public? true
+          description "The value an arriving event's key must equal. Computed once, at park."
+        end
+
+        # A coarse hash of (kind, resource, action) the correlator filters on before it
+        # evaluates anything. Waiting tokens are not indexed in ETS the way subscriptions are
+        # -- they are queried per matching event -- so this plus a partial index on
+        # `status = :waiting` is what keeps that query bounded by the number of *waiting*
+        # tokens rather than by the number of tokens.
+        attribute :subscription_signature, :string do
+          public? true
+          description "Coarse match key the correlator queries on. Not a substitute for the guard."
+        end
+
+        attribute :lookback_until, :utc_datetime_usec do
+          public? true
+
+          description """
+          Watermark for a subscription declaring `lookback`: events at or after this instant are
+          eligible to wake this token even though they arrived before it parked. Nil means
+          BPMN-strict -- an event that arrived first is missed, which is the default.
+          """
         end
 
         if unquote(tenant?) do
@@ -163,11 +228,42 @@ defmodule AshBpmn.Resources.Token do
           change AshBpmn.Resources.Token.IncrementAttempts
         end
 
+        # Parking is a transition out of `:executing`, like consuming is -- the token has been
+        # claimed and processed, and the outcome is "wait" rather than "move on". Guarded for
+        # the same reason every other transition is: `changeset.data.status` is the *current*
+        # status, and reading it through `get_attribute/2` would return the value this action is
+        # about to write and make the guard trivially self-satisfying.
+        update :park do
+          accept [:correlation_key, :subscription_signature, :lookback_until]
+          require_atomic? false
+
+          validate AshBpmn.Resources.Token.StatusIsExecuting
+          change set_attribute(:status, :waiting)
+          change set_attribute(:parked_at, &DateTime.utc_now/0)
+        end
+
+        # The wake. A *distinct* action from `:claim` so an advance worker can never race a
+        # normal claim into a parked token: `:claim` admits only `:active`, this admits only
+        # `:waiting`, and the two cannot be confused for one another at the call site or in the
+        # audit log. First delivery wins; a redelivery of the same event finds the token no
+        # longer `:waiting` and loses, which is what makes catch delivery redelivery-safe
+        # without a lock.
+        update :claim_waiting do
+          accept []
+          require_atomic? false
+
+          validate AshBpmn.Resources.Token.StatusIsWaiting
+          change AshBpmn.Resources.Token.EnsureWaitingInDb
+          change set_attribute(:status, :executing)
+          change AshBpmn.Resources.Token.ClearWaitingFields
+          change AshBpmn.Resources.Token.IncrementAttempts
+        end
+
         update :consume do
           accept []
           require_atomic? false
 
-          validate AshBpmn.Resources.Token.StatusIsExecuting
+          validate AshBpmn.Resources.Token.StatusIsExecutingOrWaiting
           change set_attribute(:status, :consumed)
         end
 
@@ -182,12 +278,15 @@ defmodule AshBpmn.Resources.Token do
 
           validate AshBpmn.Resources.Token.StatusIsDeadOrExecuting
           change set_attribute(:status, :active)
+          change AshBpmn.Resources.Token.ClearWaitingFields
         end
       end
 
       code_interface do
         define :create, action: :create
         define :claim, action: :claim
+        define :park, action: :park
+        define :claim_waiting, action: :claim_waiting
         define :consume, action: :consume
         define :kill, action: :kill
         define :reactivate, action: :reactivate
@@ -242,6 +341,66 @@ defmodule AshBpmn.Resources.Token.StatusIsDeadOrExecuting do
   end
 end
 
+defmodule AshBpmn.Resources.Token.StatusIsWaiting do
+  @moduledoc false
+  use Ash.Resource.Validation
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    if changeset.data.status == :waiting do
+      :ok
+    else
+      {:error, field: :status, message: "token must be waiting to be woken by an event"}
+    end
+  end
+end
+
+defmodule AshBpmn.Resources.Token.StatusIsExecutingOrWaiting do
+  @moduledoc false
+  use Ash.Resource.Validation
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    # Waiting is consumable because a parked token is a live branch, and live branches get
+    # pruned: an interrupting boundary event kills the activity it is attached to, a
+    # terminate end event ends every branch, and a cancelled instance ends all of them. A
+    # parked token that could only leave via its own event would make all three impossible.
+    if changeset.data.status in [:executing, :waiting] do
+      :ok
+    else
+      {:error, field: :status, message: "token must be executing or waiting to consume"}
+    end
+  end
+end
+
+defmodule AshBpmn.Resources.Token.ClearWaitingFields do
+  @moduledoc """
+  Blanks the parked-token columns when a token stops waiting.
+
+  Applied on the transitions back into a *running* state -- waking and reactivating -- and
+  deliberately not on the terminal ones. A consumed token that still says it waited for
+  `invoice-42` is history, and its status says plainly that the wait is over; a token that is
+  `:executing` while still advertising a correlation key is a claim about the present that is
+  no longer true, and the next person to query the table will believe it.
+
+  What the token waited for, and what woke it, belong in the process event log. The token
+  carries routing, not history -- the same line drawn for promoted signals.
+  """
+  use Ash.Resource.Change
+
+  @fields [:parked_at, :correlation_key, :subscription_signature, :lookback_until]
+
+  @impl true
+  def change(changeset, _opts, _context) do
+    Enum.reduce(@fields, changeset, &Ash.Changeset.force_change_attribute(&2, &1, nil))
+  end
+
+  @impl true
+  def atomic(_changeset, _opts, _context) do
+    {:atomic, Map.new(@fields, &{&1, nil})}
+  end
+end
+
 defmodule AshBpmn.Resources.Token.IncrementAttempts do
   @moduledoc false
   use Ash.Resource.Change
@@ -253,17 +412,33 @@ defmodule AshBpmn.Resources.Token.IncrementAttempts do
   end
 end
 
-defmodule AshBpmn.Resources.Token.EnsureActiveInDb do
+defmodule AshBpmn.Resources.Token.EnsureStatusInDb do
   @moduledoc """
-  Before-action check that reads the actual DB state to guarantee single-winner
-  claim semantics.  Prevents stale-data race where two processes both see
-  :active and both succeed.  If the record is no longer :active in the DB,
-  the claim is rejected with an error.
+  Before-action check that re-reads the row to guarantee single-winner semantics.
+
+  The validation on `changeset.data` is not enough on its own: `changeset.data` is whatever
+  the caller loaded, which may be arbitrarily stale. Two workers can both hold a token they
+  read as `:active`, both pass the validation, and both claim it. This closes that window by
+  reading the row again inside the action's transaction.
+
+  Takes the required status as an option so claiming an `:active` token and waking a
+  `:waiting` one share one implementation -- they are the same check over a different value,
+  and keeping them as one module means a fix to the race reaches both.
   """
   use Ash.Resource.Change
 
   @impl true
-  def change(changeset, _opts, _context) do
+  def init(opts) do
+    case opts[:status] do
+      status when is_atom(status) and not is_nil(status) -> {:ok, opts}
+      other -> {:error, "status must be an atom, got: #{inspect(other)}"}
+    end
+  end
+
+  @impl true
+  def change(changeset, opts, _context) do
+    required = opts[:status]
+
     Ash.Changeset.before_action(changeset, fn changeset ->
       pk = Map.get(changeset.data, :id)
 
@@ -272,29 +447,47 @@ defmodule AshBpmn.Resources.Token.EnsureActiveInDb do
       else
         scope = AshBpmn.Scope.from_changeset(changeset)
 
-        try do
-          current =
-            changeset.resource
-            |> Ash.Query.for_read(:read)
-            |> Ash.Query.filter(id == ^pk)
-            |> Ash.read_one!(AshBpmn.Scope.engine(scope))
+        # Deliberately narrow. The earlier version rescued everything, so a bad tenant, a
+        # policy forbid or a connection failure all presented as "could not verify token
+        # status" -- three quite different problems wearing one message. Ash's own errors are
+        # let through as themselves; only a genuinely absent or moved-on row is a race.
+        current =
+          changeset.resource
+          |> Ash.Query.for_read(:read)
+          |> Ash.Query.filter(id == ^pk)
+          |> Ash.read_one!(AshBpmn.Scope.engine(scope))
 
-          if current && current.status == :active do
-            changeset
-          else
-            Ash.Changeset.add_error(changeset,
-              field: :status,
-              message: "token is no longer active (concurrent modification)"
-            )
-          end
-        rescue
-          _ ->
-            Ash.Changeset.add_error(changeset,
-              field: :status,
-              message: "could not verify token status"
-            )
+        if current && current.status == required do
+          changeset
+        else
+          Ash.Changeset.add_error(changeset,
+            field: :status,
+            message:
+              "token is no longer #{required} (concurrent modification); found " <>
+                inspect(current && current.status)
+          )
         end
       end
     end)
+  end
+end
+
+defmodule AshBpmn.Resources.Token.EnsureActiveInDb do
+  @moduledoc false
+  use Ash.Resource.Change
+
+  @impl true
+  def change(changeset, _opts, context) do
+    AshBpmn.Resources.Token.EnsureStatusInDb.change(changeset, [status: :active], context)
+  end
+end
+
+defmodule AshBpmn.Resources.Token.EnsureWaitingInDb do
+  @moduledoc false
+  use Ash.Resource.Change
+
+  @impl true
+  def change(changeset, _opts, context) do
+    AshBpmn.Resources.Token.EnsureStatusInDb.change(changeset, [status: :waiting], context)
   end
 end
