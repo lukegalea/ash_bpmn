@@ -17,10 +17,13 @@ The compiler rejects, each with the offending element's id in the error:
   of 39,695 real-world models surveyed (Compagnucci et al., *BISE* 66(1), 2023):
   sequence flow, end event, start event, task, pool, lane — and the Common
   Executable conformance class is barely larger. ash_bpmn executes that subset:
-  start/end events, user/service tasks, exclusive and parallel gateways,
-  conditional and default flows. Call activities, ad-hoc and transactional
-  sub-processes, the event taxonomy beyond plain start/end, complex and
-  event-based gateways, compensation and loop markers: rejected, loudly. A
+  start events, end events — including terminate end events — user, service,
+  send and business rule tasks, intermediate catch events carrying a timer,
+  exclusive and parallel gateways, conditional and default flows. Call
+  activities, ad-hoc and transactional sub-processes, boundary and throw
+  events, the rest of the event-definition taxonomy (message, signal, error,
+  escalation, conditional, compensation, cancel, link), complex and
+  event-based gateways, loop and multi-instance markers: rejected, loudly. A
   notation element a business analyst drew and a system silently ignored is how
   the diagram and the system end up being about different processes.
 - **Multiple start events, zero end events, dangling flows, unreachable nodes,
@@ -31,6 +34,36 @@ The compiler rejects, each with the offending element's id in the error:
 - **Mixed parallel gateways** (forking *and* joining) — the token topology these
   create is where join deadlocks are born, and the honest answer is a separate
   fork node and join node, which the subset already provides.
+- **An event definition on a node type it is not supported on** — a
+  `timerEventDefinition` anywhere but an intermediate catch event, a
+  `terminateEventDefinition` anywhere but an end event. Accepting it would let a
+  diagram carry a marker the engine ignores, executing the node as though it
+  were not drawn — the silent-divergence failure the unsupported-element check
+  exists to prevent, arriving through the door marked "supported". The error
+  says where the definition *is* supported rather than ruling on whether the
+  drawing is legal BPMN: a timer start event is perfectly good BPMN this engine
+  does not implement, a terminate marker on a start event is not BPMN at all,
+  and the compiler has no business pretending to tell them apart.
+- **A catch event with nothing to catch** — an `intermediateCatchEvent` with no
+  event definition, or with more than one. The first parks a token that nothing
+  will ever wake: a deadlock, compiled and published. The compiler will not ship
+  a hang it can see in the document.
+- **Timer cycles and absolute dates** (`timeCycle`, `timeDate`). A catch event's
+  delay is `timeDuration` and nothing else. Both are named in the error rather
+  than falling through as unrecognized elements, because a modeller who drew a
+  cycle needs to be told that *cycles* are not supported, not that BPMN contains
+  no such element. Neither has an honest single-shot reading to approximate to: a
+  cycle says the node fires repeatedly and the nearest approximation fires once,
+  and an absolute date on a definition published months before the token arrives
+  is a deadline that may already be in the past. A timer that means something
+  other than what the diagram says is worse than one that will not compile.
+- **ISO 8601 durations measured in months or years.** `P1M` and `P1Y` are legal
+  ISO 8601 and are rejected anyway, because their length depends on when you
+  start counting: two instances that park a day apart fire a day and a bit apart,
+  and neither the diagram nor the event log says why. A modeller who wants a
+  month writes `P30D` and means it. A duration of zero is refused on the same
+  principle — a timer that waits for no time is a node drawn to do something it
+  does not do.
 - **Malformed `ash:` bindings** — unknown attributes or elements in the ash
   namespace, user tasks without candidates or outcomes, service tasks without an
   action reference, unparseable conditions. Typo protection: a `candiates`
@@ -49,9 +82,11 @@ The compiler rejects, each with the offending element's id in the error:
   process callers and bypassed by every other caller — the controller-layer
   authorization mistake in a new costume. Decisions, validations and
   authorization live in Ash actions; the graph orchestrates calls to them.
-- **Business data in tokens.** Tokens carry node ids and status. Reading the
-  subject fresh through Ash at execution time is what keeps the process from
-  becoming a second source of truth about the domain.
+- **Business data in tokens.** A token carries node ids, status, the scalars a
+  node explicitly promoted for routing, and — while parked — what it is
+  listening for. Never what the subject said. Reading the subject fresh through
+  Ash at execution time is what keeps the process from becoming a second source
+  of truth about the domain.
 - **`forbid_if` for maker-checker.** Subtraction belongs in candidate
   construction, not policy evaluation. See
   [assignment and maker-checker](assignment-and-maker-checker.md).

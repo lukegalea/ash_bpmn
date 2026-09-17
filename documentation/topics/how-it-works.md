@@ -35,7 +35,7 @@ BPMN XML ──parse──> elements ──verify──> errors (fix in the desi
 
 The snapshot holds nodes, flows, gateway conditions (as FEEL source text — see
 `AshBpmn.Feel` for why text rather than a parsed tree), join definitions,
-candidate/exclusion/timer specs, and the instance outcome of each end event. It is stored on the definition row, which is
+candidate/exclusion/timer specs, the delay on each timer catch event, and the instance outcome of each end event. It is stored on the definition row, which is
 **immutable once published**.
 
 Verification is why the runtime can be small. Exactly one start event; every node
@@ -67,11 +67,18 @@ the only things in an Ash stack that survive a deploy.
   `action`, subject, actor and tenant. It orchestrates; your Ash action decides,
   validates and authorizes.
 - A **user task** creates a `HumanTask` plus materialized `TaskCandidate` rows and
-  attaches remind/escalate/expire timers as Oban jobs. The token parks at
-  `:executing` until someone decides.
+  attaches remind/escalate/expire timers as Oban jobs. The token parks as
+  `:waiting` until someone decides.
 - **Completion** (claim → decide, or timer expiry) cancels the remaining timers,
   records the outcome as engine assigns, and advances the token through the
   outgoing gateway with `task.outcome` available to conditions.
+- An **intermediate catch event** parks the token the same way and schedules its
+  own wake. Today the only thing it waits for is time: an ISO 8601 duration read
+  off `bpmn:timeDuration`, held as an Oban job with a `scheduled_at`, so a
+  fortnight-long wait is a database row rather than something a deploy cancels.
+- A **terminate end event** ends the instance instead of its own branch: every
+  other live token — running or parked — is killed where it stands, and the kill
+  is an event naming the tokens and the nodes they died on.
 
 Failure semantics are boring on purpose: a node error retries with Oban backoff
 until `max_attempts`, then the instance is marked `:failed` and the event log says

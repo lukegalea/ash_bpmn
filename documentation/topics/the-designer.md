@@ -170,6 +170,14 @@ way vendors from Camunda to Flowable attach execution bindings to a diagram.
 | `ash:exclusion who="..."` | userTask config | a maker-checker subtraction |
 | `ash:timer kind hours/days/minutes` | userTask config | remind / escalate / expire |
 
+Not everything executable needs an `ash:` binding. A timer catch event carries
+its whole configuration in plain BPMN — a `bpmn:timerEventDefinition` holding a
+`bpmn:timeDuration` — and a terminate end event is a
+`bpmn:terminateEventDefinition` on the end event and nothing more. Both are drawn
+with bpmn-js's own replace menu, which is the point: an element BPMN already
+spells, and every modelling tool already writes, is not worth respelling in a
+vendor namespace only this engine can read.
+
 Candidate and exclusion specs are **opaque strings** to ash_bpmn. `kind="manager_of"
 of="subject.created_by_id"` means whatever your `AshBpmn.AssignmentResolver` says
 it means — the library refuses to know what a manager is, for the same reason it
