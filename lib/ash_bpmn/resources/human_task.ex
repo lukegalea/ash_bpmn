@@ -203,6 +203,7 @@ defmodule AshBpmn.Resources.HumanTask do
 
           validate AshBpmn.Resources.HumanTask.StatusIsClaimed
           validate AshBpmn.Resources.HumanTask.RequireOutcome
+          change AshBpmn.Resources.HumanTask.EnsureClaimedInDb
           change set_attribute(:status, :completed)
         end
 
@@ -211,6 +212,7 @@ defmodule AshBpmn.Resources.HumanTask do
           require_atomic? false
 
           validate AshBpmn.Resources.HumanTask.StatusIsOpenOrClaimed
+          change AshBpmn.Resources.HumanTask.EnsureOpenOrClaimedInDb
           change set_attribute(:status, :cancelled)
         end
 
@@ -231,6 +233,7 @@ defmodule AshBpmn.Resources.HumanTask do
           require_atomic? false
 
           validate AshBpmn.Resources.HumanTask.StatusIsOpenOrClaimed
+          change AshBpmn.Resources.HumanTask.EnsureOpenOrClaimedInDb
           change set_attribute(:status, :completed)
           change set_attribute(:decided_by_id, nil)
         end
@@ -309,6 +312,89 @@ defmodule AshBpmn.Resources.HumanTask.StatusIsClaimed do
     else
       {:error, field: :status, message: "task must be claimed"}
     end
+  end
+end
+
+defmodule AshBpmn.Resources.HumanTask.EnsureStatusInDb do
+  @moduledoc """
+  Re-reads the task row inside the action's transaction and refuses the transition unless it
+  is still in one of the given statuses.
+
+  The validations beside this read `changeset.data.status`, which is as stale as whenever the
+  caller last loaded the row. That was tolerable while a task only ever moved because a person
+  moved it; it stopped being tolerable when interrupting boundary events arrived, because a
+  boundary firing and a person deciding are now genuinely concurrent, and both would pass a
+  check against their own stale copy. The same defect, and the same fix, as
+  `AshBpmn.Resources.Token.EnsureStatusInDb`.
+
+  Applied to `:cancel`, `:complete` and `:force_complete` together on purpose: guarding only
+  the cancel would let a completion overwrite a cancel that had already won.
+  """
+  use Ash.Resource.Change
+
+  @impl true
+  def init(opts) do
+    if is_list(opts[:status]) and opts[:status] != [] do
+      {:ok, opts}
+    else
+      {:error, "status must be a non-empty list of atoms"}
+    end
+  end
+
+  @impl true
+  def change(changeset, opts, _context) do
+    allowed = opts[:status]
+
+    Ash.Changeset.before_action(changeset, fn changeset ->
+      pk = Map.get(changeset.data, :id)
+
+      if is_nil(pk) do
+        changeset
+      else
+        scope = AshBpmn.Scope.from_changeset(changeset)
+
+        current =
+          changeset.resource
+          |> Ash.Query.for_read(:read)
+          |> Ash.Query.filter(id == ^pk)
+          |> Ash.read_one!(AshBpmn.Scope.engine(scope))
+
+        if current && current.status in allowed do
+          changeset
+        else
+          Ash.Changeset.add_error(changeset,
+            field: :status,
+            message:
+              "task is no longer #{Enum.join(allowed, " or ")} (concurrent modification); " <>
+                "found #{inspect(current && current.status)}"
+          )
+        end
+      end
+    end)
+  end
+end
+
+defmodule AshBpmn.Resources.HumanTask.EnsureOpenOrClaimedInDb do
+  @moduledoc false
+  use Ash.Resource.Change
+
+  @impl true
+  def change(changeset, _opts, context) do
+    AshBpmn.Resources.HumanTask.EnsureStatusInDb.change(
+      changeset,
+      [status: [:open, :claimed]],
+      context
+    )
+  end
+end
+
+defmodule AshBpmn.Resources.HumanTask.EnsureClaimedInDb do
+  @moduledoc false
+  use Ash.Resource.Change
+
+  @impl true
+  def change(changeset, _opts, context) do
+    AshBpmn.Resources.HumanTask.EnsureStatusInDb.change(changeset, [status: [:claimed]], context)
   end
 end
 

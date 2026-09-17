@@ -87,6 +87,9 @@ defmodule AshBpmn.Runtime.Interpreter do
       "intermediateCatchEvent" ->
         intermediate_catch_event(graph, node_id, node, ctx)
 
+      "boundaryEvent" ->
+        boundary_event(graph, node_id, node, ctx)
+
       other ->
         {:error, "unsupported node type: #{other}"}
     end
@@ -533,7 +536,7 @@ defmodule AshBpmn.Runtime.Interpreter do
 
   # ── userTask ─────────────────────────────────────────────────────────────
 
-  defp user_task(_graph, node_id, node, ctx) do
+  defp user_task(graph, node_id, node, ctx) do
     resolver = AshBpmn.Config.assignment_resolver!()
     instance = ctx[:instance]
     token = ctx[:token]
@@ -577,7 +580,8 @@ defmodule AshBpmn.Runtime.Interpreter do
       events: [event_attrs(ctx, node_id, :task_created)],
       tasks: [{task_ref, task_attrs}],
       candidates: {task_ref, candidate_attrs},
-      timers: {task_ref, timer_jobs(node["timers"] || [])}
+      timers: {task_ref, timer_jobs(node["timers"] || [])},
+      jobs: boundary_timer_jobs(graph, node_id, ctx)
     ]
 
     {:ok, effects}
@@ -637,6 +641,21 @@ defmodule AshBpmn.Runtime.Interpreter do
        "token_id" => ctx[:token].id,
        "node_id" => node_id
      }, [scheduled_at: DateTime.add(DateTime.utc_now(), seconds, :second)]}
+  end
+
+  # ── boundaryEvent ────────────────────────────────────────────────────────
+
+  # By the time a token is here the interruption has already happened: `BoundaryTimerWorker`
+  # cancelled the task, killed the activity's token and minted this one. So this clause is an
+  # ordinary "leave by the one outgoing flow", the same shape as a start event -- the boundary
+  # is a point on a path, and the compiler guarantees it has exactly one way out.
+  defp boundary_event(graph, node_id, _node, ctx) do
+    effects = [
+      consume_token: true,
+      events: [event_attrs(ctx, node_id, :node_entered)]
+    ]
+
+    {:ok, effects ++ follow_flows(graph, find_outgoing_flows(graph, node_id), ctx)}
   end
 
   # ── exclusiveGateway ─────────────────────────────────────────────────────
@@ -774,6 +793,40 @@ defmodule AshBpmn.Runtime.Interpreter do
   end
 
   # ── Timer helpers ────────────────────────────────────────────────────────
+
+  # One job per boundary attached to this task, armed at the moment the token arrives.
+  #
+  # `graph["boundaries"]` is nil on every definition published before boundaries existed, and
+  # those snapshots are immutable and still executing -- so the `|| %{}` is required, not
+  # defensive habit.
+  #
+  # The args deliberately avoid the key `"node_id"`. `AdvanceWorker.apply_effects/3` rewrites
+  # `args["token_id"]` for any job whose `args["node_id"]` names a token it just created; that
+  # is a no-op today because nothing mints a token at the boundary, but it is a rewrite lying
+  # in wait for the first change that does, and it would substitute the wrong token into a
+  # timer that has no way to notice.
+  defp boundary_timer_jobs(graph, node_id, ctx) do
+    (graph["boundaries"] || %{})
+    |> Map.get(node_id, [])
+    |> Enum.map(fn boundary_id ->
+      seconds = get_in(graph, ["nodes", boundary_id, "catch", "seconds"])
+
+      {AshBpmn.Runtime.BoundaryTimerWorker,
+       %{
+         "instance_id" => ctx[:instance].id,
+         "token_id" => ctx[:token].id,
+         "boundary_id" => boundary_id,
+         "attached_to" => node_id
+       },
+       [
+         scheduled_at: DateTime.add(DateTime.utc_now(), seconds, :second),
+         # Tagged so `AshBpmn.Runtime.Oban.cancel_all/1` can find every boundary timer for a
+         # token when the task is decided -- the first production caller of a function built
+         # for exactly this and until now used only by its own test.
+         meta: AshBpmn.Runtime.Oban.timer_meta(%{token_id: ctx[:token].id, kind: "boundary"})
+       ]}
+    end)
+  end
 
   # The worker fills in "task_id" once the task row exists.
   defp timer_jobs(timers) do

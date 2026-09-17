@@ -385,7 +385,36 @@ defmodule AshBpmn do
         record_task_event(resources, task, :timer_cancelled, %{"job_ids" => job_ids}, scope)
     end
 
+    cancel_boundary_timers(resources, task, scope)
     cancel_ledger_rows(resources, task, reason, scope)
+  end
+
+  # A boundary timer belongs to the token, not to the task, so its id is not in
+  # `task.timer_job_ids` and it survives everything that cancellation loop does. Left armed,
+  # it fires hours after the approval was decided and tries to interrupt an activity that has
+  # already finished -- it would lose at the claim, but only after cancelling a completed
+  # task's siblings and writing a misleading row.
+  #
+  # Cancelled by owner through the meta index rather than by id, which is what
+  # `AshBpmn.Runtime.Oban.cancel_all/1` was built for.
+  defp cancel_boundary_timers(resources, task, scope) do
+    if task.token_id do
+      case AshBpmn.Runtime.Oban.cancel_all(%{"token_id" => task.token_id, "kind" => "boundary"}) do
+        {:ok, 0} ->
+          :ok
+
+        {:ok, count} ->
+          record_task_event(
+            resources,
+            task,
+            :timer_cancelled,
+            %{"kind" => "boundary", "cancelled" => count},
+            scope
+          )
+      end
+    end
+
+    :ok
   end
 
   defp cancel_ledger_rows(resources, task, reason, scope) do

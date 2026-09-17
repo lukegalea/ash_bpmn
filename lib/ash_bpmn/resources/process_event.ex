@@ -132,6 +132,10 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         # they were killed. An auditor asking why a parallel branch has no
                         # completion event needs this row to exist.
                         :instance_terminated,
+                        # An interrupting boundary event cut an activity's branch off. It is
+                        # the answer to the question an auditor actually asks about such a
+                        # branch: why does it have a cancelled task and no completion?
+                        :activity_interrupted,
                         # A business rule task invoked a decision. Carries the decision
                         # reference, its version and which rules fired -- never the decision's
                         # full output, which belongs to the decision layer's own record.

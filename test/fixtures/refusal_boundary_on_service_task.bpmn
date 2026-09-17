@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+Attached to a service task, whose token is executing inside a running job. Oban cannot
+interrupt a running job and a committed Ash action cannot be un-run.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_refusal_boundary_on_service_task"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_refusal_boundary_on_service_task" name="Boundary timer" isExecutable="true">
+
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>Flow_1</bpmn2:outgoing></bpmn2:startEvent>
+
+    <bpmn2:userTask id="Approve_1" name="Approve">
+      <bpmn2:extensionElements>
+        <ash:taskConfig>
+          <ash:candidates>
+            <ash:candidate kind="role" of="approver"/>
+          </ash:candidates>
+          <ash:outcomes>
+            <ash:outcome name="approved"/>
+            <ash:outcome name="rejected"/>
+          </ash:outcomes>
+        </ash:taskConfig>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_Decided</bpmn2:outgoing>
+    </bpmn2:userTask>
+
+    <bpmn2:boundaryEvent id="Boundary_1" name="Too slow" attachedToRef="Escalate">
+      <bpmn2:outgoing>Flow_Escalate</bpmn2:outgoing>
+      <bpmn2:timerEventDefinition id="Timer_1">
+        <bpmn2:timeDuration xsi:type="bpmn2:tFormalExpression">PT4H</bpmn2:timeDuration>
+      </bpmn2:timerEventDefinition>
+    </bpmn2:boundaryEvent>
+
+    <bpmn2:serviceTask id="Escalate" name="Escalate">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="escalate_it"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Escalate</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_EscalateOut</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>Flow_Decided</bpmn2:incoming></bpmn2:endEvent>
+    <bpmn2:endEvent id="End_2"><bpmn2:incoming>Flow_EscalateOut</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Approve_1"/>
+    <bpmn2:sequenceFlow id="Flow_Decided" sourceRef="Approve_1" targetRef="End_1"/>
+    <bpmn2:sequenceFlow id="Flow_Escalate" sourceRef="Boundary_1" targetRef="Escalate"/>
+    <bpmn2:sequenceFlow id="Flow_EscalateOut" sourceRef="Escalate" targetRef="End_2"/>
+  </bpmn2:process>
+</bpmn2:definitions>

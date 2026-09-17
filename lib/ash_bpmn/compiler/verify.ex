@@ -42,6 +42,10 @@ defmodule AshBpmn.Compiler.Verify do
     #    the callable's action
     errors = errors ++ verify_call_bindings(nodes)
 
+    # 10. Boundary events: attached to a node that exists and can actually be interrupted,
+    #     entered only by that interruption, and leaving by exactly one flow.
+    errors = errors ++ verify_boundary_events(nodes, flows)
+
     errors
   end
 
@@ -272,6 +276,21 @@ defmodule AshBpmn.Compiler.Verify do
       flows
       |> Enum.group_by(fn {_fid, f} -> f["from"] end, fn {_fid, f} -> f["to"] end)
 
+    # A boundary event has no incoming flow -- it is entered by its activity being
+    # interrupted -- so plain flow adjacency would report every boundary unreachable. The
+    # activity-to-boundary edge is folded in here and deliberately NOT written back into
+    # `graph["flows"]`: an activity with a real second outgoing flow stops matching
+    # `fallback: :single_unconditioned`, and ordinary task completion would then select no
+    # flow and raise. This map is local to reachability and nothing else reads it.
+    outgoing =
+      Enum.reduce(nodes, outgoing, fn
+        {id, %{"type" => "boundaryEvent", "attached_to" => attached}}, acc ->
+          Map.update(acc, attached, [id], &[id | &1])
+
+        _node, acc ->
+          acc
+      end)
+
     # BFS from start to find reachable nodes
     reachable = bfs_reachable(start, outgoing)
 
@@ -431,6 +450,108 @@ defmodule AshBpmn.Compiler.Verify do
         []
     end
   end
+
+  # Everything structural about a boundary event, refused at publish rather than discovered
+  # at three in the morning.
+  #
+  # Attachment is restricted to `userTask`, and that is a real limit rather than a first cut.
+  # A service task's token is `:executing` inside a running Oban job: Oban cannot interrupt a
+  # running job, and an Ash action that has already committed cannot be un-run -- that is
+  # compensation, which this library refuses outright. "Interrupting" such an activity would
+  # mean killing the token while the work carried on, which is a lie the diagram would be
+  # telling.
+  defp verify_boundary_events(nodes, flows) do
+    nodes
+    |> Enum.filter(fn {_id, node} -> node["type"] == "boundaryEvent" end)
+    |> Enum.flat_map(fn {id, node} -> boundary_errors(id, node, nodes, flows) end)
+  end
+
+  defp boundary_errors(id, node, nodes, flows) do
+    ref = node["attached_to"]
+    attached = nodes[ref]
+
+    outgoing = Enum.count(flows, fn {_fid, f} -> f["from"] == id end)
+    incoming = Enum.filter(flows, fn {_fid, f} -> f["to"] == id end)
+
+    attachment_errors(id, ref, attached) ++
+      outgoing_errors(id, outgoing) ++
+      incoming_errors(id, incoming) ++
+      expire_conflict_errors(id, ref, attached)
+  end
+
+  defp attachment_errors(id, ref, nil),
+    do: [
+      Errors.error(
+        id,
+        "boundaryEvent '#{id}' attaches to '#{ref}', which is not a node in this process"
+      )
+    ]
+
+  defp attachment_errors(_id, _ref, %{"type" => "userTask"}), do: []
+
+  defp attachment_errors(id, _ref, %{"type" => type}),
+    do: [
+      Errors.error(
+        id,
+        "boundaryEvent '#{id}' is attached to a #{type}; interrupting boundary events are " <>
+          "supported on: userTask. A task whose work is already running cannot be " <>
+          "interrupted without either lying about it or compensating for it"
+      )
+    ]
+
+  defp outgoing_errors(_id, 1), do: []
+
+  defp outgoing_errors(id, 0),
+    do: [
+      Errors.error(
+        id,
+        "boundaryEvent '#{id}' has no outgoing sequenceFlow; the interruption would have " <>
+          "nowhere to go"
+      )
+    ]
+
+  defp outgoing_errors(id, count),
+    do: [
+      Errors.error(
+        id,
+        "boundaryEvent '#{id}' has #{count} outgoing sequenceFlows; a boundary event is a " <>
+          "point on a path, not a gateway. With more than one the branch would be picked by " <>
+          "flow-id sort order"
+      )
+    ]
+
+  defp incoming_errors(_id, []), do: []
+
+  defp incoming_errors(id, [{fid, _f} | _]),
+    do: [
+      Errors.error(
+        id,
+        "boundaryEvent '#{id}' has an incoming sequenceFlow '#{fid}'; a boundary event is " <>
+          "entered by its activity being interrupted, never by a flow"
+      )
+    ]
+
+  # An `ash:timer kind="expire"` and an interrupting timer boundary are two different answers
+  # to "what happens when this runs out of time", and they route to different places: expire
+  # leaves down the task's own flow with `outcome: :expired` for a following gateway to read,
+  # the boundary leaves down its own flow with no outcome at all. Whichever fired first would
+  # win. Neither can be silently preferred, so carrying both is refused.
+  defp expire_conflict_errors(id, ref, %{"type" => "userTask"} = attached) do
+    if Enum.any?(attached["timers"] || [], &(&1["kind"] == "expire")) do
+      [
+        Errors.error(
+          id,
+          ~s(boundaryEvent '#{id}' attaches to userTask '#{ref}', which also declares an ) <>
+            ~s(ash:timer kind="expire". Both answer "what happens when time runs out" and ) <>
+            ~s(they route differently, so whichever fired first would win. Keep one)
+        )
+      ]
+    else
+      []
+    end
+  end
+
+  defp expire_conflict_errors(_id, _ref, _attached), do: []
 
   defp verify_parallel_gateways(nodes, flows, joins) do
     nodes

@@ -19,9 +19,10 @@ The compiler rejects, each with the offending element's id in the error:
   Executable conformance class is barely larger. ash_bpmn executes that subset:
   start events, end events — including terminate end events — user, service,
   send and business rule tasks, intermediate catch events carrying a timer,
-  exclusive and parallel gateways, conditional and default flows. Call
-  activities, ad-hoc and transactional sub-processes, boundary and throw
-  events, the rest of the event-definition taxonomy (message, signal, error,
+  interrupting timer boundary events on user tasks, exclusive and parallel
+  gateways, conditional and default flows. Call activities, ad-hoc and
+  transactional sub-processes, throw events,
+  the rest of the event-definition taxonomy (message, signal, error,
   escalation, conditional, compensation, cancel, link), complex and
   event-based gateways, loop and multi-instance markers: rejected, loudly. A
   notation element a business analyst drew and a system silently ignored is how
@@ -35,7 +36,8 @@ The compiler rejects, each with the offending element's id in the error:
   create is where join deadlocks are born, and the honest answer is a separate
   fork node and join node, which the subset already provides.
 - **An event definition on a node type it is not supported on** — a
-  `timerEventDefinition` anywhere but an intermediate catch event, a
+  `timerEventDefinition` anywhere but an intermediate catch event or a
+  boundary event, a
   `terminateEventDefinition` anywhere but an end event. Accepting it would let a
   diagram carry a marker the engine ignores, executing the node as though it
   were not drawn — the silent-divergence failure the unsupported-element check
@@ -64,6 +66,29 @@ The compiler rejects, each with the offending element's id in the error:
   month writes `P30D` and means it. A duration of zero is refused on the same
   principle — a timer that waits for no time is a node drawn to do something it
   does not do.
+- **Non-interrupting boundary events** (`cancelActivity="false"`). One of these
+  starts a second branch while the activity carries on, and the engine has no
+  token topology for that: there is no fork relating the two branches and no
+  join that could ever reunite them. A diagram that draws one is describing
+  concurrency the engine would not provide.
+- **Boundary events on anything but a user task.** A service task's token is
+  executing inside a running job. Oban cannot interrupt a running job and an Ash
+  action that has already committed cannot be un-run — that is compensation,
+  which this library refuses outright. "Interrupting" such an activity would
+  mean killing the token while the work carried on, which is a lie the diagram
+  would be telling on the engine's behalf. Also refused: a boundary attached to
+  an id that is not in the process, one with an incoming sequence flow (a
+  boundary is entered by its activity being interrupted, never by a flow), and
+  one with zero or several outgoing flows — zero is an interruption with nowhere
+  to go, and several make the boundary an implicit gateway whose branch is
+  chosen by flow-id sort order.
+- **A user task carrying both an `ash:timer kind="expire"` and an interrupting
+  timer boundary.** Both answer "what happens when this runs out of time" and
+  they route to different places: expire leaves down the task's own flow with
+  `outcome: :expired` for a following gateway to read, the boundary leaves down
+  its own flow with no outcome at all. Whichever fired first would win, and
+  neither can be silently preferred over the other, so carrying both is refused
+  rather than resolved.
 - **Malformed `ash:` bindings** — unknown attributes or elements in the ash
   namespace, user tasks without candidates or outcomes, service tasks without an
   action reference, unparseable conditions. Typo protection: a `candiates`

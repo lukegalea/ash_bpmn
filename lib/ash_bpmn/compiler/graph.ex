@@ -53,6 +53,7 @@ defmodule AshBpmn.Compiler.Graph do
       # Determine start and build joins for parallel gateways
       start_node = find_start(nodes)
       joins = build_joins(nodes, flows)
+      boundaries = build_boundaries(nodes)
 
       graph = %{
         "process_id" => process_id,
@@ -60,6 +61,7 @@ defmodule AshBpmn.Compiler.Graph do
         "nodes" => nodes,
         "flows" => flows,
         "joins" => joins,
+        "boundaries" => boundaries,
         # Conditions are stored as source text so an in-flight instance keeps
         # evaluating across engine upgrades -- but *which* engine validated
         # them at publish time is a fact about the definition, stamped here so
@@ -138,7 +140,7 @@ defmodule AshBpmn.Compiler.Graph do
   # check exists to prevent, arriving through the door marked "supported".
   @implemented_event_definitions %{
     "terminateEventDefinition" => ["endEvent"],
-    "timerEventDefinition" => ["intermediateCatchEvent"]
+    "timerEventDefinition" => ["intermediateCatchEvent", "boundaryEvent"]
   }
 
   # Children of a `timerEventDefinition`. Only `timeDuration` is implemented; the other two are
@@ -159,7 +161,7 @@ defmodule AshBpmn.Compiler.Graph do
     callActivity subProcess adHocSubProcess transaction
     receiveTask scriptTask manualTask task
     complexGateway eventBasedGateway
-    intermediateThrowEvent boundaryEvent
+    intermediateThrowEvent
   ))
 
   defp check_unsupported_process_children(process_xml, _supported_nodes, _flows_xml) do
@@ -609,6 +611,31 @@ defmodule AshBpmn.Compiler.Graph do
   # what BPMN specifies and what every modelling tool writes. Inventing `hours="4"` here would
   # mean a diagram drawn in Camunda or bpmn.io carries a delay this compiler cannot see -- the
   # single-artifact rule turned inside out.
+  # A boundary event attaches to an activity rather than sitting on a sequence flow: when it
+  # fires, the activity is interrupted and the branch leaves through the boundary's own flow.
+  #
+  # It is compiled as an ordinary entry in `nodes`, carrying `attached_to`, with a derived
+  # `boundaries` index built beside `joins`. Keeping it out of `nodes` is the tempting shape
+  # and breaks immediately: `build_flow/2` resolves every sequence flow's `sourceRef` against
+  # `nodes`, so the boundary's own outgoing flow would fail with an error about the *flow*
+  # referencing a non-existent source -- pointing the modeller away from the boundary.
+  defp build_node_config(node, "boundaryEvent") do
+    id = Xml.element_attr(node, "id")
+    ref = Xml.element_attr(node, "attachedToRef")
+
+    definitions =
+      node
+      |> Xml.get_element_children()
+      |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "timerEventDefinition"))
+
+    with :ok <- check_attached_ref(id, ref),
+         :ok <- check_cancel_activity(id, Xml.element_attr(node, "cancelActivity")),
+         {:ok, definition} <- single_boundary_definition(id, definitions),
+         {:ok, %{"catch" => spec}} <- build_timer_catch(id, definition) do
+      {:ok, %{"attached_to" => String.trim(ref), "catch" => spec}}
+    end
+  end
+
   defp build_node_config(node, "intermediateCatchEvent") do
     id = Xml.element_attr(node, "id")
 
@@ -644,6 +671,59 @@ defmodule AshBpmn.Compiler.Graph do
 
   defp build_node_config(_node, type) when type in ["startEvent", "parallelGateway"] do
     {:ok, %{}}
+  end
+
+  defp check_attached_ref(id, ref) when is_binary(ref) do
+    if String.trim(ref) == "" do
+      {:error, Errors.error(id, "boundaryEvent '#{id}' has an empty attachedToRef")}
+    else
+      :ok
+    end
+  end
+
+  defp check_attached_ref(id, _ref) do
+    {:error,
+     Errors.error(
+       id,
+       "boundaryEvent '#{id}' has no attachedToRef; a boundary event with nothing to " <>
+         "attach to is a decoration the diagram presents as control flow"
+     )}
+  end
+
+  # `cancelActivity` defaults to true, which is the interrupting case and the only one
+  # supported. Non-interrupting is refused by name rather than ignored: it spawns a second
+  # branch while the activity keeps running, and the engine has no token topology for that --
+  # no fork relating the two and no join that could reunite them.
+  defp check_cancel_activity(_id, value) when value in [nil, "true", "1"], do: :ok
+
+  defp check_cancel_activity(id, value) when value in ["false", "0"] do
+    {:error,
+     Errors.error(
+       id,
+       "boundaryEvent '#{id}' is non-interrupting (cancelActivity=\"false\"), which is not " <>
+         "supported: it would run a second branch alongside the activity, and there is no " <>
+         "join that could ever reunite them"
+     )}
+  end
+
+  defp check_cancel_activity(id, value) do
+    {:error,
+     Errors.error(id, "boundaryEvent '#{id}' has a non-boolean cancelActivity '#{value}'")}
+  end
+
+  defp single_boundary_definition(_id, [definition]), do: {:ok, definition}
+
+  defp single_boundary_definition(id, []) do
+    {:error,
+     Errors.error(
+       id,
+       "boundaryEvent '#{id}' has no event definition; it would attach to the activity and " <>
+         "never fire. Supported: timerEventDefinition"
+     )}
+  end
+
+  defp single_boundary_definition(id, _many) do
+    {:error, Errors.error(id, "boundaryEvent '#{id}' has more than one event definition")}
   end
 
   defp build_timer_catch(id, definition) do
@@ -1168,6 +1248,15 @@ defmodule AshBpmn.Compiler.Graph do
     nodes
     |> Enum.find(fn {_id, node} -> node["type"] == "startEvent" end)
     |> elem(0)
+  end
+
+  # Activity id -> the boundary events attached to it. Derived from `nodes` the way `joins`
+  # is, so it cannot disagree with them. A list rather than a single id: one activity may
+  # legitimately carry several boundaries.
+  defp build_boundaries(nodes) do
+    nodes
+    |> Enum.filter(fn {_id, node} -> node["type"] == "boundaryEvent" end)
+    |> Enum.group_by(fn {_id, node} -> node["attached_to"] end, fn {id, _node} -> id end)
   end
 
   defp build_joins(nodes, flows) do
