@@ -160,6 +160,18 @@ defmodule AshBpmn.Triggers.Correlator do
       |> Ash.Query.filter(id == ^instance_id)
       |> Ash.read_one!(AshBpmn.Scope.engine(ctx.scope))
 
+    if instance && instance.status == :running do
+      deliver_to_running(instance, tokens, feel_ctx, ctx)
+    else
+      # Belt and braces over the token status the claim already checks. Cancelling an instance
+      # kills its waiting tokens, so this should never fire -- but the correlator finds tokens
+      # by signature and would otherwise have no opinion about the instance they belong to, and
+      # "resumed a process that had already ended" is not a failure worth leaving one bug away.
+      :ok
+    end
+  end
+
+  defp deliver_to_running(instance, tokens, feel_ctx, ctx) do
     graph =
       AshBpmn.DefinitionLoader.load!(
         ctx.resources.definition,

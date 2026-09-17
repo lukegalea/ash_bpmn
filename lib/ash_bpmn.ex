@@ -501,12 +501,18 @@ defmodule AshBpmn do
     resources = DomainResolver.resolve!()
     scope = Scope.from_record(instance, opts)
 
-    # Kill all active/executing tokens
+    # Every live token, `:waiting` included.
+    #
+    # It used to be `:active` and `:executing` only, which was complete when those were the
+    # only live states. A parked token left behind by a cancel is not merely untidy: the
+    # correlator finds waiting tokens by signature and knows nothing about instance status, so
+    # an event arriving afterwards would wake it and resume a process nobody is running any
+    # more. Found by the one test Phase 3's exit criterion names for it.
     active_tokens =
       resources.token
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(instance_id == ^instance.id)
-      |> Ash.Query.filter(status in [:active, :executing])
+      |> Ash.Query.filter(status in [:active, :executing, :waiting])
       |> Ash.read!(Scope.engine(scope))
 
     Enum.each(active_tokens, fn token ->

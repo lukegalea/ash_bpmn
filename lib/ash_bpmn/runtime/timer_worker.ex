@@ -160,16 +160,32 @@ defmodule AshBpmn.Runtime.TimerWorker do
 
             graph = definition.graph
 
-            # Through the shared router, which injects the flow id and sorts by it. The local
-            # version filtered `Map.values(graph["flows"])` -- flows with no `"id"`, in whatever
-            # order the map happened to yield -- and called the head of that "typically the
-            # default path". It is not: it is an arbitrary branch, stable only by luck, and a
-            # task with two outgoing flows expired down a different one depending on the map.
-            case Routing.outgoing(graph, task.node_id) do
+            # Expiry evaluates its conditions like any other transition out of the node.
+            #
+            # It used to take the first outgoing flow, on the reasoning that a timeout has no
+            # outcome to route on. That was wrong twice over: `force_complete` writes
+            # `outcome: :expired` onto the task, so `task.outcome = "expired"` is exactly the
+            # condition a modeller writes for this; and taking "the first flow" out of a node
+            # with two of them is the engine choosing a branch the diagram did not.
+            #
+            # `fallback: :single_unconditioned` is the same fallback the completion path uses,
+            # so a task with one plain outgoing flow still expires down it without needing a
+            # condition written for a case with only one answer.
+            expr_ctx = %{
+              "task" => %{"outcome" => "expired"},
+              "subject" =>
+                AshBpmn.Feel.to_feel_value(
+                  AshBpmn.Subject.load(
+                    instance,
+                    scope,
+                    get_in(graph, ["nodes", task.node_id, "load"]) || []
+                  )
+                ),
+              "routing" => AshBpmn.Feel.to_feel_value(token.routing || %{})
+            }
+
+            case expiry_flow(graph, task.node_id, expr_ctx) do
               [first_flow | _] ->
-                # Still the first flow, not an evaluated one: expiry is a timeout, and a
-                # timeout has no task outcome to route on. Now at least "first" means the
-                # lowest flow id rather than a map's internal order.
                 next_node_id = first_flow["to"]
 
                 # Consume the executing token and create a new one
@@ -256,6 +272,26 @@ defmodule AshBpmn.Runtime.TimerWorker do
   # and the firing it is re-running has already happened. A retry that cannot re-record its
   # own firing must still be allowed to complete, or Oban retries it until max_attempts over
   # a bookkeeping write.
+  # Returns the chosen flow as a one-element list, or `[]` when nothing was selected -- the
+  # shape the call site already handled.
+  #
+  # An expression that cannot answer is not survivable by guessing: raising sends the job back
+  # to Oban, which is the same treatment the completion path gives it. A gateway that silently
+  # picks a branch because a condition errored is the bug `Routing` was extracted to end, and
+  # it would be no less a bug for happening on a timeout.
+  defp expiry_flow(graph, node_id, expr_ctx) do
+    case Routing.choose(graph, node_id, expr_ctx, fallback: :single_unconditioned) do
+      {:error, reason} ->
+        raise "routing from #{node_id} on expiry failed: #{reason}"
+
+      {:ok, %{flow: nil}} ->
+        []
+
+      {:ok, %{flow: flow}} ->
+        [flow]
+    end
+  end
+
   defp record_fire(resources, task, kind, scope) do
     if resources.timer_job do
       row =

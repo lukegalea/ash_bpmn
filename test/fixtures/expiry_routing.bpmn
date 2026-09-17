@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+An approval whose two outgoing flows are told apart by the task outcome. Expiry writes
+outcome "expired" onto the task, so the expired branch is chosen by a condition rather than
+by whichever flow happened to sort first.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_expiry_routing"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_expiry_routing" name="Expiry routing" isExecutable="true">
+
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>Flow_1</bpmn2:outgoing></bpmn2:startEvent>
+
+    <bpmn2:userTask id="Approve_1" name="Approve">
+      <bpmn2:extensionElements>
+        <ash:taskConfig>
+          <ash:candidates><ash:candidate kind="role" of="approver"/></ash:candidates>
+          <ash:outcomes>
+            <ash:outcome name="approved"/>
+            <ash:outcome name="expired"/>
+          </ash:outcomes>
+          <ash:timers><ash:timer kind="expire" hours="8"/></ash:timers>
+        </ash:taskConfig>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_Approved</bpmn2:outgoing>
+      <bpmn2:outgoing>Flow_Expired</bpmn2:outgoing>
+    </bpmn2:userTask>
+
+    <bpmn2:serviceTask id="Grant" name="Grant">
+      <bpmn2:extensionElements><ash:taskConfig action="grant"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Approved</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_GrantOut</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:serviceTask id="Withdraw" name="Withdraw">
+      <bpmn2:extensionElements><ash:taskConfig action="withdraw"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Expired</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_WithdrawOut</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>Flow_GrantOut</bpmn2:incoming></bpmn2:endEvent>
+    <bpmn2:endEvent id="End_2"><bpmn2:incoming>Flow_WithdrawOut</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Approve_1"/>
+    <bpmn2:sequenceFlow id="Flow_Approved" sourceRef="Approve_1" targetRef="Grant">
+      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression" language="feel">task.outcome = "approved"</bpmn2:conditionExpression>
+    </bpmn2:sequenceFlow>
+    <bpmn2:sequenceFlow id="Flow_Expired" sourceRef="Approve_1" targetRef="Withdraw">
+      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression" language="feel">task.outcome = "expired"</bpmn2:conditionExpression>
+    </bpmn2:sequenceFlow>
+    <bpmn2:sequenceFlow id="Flow_GrantOut" sourceRef="Grant" targetRef="End_1"/>
+    <bpmn2:sequenceFlow id="Flow_WithdrawOut" sourceRef="Withdraw" targetRef="End_2"/>
+  </bpmn2:process>
+</bpmn2:definitions>
