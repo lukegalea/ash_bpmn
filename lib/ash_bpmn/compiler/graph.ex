@@ -1462,11 +1462,22 @@ defmodule AshBpmn.Compiler.Graph do
       end
 
     if kind != nil and minutes != nil do
+      # `signal` turns an escalation from a call into a throw. With it, the escalation
+      # broadcasts a name and whatever processes are listening react -- which is what makes
+      # escalation composable: the thing that handles a stalled approval becomes a process
+      # somebody drew, rather than a callback only Elixir can see.
+      #
+      # Without it the resolver's `escalate/2` is called as before. Both remain, because they
+      # answer different questions: a resolver notifies a person, a signal starts work.
       %{"kind" => kind, "minutes" => minutes}
+      |> put_if("signal", Xml.element_attr(timer_el, "signal"))
     else
       nil
     end
   end
+
+  defp put_if(map, _key, nil), do: map
+  defp put_if(map, key, value), do: Map.put(map, key, value)
 
   defp check_unknown_ash_children(config, node, known_children, extra \\ %{}) do
     id = Xml.element_attr(node, "id")

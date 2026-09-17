@@ -103,6 +103,37 @@ defmodule AshBpmn.EscalationTest do
     end
   end
 
+  describe "escalating to a process" do
+    test "an escalate timer naming a signal throws it instead of calling the resolver" do
+      # The difference between notifying somebody and starting something. A resolver reaches a
+      # person through whatever the host wired up; a signal reaches every process listening for
+      # that name, and a modeller can draw the second without asking for Elixir.
+      task = open_task!()
+
+      assert {:ok, :escalated} = escalate(task, signal: "approval.stalled")
+
+      assert [signal] = Ash.read!(AshBpmn.Test.Signal, authorize?: false)
+      assert signal.name == "approval.stalled"
+      assert signal.payload["task_id"] == task.id
+
+      # The resolver is not called at all. Doing both would notify a person *and* start a
+      # process for the same escalation, which is a choice the modeller has already made.
+      assert Resolver.escalations() == []
+
+      assert [event] = events(task, :timer_fired)
+      assert event.data["handler"] == "signal"
+      assert event.data["signal_name"] == "approval.stalled"
+    end
+
+    test "an escalate timer with no signal still calls the resolver" do
+      task = open_task!()
+
+      assert {:ok, :escalated} = escalate(task)
+      assert Resolver.escalations() == [task.id]
+      assert Ash.read!(AshBpmn.Test.Signal, authorize?: false) == []
+    end
+  end
+
   describe "the task itself" do
     test "is untouched by every outcome, including failure" do
       task = open_task!()
@@ -125,12 +156,12 @@ defmodule AshBpmn.EscalationTest do
       on_exit(fn -> Application.put_env(:ash_bpmn, :assignment_resolver, previous) end)
     end
 
+    args =
+      %{"task_id" => task.id, "kind" => "escalate"}
+      |> then(&if(opts[:signal], do: Map.put(&1, "signal", opts[:signal]), else: &1))
+
     AshBpmn.Runtime.TimerWorker.perform(%Oban.Job{
-      args:
-        AshBpmn.Scope.to_job_args(AshBpmn.Scope.system(:timer), %{
-          "task_id" => task.id,
-          "kind" => "escalate"
-        })
+      args: AshBpmn.Scope.to_job_args(AshBpmn.Scope.system(:timer), args)
     })
   end
 

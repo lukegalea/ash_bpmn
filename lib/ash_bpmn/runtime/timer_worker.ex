@@ -42,11 +42,11 @@ defmodule AshBpmn.Runtime.TimerWorker do
     if task.status in [:completed, :cancelled] do
       {:ok, :skipped}
     else
-      fire_timer(resources, task, kind, scope)
+      fire_timer(resources, task, kind, scope, args)
     end
   end
 
-  defp fire_timer(resources, task, "remind", scope) do
+  defp fire_timer(resources, task, "remind", scope, _args) do
     resources.process_event.create!(
       %{
         instance_id: task.instance_id,
@@ -83,7 +83,36 @@ defmodule AshBpmn.Runtime.TimerWorker do
   # so Oban retries the notification -- which is the whole point of having armed it -- and the
   # append-only log gets one row per attempt, which is a fair record of three attempts rather
   # than a duplicate.
-  defp fire_timer(resources, task, "escalate", scope) do
+  # An escalation that names a signal throws it instead of calling the resolver.
+  #
+  # That is the difference between notifying somebody and starting something: a resolver's
+  # `escalate/2` reaches a person through whatever the host wired up, and a signal reaches
+  # every process listening for that name. A modeller who wants the second should not have to
+  # ask an Elixir developer for it.
+  defp fire_timer(resources, task, "escalate", scope, %{"signal" => name})
+       when is_binary(name) and name != "" do
+    instance = load_instance(resources, task, scope)
+
+    case AshBpmn.emit_signal(name,
+           instance: instance,
+           node_id: task.node_id,
+           payload: %{"task_id" => task.id, "escalated" => true},
+           actor: Map.get(scope, :actor),
+           tenant: Map.get(scope, :tenant)
+         ) do
+      {:ok, _signal} ->
+        record_escalation(resources, task, {:signal, name}, scope)
+        record_fire(resources, task, :escalate, scope)
+        {:ok, :escalated}
+
+      {:error, reason} ->
+        record_escalation(resources, task, {:failed, inspect(reason)}, scope)
+        record_fire(resources, task, :escalate, scope)
+        {:error, inspect(reason)}
+    end
+  end
+
+  defp fire_timer(resources, task, "escalate", scope, _args) do
     resolver = Config.assignment_resolver!()
 
     ctx = %{
@@ -109,7 +138,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
     end
   end
 
-  defp fire_timer(resources, task, "expire", scope) do
+  defp fire_timer(resources, task, "expire", scope, _args) do
     # Force complete the task with :expired outcome
     resources.human_task.force_complete!(task, :expired, Scope.engine(scope))
 
@@ -221,7 +250,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
     {:ok, :expired}
   end
 
-  defp fire_timer(_resources, _task, kind, _scope) do
+  defp fire_timer(_resources, _task, kind, _scope, _args) do
     {:error, "unknown timer kind: #{kind}"}
   end
 
@@ -245,9 +274,18 @@ defmodule AshBpmn.Runtime.TimerWorker do
   defp record_escalation(resources, task, outcome, scope) do
     {kind, data} =
       case outcome do
-        :ok -> {:timer_fired, %{"timer_kind" => "escalate", "handler" => "resolver"}}
-        :no_handler -> {:timer_fired, %{"timer_kind" => "escalate", "handler" => "none"}}
-        {:failed, msg} -> {:escalation_failed, %{"timer_kind" => "escalate", "error" => msg}}
+        :ok ->
+          {:timer_fired, %{"timer_kind" => "escalate", "handler" => "resolver"}}
+
+        {:signal, name} ->
+          {:timer_fired,
+           %{"timer_kind" => "escalate", "handler" => "signal", "signal_name" => name}}
+
+        :no_handler ->
+          {:timer_fired, %{"timer_kind" => "escalate", "handler" => "none"}}
+
+        {:failed, msg} ->
+          {:escalation_failed, %{"timer_kind" => "escalate", "error" => msg}}
       end
 
     resources.process_event.create!(
@@ -290,6 +328,15 @@ defmodule AshBpmn.Runtime.TimerWorker do
       {:ok, %{flow: flow}} ->
         [flow]
     end
+  end
+
+  defp load_instance(_resources, %{instance_id: nil}, _scope), do: nil
+
+  defp load_instance(resources, task, scope) do
+    resources.instance
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(id == ^task.instance_id)
+    |> Ash.read_one!(Scope.engine(scope))
   end
 
   defp record_fire(resources, task, kind, scope) do

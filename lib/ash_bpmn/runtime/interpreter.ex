@@ -988,7 +988,11 @@ defmodule AshBpmn.Runtime.Interpreter do
       minutes = timer["minutes"] || 0
       scheduled_at = DateTime.add(DateTime.utc_now(), minutes, :minute)
 
-      {AshBpmn.Runtime.TimerWorker, %{"kind" => timer["kind"]}, [scheduled_at: scheduled_at]}
+      args =
+        %{"kind" => timer["kind"]}
+        |> then(&if(timer["signal"], do: Map.put(&1, "signal", timer["signal"]), else: &1))
+
+      {AshBpmn.Runtime.TimerWorker, args, [scheduled_at: scheduled_at]}
     end)
   end
 
