@@ -118,6 +118,10 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         :action_failed,
                         :instance_completed,
                         :instance_failed,
+                        # The process reached an error end event: it ended badly by design,
+                        # which is not the same finding as `:instance_failed` and must not be
+                        # counted with it.
+                        :instance_errored,
                         :instance_cancelled,
                         :sweep_recovered,
                         # A gateway condition that produced FEEL's `null` rather than a

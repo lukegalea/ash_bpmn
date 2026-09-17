@@ -49,6 +49,7 @@ defmodule AshBpmn.Runtime.Interpreter do
   the worker resolves it to the created row's real id.
     * `{:consume_token, true}` — consume the current token
     * `{:terminate_instance, outcome}` — kill every other live token, then complete
+    * `{:error_instance, {outcome, error}}` — the same, but ending `:errored` not completed
     * `{:park_token, attrs}` — park the token as `:waiting`, recording what it listens
       for. `%{}` for a user task: nothing correlates to it, because the completion
       addresses the token by id. A catch event fills in the correlation key and signature.
@@ -125,19 +126,38 @@ defmodule AshBpmn.Runtime.Interpreter do
     # Which is why it is a separate effect rather than a flag on the same one. The killing is
     # not a detail of completing -- it is the whole difference, it touches rows this token
     # knows nothing about, and it has to be auditable on its own.
+    # An error end event throws: it ends every branch like terminate does, and ends the
+    # instance in a state that says the process worked exactly as designed and the design says
+    # this ends badly. The compiler refuses both markers on one end event, so the first two
+    # branches cannot both match.
     effects =
-      if node["terminate"] do
-        [
-          consume_token: true,
-          events: [event_attrs(ctx, node_id, :node_completed, %{"outcome" => outcome})],
-          terminate_instance: outcome
-        ]
-      else
-        [
-          consume_token: true,
-          events: [event_attrs(ctx, node_id, :node_completed, %{"outcome" => outcome})],
-          complete_instance: outcome
-        ]
+      cond do
+        node["error"] ->
+          [
+            consume_token: true,
+            events: [
+              event_attrs(ctx, node_id, :node_completed, %{
+                "outcome" => outcome,
+                "error_ref" => node["error"]["ref"],
+                "error_code" => node["error"]["code"]
+              })
+            ],
+            error_instance: {outcome, node["error"]}
+          ]
+
+        node["terminate"] ->
+          [
+            consume_token: true,
+            events: [event_attrs(ctx, node_id, :node_completed, %{"outcome" => outcome})],
+            terminate_instance: outcome
+          ]
+
+        true ->
+          [
+            consume_token: true,
+            events: [event_attrs(ctx, node_id, :node_completed, %{"outcome" => outcome})],
+            complete_instance: outcome
+          ]
       end
 
     {:ok, effects}

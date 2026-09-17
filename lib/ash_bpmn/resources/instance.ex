@@ -87,7 +87,16 @@ defmodule AshBpmn.Resources.Instance do
         end
 
         attribute :status, :atom do
-          constraints one_of: [:running, :completed, :failed, :cancelled]
+          # `:errored` is not a flavour of `:failed`, and the distinction is load-bearing --
+          # the same call made for `:waiting` on tokens.
+          #
+          # `:failed` means the engine gave up: retries exhausted, an action that would not
+          # complete, something to page somebody about. `:errored` means the process worked
+          # exactly as designed and the design says this ends badly -- a declined application,
+          # a withdrawn request. Merging them would put "the integration is down" and "the
+          # answer was no" in one bucket, and would let `retry_instance/2` offer to retry a
+          # decision.
+          constraints one_of: [:running, :completed, :failed, :errored, :cancelled]
           default :running
           allow_nil? false
           public? true
@@ -161,6 +170,14 @@ defmodule AshBpmn.Resources.Instance do
           change set_attribute(:status, :failed)
         end
 
+        update :mark_errored do
+          accept [:outcome]
+          require_atomic? false
+
+          validate AshBpmn.Resources.Instance.StatusIsRunning
+          change set_attribute(:status, :errored)
+        end
+
         update :cancel do
           accept []
           require_atomic? false
@@ -173,6 +190,7 @@ defmodule AshBpmn.Resources.Instance do
       code_interface do
         define :create, action: :create
         define :mark_completed, action: :mark_completed, args: [:outcome]
+        define :mark_errored, action: :mark_errored
         define :mark_failed, action: :mark_failed
         define :cancel, action: :cancel
       end

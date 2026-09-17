@@ -352,6 +352,25 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
           insert_job(resources, worker, args, opts, scope)
         end)
 
+      {:error_instance, {outcome, error}} ->
+        killed = kill_live_tokens(resources, ctx, scope)
+
+        record_event(resources, ctx, :instance_errored, %{
+          "outcome" => outcome,
+          "error_ref" => error["ref"],
+          "error_code" => error["code"],
+          "error_name" => error["name"],
+          "errored_by_node_id" => ctx[:token] && ctx[:token].node_id,
+          "tokens_killed" => length(killed),
+          "killed_node_ids" => Enum.map(killed, & &1.node_id)
+        })
+
+        resources.instance.mark_errored!(
+          ctx[:instance],
+          %{outcome: to_outcome(outcome)},
+          Scope.engine(scope)
+        )
+
       {:terminate_instance, outcome} ->
         killed = kill_live_tokens(resources, ctx, scope)
 

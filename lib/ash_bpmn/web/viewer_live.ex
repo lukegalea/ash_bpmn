@@ -325,6 +325,11 @@ defmodule AshBpmn.Web.ViewerLive do
   defp instance_status_class(:failed),
     do: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
 
+  # Without this clause an errored instance raises FunctionClauseError the moment an operator
+  # opens it -- and the compiler cannot warn, because the clauses match on atoms.
+  defp instance_status_class(:errored),
+    do: "bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300"
+
   defp instance_status_class(:cancelled),
     do: "bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
 

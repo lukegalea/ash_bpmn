@@ -311,6 +311,37 @@ defmodule AshBpmn.Compiler.Xml do
 
   def definitions_siblings(_), do: []
 
+  @doc """
+  The `bpmn:error` declarations at definitions level, keyed by id.
+
+  These are siblings of `<process>`, not children of it, which is why they need reading here
+  at all: `extract_process/1` hands the graph builder only the process element, so an
+  `errorRef` inside an end event has nothing to resolve against unless the table is carried
+  across that boundary explicitly.
+
+  An unreferenced declaration is left alone rather than warned about. bpmn-js leaves them
+  behind when you delete the event that used them, so warning would mean every document
+  anyone edited started reporting a problem it did not have.
+  """
+  @spec error_declarations(tuple()) :: %{optional(String.t()) => map()}
+  def error_declarations(doc) do
+    doc
+    |> definitions_siblings()
+    |> Enum.filter(&(normalize_name(element_name(&1)) == "error"))
+    |> Enum.reduce(%{}, fn element, acc ->
+      case element_attr(element, "id") do
+        nil ->
+          acc
+
+        id ->
+          Map.put(acc, id, %{
+            "code" => element_attr(element, "errorCode"),
+            "name" => element_attr(element, "name")
+          })
+      end
+    end)
+  end
+
   # Every element under `elements` (any depth) whose normalized name matches.
   @spec descendants([tuple()], String.t()) :: [tuple()]
   def descendants(elements, local_name) when is_list(elements) do

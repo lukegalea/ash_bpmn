@@ -631,6 +631,22 @@ defmodule AshBpmn do
     resources = DomainResolver.resolve!()
     scope = Scope.from_record(instance, opts)
 
+    # Retrying reactivates every dead token and re-enqueues it, which is right for `:failed` --
+    # the engine gave up and the work is still owed. It is wrong for `:errored`: that instance
+    # ended the way its diagram says it should, and its dead tokens are branches an error end
+    # event killed on purpose. Resurrecting them would restart a process that already produced
+    # its answer, and the answer was no.
+    if instance.status == :errored do
+      {:error,
+       "instance #{instance.id} ended at an error end event, which is a designed outcome " <>
+         "rather than a failure. Retrying would restart branches the process killed on " <>
+         "purpose. Start a new instance instead"}
+    else
+      do_retry_instance(resources, instance, scope)
+    end
+  end
+
+  defp do_retry_instance(resources, instance, scope) do
     dead_tokens =
       resources.token
       |> Ash.Query.for_read(:read)

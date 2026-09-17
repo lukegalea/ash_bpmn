@@ -8,7 +8,7 @@ defmodule AshBpmn.Compiler.Graph do
   alias AshBpmn.Compiler.Xml
 
   @spec build(map()) :: {:ok, map()} | {:error, [map()]}
-  def build(process) do
+  def build(process, error_declarations \\ %{}) do
     errors = []
     process_id = process.id || ""
 
@@ -40,7 +40,7 @@ defmodule AshBpmn.Compiler.Graph do
     errors = errors ++ check_node_children(supported_nodes)
 
     # Build nodes map
-    {nodes, node_errors} = build_nodes(supported_nodes)
+    {nodes, node_errors} = build_nodes(supported_nodes, error_declarations)
     errors = errors ++ node_errors
 
     # Build flows map
@@ -140,7 +140,8 @@ defmodule AshBpmn.Compiler.Graph do
   # check exists to prevent, arriving through the door marked "supported".
   @implemented_event_definitions %{
     "terminateEventDefinition" => ["endEvent"],
-    "timerEventDefinition" => ["intermediateCatchEvent", "boundaryEvent"]
+    "timerEventDefinition" => ["intermediateCatchEvent", "boundaryEvent"],
+    "errorEventDefinition" => ["endEvent"]
   }
 
   # Children of a `timerEventDefinition`. Only `timeDuration` is implemented; the other two are
@@ -368,10 +369,10 @@ defmodule AshBpmn.Compiler.Graph do
     end)
   end
 
-  defp build_nodes(nodes_xml) do
+  defp build_nodes(nodes_xml, error_declarations) do
     nodes =
       nodes_xml
-      |> Enum.map(fn node -> build_node(node) end)
+      |> Enum.map(fn node -> build_node(node, error_declarations) end)
       |> Enum.filter(fn
         {:ok, _} -> true
         _ -> false
@@ -381,7 +382,7 @@ defmodule AshBpmn.Compiler.Graph do
 
     node_errors =
       nodes_xml
-      |> Enum.map(fn node -> build_node(node) end)
+      |> Enum.map(fn node -> build_node(node, error_declarations) end)
       |> Enum.filter(fn
         {:error, _} -> true
         _ -> false
@@ -391,7 +392,7 @@ defmodule AshBpmn.Compiler.Graph do
     {nodes, node_errors}
   end
 
-  defp build_node(node) do
+  defp build_node(node, error_declarations) do
     id = Xml.element_attr(node, "id")
     type = Xml.node_type(node)
     name = Xml.element_attr(node, "name")
@@ -401,7 +402,7 @@ defmodule AshBpmn.Compiler.Graph do
     else
       base = %{"type" => type, "name" => name}
 
-      case build_node_config(node, type) do
+      case build_node_config(node, type, error_declarations) do
         {:ok, config} ->
           {:ok, {id, Map.merge(base, config)}}
 
@@ -421,7 +422,7 @@ defmodule AshBpmn.Compiler.Graph do
   # Outputs are *promoted* one named scalar at a time rather than merged wholesale, because a
   # token carries routing and not business data. The decision's full result goes to the host's
   # own record and to a process event; only the declared signals reach the token.
-  defp build_node_config(node, "businessRuleTask") do
+  defp build_node_config(node, "businessRuleTask", _error_declarations) do
     id = Xml.element_attr(node, "id")
     ext = Xml.find_extension_elements(node)
 
@@ -445,7 +446,8 @@ defmodule AshBpmn.Compiler.Graph do
   # and promoted signals are optional on both and, when absent, are left off the node
   # entirely so documents written before they existed compile exactly as they always
   # did.
-  defp build_node_config(node, type) when type in ["serviceTask", "sendTask"] do
+  defp build_node_config(node, type, _error_declarations)
+       when type in ["serviceTask", "sendTask"] do
     id = Xml.element_attr(node, "id")
     ext = Xml.find_extension_elements(node)
 
@@ -514,7 +516,7 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
-  defp build_node_config(node, "userTask") do
+  defp build_node_config(node, "userTask", _error_declarations) do
     ext = Xml.find_extension_elements(node)
     ash_task_configs = Xml.find_ash_elements(ext, "taskConfig")
 
@@ -546,7 +548,8 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
-  defp build_node_config(node, "endEvent") do
+  defp build_node_config(node, "endEvent", error_declarations) do
+    id = Xml.element_attr(node, "id")
     ext = Xml.find_extension_elements(node)
     ash_task_configs = Xml.find_ash_elements(ext, "taskConfig")
 
@@ -558,8 +561,132 @@ defmodule AshBpmn.Compiler.Graph do
       |> Xml.get_element_children()
       |> Enum.any?(&(Xml.normalize_name(Xml.local_name(&1)) == "terminateEventDefinition"))
 
-    base = if terminate?, do: %{"terminate" => true}, else: %{}
+    error_definitions =
+      node
+      |> Xml.get_element_children()
+      |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "errorEventDefinition"))
 
+    with {:ok, error} <- build_error_end(id, error_definitions, error_declarations),
+         :ok <- check_end_markers(id, terminate?, error) do
+      base =
+        %{}
+        |> then(&if(terminate?, do: Map.put(&1, "terminate", true), else: &1))
+        |> then(&if(error, do: Map.put(&1, "error", error), else: &1))
+
+      end_event_task_config(node, ash_task_configs, base)
+    end
+  end
+
+  defp build_node_config(node, "boundaryEvent", _error_declarations) do
+    id = Xml.element_attr(node, "id")
+    ref = Xml.element_attr(node, "attachedToRef")
+
+    definitions =
+      node
+      |> Xml.get_element_children()
+      |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "timerEventDefinition"))
+
+    with :ok <- check_attached_ref(id, ref),
+         :ok <- check_cancel_activity(id, Xml.element_attr(node, "cancelActivity")),
+         {:ok, definition} <- single_boundary_definition(id, definitions),
+         {:ok, %{"catch" => spec}} <- build_timer_catch(id, definition) do
+      {:ok, %{"attached_to" => String.trim(ref), "catch" => spec}}
+    end
+  end
+
+  defp build_node_config(node, "intermediateCatchEvent", _error_declarations) do
+    id = Xml.element_attr(node, "id")
+
+    definitions =
+      node
+      |> Xml.get_element_children()
+      |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "timerEventDefinition"))
+
+    case definitions do
+      [] ->
+        # A catch event with no definition is a catch with nothing to catch: the token would
+        # park and never be woken by anything. Refused rather than compiled into a deadlock.
+        {:error,
+         Errors.error(
+           id,
+           "intermediateCatchEvent '#{id}' has no event definition; the token would wait " <>
+             "for something that can never arrive. Supported: timerEventDefinition"
+         )}
+
+      [_, _ | _] ->
+        {:error,
+         Errors.error(id, "intermediateCatchEvent '#{id}' has more than one event definition")}
+
+      [definition] ->
+        build_timer_catch(id, definition)
+    end
+  end
+
+  defp build_node_config(node, "exclusiveGateway", _error_declarations) do
+    default_flow = Xml.element_attr(node, "default")
+    {:ok, Map.filter(%{"default_flow" => default_flow}, fn {_, v} -> v != nil end)}
+  end
+
+  defp build_node_config(_node, type, _error_declarations)
+       when type in ["startEvent", "parallelGateway"] do
+    {:ok, %{}}
+  end
+
+  # An error end event says the process ended badly *on purpose*, which is a thing no diagram
+  # could say before: `mark_failed` is reachable only from retry exhaustion and means "the
+  # engine gave up". That distinction is the entire payoff, and it is why the runtime gives it
+  # its own instance status rather than reusing `:failed`.
+  #
+  # Error *boundary* events are a separate matter and stay refused. `ActionInvoker.invoke/2`
+  # returns `{:error, term()}` with no error code, so nothing distinguishes a modelled business
+  # error from Postgres being unreachable -- and catching would route a transient outage down
+  # the "credit declined" branch.
+  defp build_error_end(_id, [], _declarations), do: {:ok, nil}
+
+  defp build_error_end(id, [_, _ | _], _declarations),
+    do: {:error, Errors.error(id, "endEvent '#{id}' has more than one errorEventDefinition")}
+
+  defp build_error_end(id, [definition], declarations) do
+    case Xml.element_attr(definition, "errorRef") do
+      nil ->
+        {:error,
+         Errors.error(
+           id,
+           "endEvent '#{id}' throws an error with no errorRef. An anonymous error can be " <>
+             "caught by anything, so nothing downstream could tell which error was thrown"
+         )}
+
+      ref ->
+        case Map.fetch(declarations, ref) do
+          {:ok, declaration} ->
+            {:ok, Map.put(declaration, "ref", ref)}
+
+          :error ->
+            {:error,
+             Errors.error(
+               id,
+               "endEvent '#{id}' references error '#{ref}', which is not declared. A " <>
+                 "bpmn:error element with that id must sit beside the process, not inside it"
+             )}
+        end
+    end
+  end
+
+  # Both markers on one end event is well-formed XML and two different endings. The runtime
+  # would take whichever it checked first and drop the other -- a marker drawn on the diagram
+  # and silently ignored, which is the failure the whole refusal walk exists to prevent.
+  defp check_end_markers(id, true, error) when not is_nil(error) do
+    {:error,
+     Errors.error(
+       id,
+       "endEvent '#{id}' carries both a terminateEventDefinition and an " <>
+         "errorEventDefinition. They are two different endings and one would be ignored"
+     )}
+  end
+
+  defp check_end_markers(_id, _terminate?, _error), do: :ok
+
+  defp end_event_task_config(node, ash_task_configs, base) do
     case ash_task_configs do
       [] ->
         {:ok, base}
@@ -619,59 +746,6 @@ defmodule AshBpmn.Compiler.Graph do
   # and breaks immediately: `build_flow/2` resolves every sequence flow's `sourceRef` against
   # `nodes`, so the boundary's own outgoing flow would fail with an error about the *flow*
   # referencing a non-existent source -- pointing the modeller away from the boundary.
-  defp build_node_config(node, "boundaryEvent") do
-    id = Xml.element_attr(node, "id")
-    ref = Xml.element_attr(node, "attachedToRef")
-
-    definitions =
-      node
-      |> Xml.get_element_children()
-      |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "timerEventDefinition"))
-
-    with :ok <- check_attached_ref(id, ref),
-         :ok <- check_cancel_activity(id, Xml.element_attr(node, "cancelActivity")),
-         {:ok, definition} <- single_boundary_definition(id, definitions),
-         {:ok, %{"catch" => spec}} <- build_timer_catch(id, definition) do
-      {:ok, %{"attached_to" => String.trim(ref), "catch" => spec}}
-    end
-  end
-
-  defp build_node_config(node, "intermediateCatchEvent") do
-    id = Xml.element_attr(node, "id")
-
-    definitions =
-      node
-      |> Xml.get_element_children()
-      |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "timerEventDefinition"))
-
-    case definitions do
-      [] ->
-        # A catch event with no definition is a catch with nothing to catch: the token would
-        # park and never be woken by anything. Refused rather than compiled into a deadlock.
-        {:error,
-         Errors.error(
-           id,
-           "intermediateCatchEvent '#{id}' has no event definition; the token would wait " <>
-             "for something that can never arrive. Supported: timerEventDefinition"
-         )}
-
-      [_, _ | _] ->
-        {:error,
-         Errors.error(id, "intermediateCatchEvent '#{id}' has more than one event definition")}
-
-      [definition] ->
-        build_timer_catch(id, definition)
-    end
-  end
-
-  defp build_node_config(node, "exclusiveGateway") do
-    default_flow = Xml.element_attr(node, "default")
-    {:ok, Map.filter(%{"default_flow" => default_flow}, fn {_, v} -> v != nil end)}
-  end
-
-  defp build_node_config(_node, type) when type in ["startEvent", "parallelGateway"] do
-    {:ok, %{}}
-  end
 
   defp check_attached_ref(id, ref) when is_binary(ref) do
     if String.trim(ref) == "" do

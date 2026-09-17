@@ -911,7 +911,6 @@ defmodule AshBpmn.CompilerTest do
     {"refusal_message_start.bpmn", "Start_1", "messageEventDefinition"},
     {"refusal_signal_start.bpmn", "Start_1", "signalEventDefinition"},
     {"refusal_conditional_start.bpmn", "Start_1", "conditionalEventDefinition"},
-    {"refusal_error_end.bpmn", "End_1", "errorEventDefinition"},
     {"refusal_escalation_end.bpmn", "End_1", "escalationEventDefinition"},
     {"refusal_signal_end.bpmn", "End_1", "signalEventDefinition"},
     {"refusal_message_end.bpmn", "End_1", "messageEventDefinition"},
@@ -1018,6 +1017,57 @@ defmodule AshBpmn.CompilerTest do
       assert {:ok, graph} = Compiler.compile(xml)
       assert graph["nodes"]["UT"]["type"] == "userTask"
       assert graph["nodes"]["UT"]["outcomes"] == ["approved"]
+    end
+  end
+
+  describe "error end events" do
+    test "an errorRef with no declaration is refused, and says where the declaration goes" do
+      # This fixture used to be in the refusal corpus, back when errorEventDefinition was
+      # refused outright. It has always referenced Error_1 without declaring it, so now that
+      # the marker compiles it refuses for a different and better reason -- which is why it
+      # cannot stay in a corpus that asserts the words "not supported".
+      errors = compile_fixture_errors("refusal_error_end.bpmn")
+
+      message = Enum.map_join(errors, " ", & &1.message)
+      assert message =~ "Error_1"
+      assert message =~ "not declared"
+      # The likeliest mistake is putting the declaration inside the process.
+      assert message =~ "beside the process"
+    end
+
+    test "both a terminate and an error marker on one end event is refused" do
+      xml = ~s(<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL">
+        <bpmn2:error id="Error_1" errorCode="DECLINED" name="Declined"/>
+        <bpmn2:process id="P" isExecutable="true">
+          <bpmn2:startEvent id="S"><bpmn2:outgoing>F</bpmn2:outgoing></bpmn2:startEvent>
+          <bpmn2:endEvent id="E">
+            <bpmn2:incoming>F</bpmn2:incoming>
+            <bpmn2:terminateEventDefinition id="T1"/>
+            <bpmn2:errorEventDefinition id="ED1" errorRef="Error_1"/>
+          </bpmn2:endEvent>
+          <bpmn2:sequenceFlow id="F" sourceRef="S" targetRef="E"/>
+        </bpmn2:process>
+      </bpmn2:definitions>)
+
+      assert {:error, errors} = Compiler.compile(xml)
+      message = Enum.map_join(errors, " ", & &1.message)
+      assert message =~ "two different endings"
+    end
+
+    test "an error thrown with no errorRef is refused" do
+      xml = ~s(<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL">
+        <bpmn2:process id="P" isExecutable="true">
+          <bpmn2:startEvent id="S"><bpmn2:outgoing>F</bpmn2:outgoing></bpmn2:startEvent>
+          <bpmn2:endEvent id="E">
+            <bpmn2:incoming>F</bpmn2:incoming>
+            <bpmn2:errorEventDefinition id="ED1"/>
+          </bpmn2:endEvent>
+          <bpmn2:sequenceFlow id="F" sourceRef="S" targetRef="E"/>
+        </bpmn2:process>
+      </bpmn2:definitions>)
+
+      assert {:error, errors} = Compiler.compile(xml)
+      assert Enum.map_join(errors, " ", & &1.message) =~ "no errorRef"
     end
   end
 

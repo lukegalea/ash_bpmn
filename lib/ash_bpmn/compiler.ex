@@ -47,7 +47,7 @@ defmodule AshBpmn.Compiler do
   def compile(xml) when is_binary(xml) do
     with {:ok, doc} <- Xml.parse(xml),
          {:ok, process} <- Xml.extract_process(doc),
-         {:ok, graph} <- Graph.build(process) do
+         {:ok, graph} <- Graph.build(process, Xml.error_declarations(doc)) do
       verify_errors = Verify.verify(graph)
 
       if verify_errors == [] do

@@ -19,10 +19,11 @@ The compiler rejects, each with the offending element's id in the error:
   Executable conformance class is barely larger. ash_bpmn executes that subset:
   start events, end events — including terminate end events — user, service,
   send and business rule tasks, intermediate catch events carrying a timer,
-  interrupting timer boundary events on user tasks, exclusive and parallel
-  gateways, conditional and default flows. Call activities, ad-hoc and
+  interrupting timer boundary events on user tasks, error end events, exclusive
+  and parallel gateways, conditional and default flows. Call activities, ad-hoc and
   transactional sub-processes, throw events,
-  the rest of the event-definition taxonomy (message, signal, error,
+  the rest of the event-definition taxonomy (message, signal, error on
+  anything but an end event,
   escalation, conditional, compensation, cancel, link), complex and
   event-based gateways, loop and multi-instance markers: rejected, loudly. A
   notation element a business analyst drew and a system silently ignored is how
@@ -89,6 +90,17 @@ The compiler rejects, each with the offending element's id in the error:
   its own flow with no outcome at all. Whichever fired first would win, and
   neither can be silently preferred over the other, so carrying both is refused
   rather than resolved.
+- **Error *boundary* events**, while error *end* events are supported. Catching
+  requires telling a modelled business error apart from an infrastructure
+  failure, and `ActionInvoker.invoke/2` returns `{:error, term()}` with no error
+  code — so nothing distinguishes "the applicant was declined" from "Postgres is
+  unreachable". A catch would route a transient outage down the declined branch
+  and the process would end having decided something nobody decided. Also
+  refused: an error thrown with no `errorRef`, since an anonymous error tells
+  nothing downstream which error was thrown; an `errorRef` with no matching
+  `bpmn:error` declaration beside the process; and an end event carrying both a
+  terminate and an error marker, which are two different endings where one would
+  be ignored.
 - **Malformed `ash:` bindings** — unknown attributes or elements in the ash
   namespace, user tasks without candidates or outcomes, service tasks without an
   action reference, unparseable conditions. Typo protection: a `candiates`
