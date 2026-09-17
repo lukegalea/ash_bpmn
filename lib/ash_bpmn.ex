@@ -660,7 +660,13 @@ defmodule AshBpmn do
       |> Ash.Query.filter(id == ^task.token_id)
       |> Ash.read_one!(Scope.engine(scope))
 
-    if token.status == :executing && task.instance_id do
+    # The wake *is* the guard. This was a read-only `token.status == :executing` check, which
+    # told you the token looked advanceable a moment ago and nothing about whether anyone else
+    # was advancing it; two deliveries of the same completion both passed it. `claim_waiting`
+    # re-reads the row inside the transaction and admits exactly one winner, so a redelivery
+    # loses here rather than routing the token twice.
+    with true <- !is_nil(task.instance_id),
+         {:ok, token} <- resources.token.claim_waiting(token, Scope.engine(scope)) do
       instance =
         resources.instance
         |> Ash.Query.for_read(:read)
@@ -716,6 +722,11 @@ defmodule AshBpmn do
           record_null_conditions(resources, task, nulls, scope)
           follow_flow(resources, instance, token, graph, target_flow, outcome, scope)
       end
+    else
+      # Either the task is not part of a process instance -- standalone approvals use the same
+      # task table -- or someone else already woke this token. Both are ordinary, and neither
+      # is this caller's to fix.
+      _ -> :ok
     end
   end
 

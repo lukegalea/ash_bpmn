@@ -18,6 +18,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
 
   alias AshBpmn.Config
   alias AshBpmn.Runtime.DomainResolver
+  alias AshBpmn.Runtime.Routing
   alias AshBpmn.Scope
 
   def queue, do: Config.queue()
@@ -116,7 +117,13 @@ defmodule AshBpmn.Runtime.TimerWorker do
         |> Ash.Query.filter(id == ^task.token_id)
         |> Ash.read_one!(Scope.engine(scope))
 
-      if token.status == :executing do
+      # Same wake-as-guard as the completion path: a timer firing on a task someone has just
+      # completed must lose, and a status read cannot arbitrate that.
+      case resources.token.claim_waiting(token, Scope.engine(scope)) do
+        {:error, _} ->
+          :ok
+
+        {:ok, token} ->
         if task.instance_id do
           instance =
             resources.instance
@@ -134,15 +141,16 @@ defmodule AshBpmn.Runtime.TimerWorker do
 
           graph = definition.graph
 
-          # Find outgoing flows from the task's node
-          outgoing =
-            graph["flows"]
-            |> Map.values()
-            |> Enum.filter(fn flow -> flow["from"] == task.node_id end)
-
-          # Follow first outgoing flow (for expiry, typically default path)
-          case outgoing do
+          # Through the shared router, which injects the flow id and sorts by it. The local
+          # version filtered `Map.values(graph["flows"])` -- flows with no `"id"`, in whatever
+          # order the map happened to yield -- and called the head of that "typically the
+          # default path". It is not: it is an arbitrary branch, stable only by luck, and a
+          # task with two outgoing flows expired down a different one depending on the map.
+          case Routing.outgoing(graph, task.node_id) do
             [first_flow | _] ->
+              # Still the first flow, not an evaluated one: expiry is a timeout, and a
+              # timeout has no task outcome to route on. Now at least "first" means the
+              # lowest flow id rather than a map's internal order.
               next_node_id = first_flow["to"]
 
               # Consume the executing token and create a new one
@@ -171,7 +179,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
             [] ->
               :ok
           end
-        end
+          end
       end
     end
 

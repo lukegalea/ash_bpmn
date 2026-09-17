@@ -82,12 +82,25 @@ defmodule AshBpmn.Feel do
   killed outright on timeout. The kill is deliberate — a pathological regex inside `matches()`
   does not yield, so a `receive` guard around it would wait forever alongside it.
 
+  The timeout is generous rather than tight, and the reason is in the comment on
+  `@default_timeout_ms`: wall clock is a poor proxy for CPU, and a bound low enough to be
+  tripped by scheduling noise costs correct evaluations without catching anything a generous
+  one misses.
+
   External functions are refused by the engine, which is also one of the DMN TCK cases it is
   known not to pass. The engine and the policy happen to agree, and that is worth stating
   because it means the refusal does not depend on us remembering to enforce it.
   """
 
-  @default_timeout_ms 250
+  # Five seconds, not the 250ms this started at. The bound exists to stop an expression that
+  # does not *terminate* -- a catastrophically backtracking regex inside `matches()` -- and
+  # against non-termination 250ms and 5s catch exactly the same set. What the tight bound did
+  # buy was false failures: `Task.yield/2` measures wall clock, which includes time the task
+  # spent queued behind other work, so a trivial condition on a busy scheduler could exceed it
+  # having burned microseconds of CPU. That surfaced here as an intermittent test failure; in
+  # production it is a gateway that refuses to route because the node was briefly loaded, and
+  # errors on this path deliberately do not degrade into "branch not taken".
+  @default_timeout_ms 5_000
   @max_source_bytes 8_192
 
   @typedoc "A compiled condition as it is stored in a definition snapshot."
@@ -164,7 +177,19 @@ defmodule AshBpmn.Feel do
 
     task = Task.async(fn -> Boxic.FEEL.evaluate(source, context) end)
 
-    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+    result = Task.yield(task, timeout)
+
+    # Read before shutting down, so a timeout can say whether the task was actually working.
+    # Reductions near zero after five seconds means it never ran -- a starved scheduler, not a
+    # runaway expression -- and telling an operator "your condition is too slow" when the truth
+    # is "this node was overloaded" sends them to rewrite the wrong thing.
+    reductions =
+      case result && :done do
+        :done -> nil
+        nil -> with {:reductions, n} <- Process.info(task.pid, :reductions), do: n
+      end
+
+    case result || Task.shutdown(task, :brutal_kill) do
       {:ok, {:ok, value}} ->
         {:ok, value}
 
@@ -177,7 +202,13 @@ defmodule AshBpmn.Feel do
         {:error, "evaluation crashed: #{inspect(reason)}"}
 
       nil ->
-        {:error, "evaluation exceeded #{timeout}ms and was killed"}
+        {:error,
+         "evaluation exceeded #{timeout}ms and was killed" <>
+           if(is_integer(reductions),
+             do: " (#{reductions} reductions; a very low count means the scheduler was " <>
+                   "starved rather than the expression runaway)",
+             else: ""
+           )}
     end
   end
 

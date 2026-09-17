@@ -321,8 +321,11 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       {:consume_token, true} ->
         resources.token.consume!(ctx[:token], Scope.engine(scope))
 
-      {:park_token, true} ->
-        :ok
+      {:park_token, attrs} when is_map(attrs) ->
+        # Was a no-op, which left the token `:executing` -- indistinguishable from a token
+        # whose job is running or lost, and therefore invisible to any recovery that tells
+        # those apart.
+        resources.token.park!(ctx[:token], attrs, Scope.engine(scope))
 
       {:tokens, _token_attrs_list} ->
         # Already handled in phase 1

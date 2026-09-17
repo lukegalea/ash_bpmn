@@ -48,7 +48,9 @@ defmodule AshBpmn.Runtime.Interpreter do
   `task_ref` is an opaque placeholder that ties the three task effects together;
   the worker resolves it to the created row's real id.
     * `{:consume_token, true}` — consume the current token
-    * `{:park_token, true}` — leave token as executing (user tasks)
+    * `{:park_token, attrs}` — park the token as `:waiting`, recording what it listens
+      for. `%{}` for a user task: nothing correlates to it, because the completion
+      addresses the token by id. A catch event fills in the correlation key and signature.
   """
   @spec dispatch(map(), String.t(), map(), map()) :: {:ok, keyword()} | {:error, String.t()}
   def dispatch(graph, node_id, node, ctx) do
@@ -546,7 +548,11 @@ defmodule AshBpmn.Runtime.Interpreter do
       end)
 
     effects = [
-      park_token: true,
+      # No correlation key and no signature: a user task is not woken by a correlated
+      # event, it is woken by someone completing *that task*, which names the token
+      # directly. Leaving both nil is what keeps it out of the correlator's query
+      # rather than something that needs excluding from it.
+      park_token: %{},
       events: [event_attrs(ctx, node_id, :task_created)],
       tasks: [{task_ref, task_attrs}],
       candidates: {task_ref, candidate_attrs},

@@ -166,7 +166,10 @@ defmodule AshBpmn.Web.ViewerLive do
 
             active_node_ids =
               tokens
-              |> Enum.filter(&(&1.status in [:active, :executing]))
+              # `:waiting` belongs here and is the case that matters most on screen: a
+              # process parked on an approval is exactly what someone opens this view to
+              # look at, and omitting it would blank the diagram for the commonest state.
+              |> Enum.filter(&(&1.status in [:active, :executing, :waiting]))
               |> Enum.map(& &1.node_id)
 
             socket =
@@ -330,6 +333,9 @@ defmodule AshBpmn.Web.ViewerLive do
 
   defp token_status_class(:executing),
     do: "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300"
+
+  defp token_status_class(:waiting),
+    do: "bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300"
 
   defp token_status_class(:consumed),
     do: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"

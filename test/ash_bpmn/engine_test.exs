@@ -544,9 +544,11 @@ defmodule AshBpmn.EngineTest do
         |> Ash.Query.filter(id == ^task.token_id)
         |> Ash.read_one!(authorize?: false)
 
-      # A user task parks its token as :executing -- that is what makes it eligible to be
-      # consumed by the completion path rather than killed.
-      assert token_before.status == :executing
+      # A user task parks its token as :waiting. It used to sit at :executing, which is the
+      # state a token is in when a job is running or lost -- so an open approval and a crashed
+      # worker were the same row, and no recovery could tell them apart.
+      assert token_before.status == :waiting
+      assert token_before.parked_at, "a parked token records when the wait began"
 
       {:ok, _} =
         AshBpmn.complete_task(task, outcome: :approved, actor: %{id: Ash.UUID.generate()})
