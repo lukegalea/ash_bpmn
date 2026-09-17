@@ -30,6 +30,8 @@ defmodule AshBpmn.Runtime.Interpreter do
   on every run will do both twice on redelivery; make it idempotent in the action.
   """
 
+  alias AshBpmn.Runtime.Routing
+
   @doc """
   Dispatches execution for a single node.
 
@@ -556,29 +558,18 @@ defmodule AshBpmn.Runtime.Interpreter do
 
   # ── exclusiveGateway ─────────────────────────────────────────────────────
 
-  defp exclusive_gateway(graph, node_id, node, ctx) do
-    outgoing = find_outgoing_flows(graph, node_id)
-    default_flow = node["default_flow"]
-
-    # Evaluate conditions in order; the first that is *true* wins.
-    #
-    # FEEL is three-valued, and the three values are not interchangeable here. `false` is an
-    # ordinary answer. `null` means the condition produced no answer at all -- a path the
-    # subject does not have, a type mismatch -- and while it also does not take the branch, it
-    # is recorded, because a condition that is silently never true looks exactly like one that
-    # is legitimately false and is a far worse bug. An `{:error, _}` is not a FEEL value at all
-    # (a timeout, a malformed snapshot) and must not degrade into "branch not taken": it
-    # propagates, the job retries, and the instance fails rather than routing itself down a
-    # path nobody chose.
+  defp exclusive_gateway(graph, node_id, _node, ctx) do
+    # Routing lives in `AshBpmn.Runtime.Routing` -- one router, shared with the post-task and
+    # timer-expiry paths, which each carried their own divergent copy until it was extracted.
+    # See that module for what the copies got wrong. The default `fallback: :none` is right
+    # here: a gateway that selects nothing is a modelling error and must surface.
     expr_ctx = build_expr_ctx(ctx)
 
-    case evaluate_flows(outgoing, expr_ctx) do
+    case Routing.choose(graph, node_id, expr_ctx) do
       {:error, reason} ->
         {:error, "exclusive gateway #{node_id}: #{reason}"}
 
-      {:ok, chosen_flow, nulls} ->
-        target_flow = chosen_flow || Enum.find(outgoing, &(&1["id"] == default_flow))
-
+      {:ok, %{flow: target_flow, nulls: nulls}} ->
         null_events =
           Enum.map(nulls, fn flow ->
             event_attrs(ctx, node_id, :condition_null, %{
@@ -606,39 +597,10 @@ defmodule AshBpmn.Runtime.Interpreter do
         else
           {:error,
            "exclusive gateway #{node_id}: no condition matched and no default flow" <>
-             null_summary(nulls)}
+             Routing.null_summary(nulls)}
         end
     end
   end
-
-  # Walks the outgoing flows in order, stopping at the first true condition. Returns the
-  # chosen flow (or nil) together with every flow whose condition evaluated to null, so the
-  # caller can record them whichever way the gateway resolves.
-  defp evaluate_flows(flows, expr_ctx) do
-    Enum.reduce_while(flows, {:ok, nil, []}, fn
-      %{"condition" => nil}, acc ->
-        # An unconditioned flow is the default path, not a condition that failed to answer.
-        {:cont, acc}
-
-      flow, {:ok, nil, nulls} ->
-        case AshBpmn.Feel.evaluate_condition(flow["condition"], expr_ctx) do
-          {:ok, true} -> {:halt, {:ok, flow, nulls}}
-          {:ok, false} -> {:cont, {:ok, nil, nulls}}
-          {:ok, nil} -> {:cont, {:ok, nil, [flow | nulls]}}
-          {:error, reason} -> {:halt, {:error, "flow #{flow["id"]}: #{reason}"}}
-        end
-    end)
-    |> case do
-      {:ok, flow, nulls} -> {:ok, flow, Enum.reverse(nulls)}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp null_summary([]), do: ""
-
-  defp null_summary(nulls),
-    do:
-      " (#{length(nulls)} condition(s) evaluated to null: #{Enum.map_join(nulls, ", ", & &1["id"])})"
 
   # ── parallelGateway ─────────────────────────────────────────────────────
 
@@ -689,12 +651,7 @@ defmodule AshBpmn.Runtime.Interpreter do
 
   # ── Flow helpers ────────────────────────────────────────────────────────
 
-  defp find_outgoing_flows(graph, node_id) do
-    graph["flows"]
-    |> Enum.filter(fn {_id, flow} -> flow["from"] == node_id end)
-    |> Enum.map(fn {id, flow} -> Map.put(flow, "id", id) end)
-    |> Enum.sort_by(& &1["id"])
-  end
+  defp find_outgoing_flows(graph, node_id), do: Routing.outgoing(graph, node_id)
 
   defp follow_flows(graph, flows, ctx) do
     Enum.flat_map(flows, &follow_flow(graph, &1, ctx))

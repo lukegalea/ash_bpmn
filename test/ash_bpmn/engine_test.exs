@@ -512,6 +512,56 @@ defmodule AshBpmn.EngineTest do
     end
   end
 
+  describe "token consumption after a task" do
+    test "the task's token is consumed through its own action, not behind it" do
+      # This path consumed tokens with raw `update_all` SQL for a long time, on a stale
+      # justification -- the `StatusIsExecuting` validation reads `changeset.data.status`, so
+      # the ordering problem the comment blamed had not existed for some time. What the SQL
+      # actually cost was an audit row, a notifier, and the tenant predicate on the update.
+      #
+      # Worth an explicit test because the swap was *invisible* to this suite: replacing the
+      # whole consume with `:ok` left all 406 tests passing. A mechanism nothing exercises is a
+      # mechanism nobody can change safely.
+      xml = File.read!("test/fixtures/access_request.bpmn")
+      defn = create_published_definition!("consume_check", xml)
+      _ = defn
+
+      subject = create_test_subject!("consume_check")
+
+      {:ok, instance} =
+        AshBpmn.start_instance(AshBpmn.Test.Domain, process: "consume_check", subject: subject)
+
+      task =
+        HumanTask
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(instance_id == ^instance.id)
+        |> Ash.Query.filter(node_id == "ManagerApproval")
+        |> Ash.read_one!(authorize?: false)
+
+      token_before =
+        Token
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(id == ^task.token_id)
+        |> Ash.read_one!(authorize?: false)
+
+      # A user task parks its token as :executing -- that is what makes it eligible to be
+      # consumed by the completion path rather than killed.
+      assert token_before.status == :executing
+
+      {:ok, _} =
+        AshBpmn.complete_task(task, outcome: :approved, actor: %{id: Ash.UUID.generate()})
+
+      token_after =
+        Token
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(id == ^task.token_id)
+        |> Ash.read_one!(authorize?: false)
+
+      assert token_after.status == :consumed,
+             "the completed task's token should be consumed, got #{inspect(token_after.status)}"
+    end
+  end
+
   defp fetch_instance(id) do
     instance =
       Instance

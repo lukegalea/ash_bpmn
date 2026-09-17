@@ -13,7 +13,7 @@ defmodule AshBpmn do
   require Ash.Expr
 
   alias AshBpmn.Config
-  alias AshBpmn.Runtime.{AdvanceWorker, DomainResolver, Oban}
+  alias AshBpmn.Runtime.{AdvanceWorker, DomainResolver, Oban, Routing}
   alias AshBpmn.Scope
 
   # ── Instance lifecycle ───────────────────────────────────────────────────
@@ -677,52 +677,66 @@ defmodule AshBpmn do
 
       graph = definition.graph
 
-      # Find outgoing flows from the task's node
-      outgoing =
-        graph["flows"]
-        |> Map.values()
-        |> Enum.filter(fn flow -> flow["from"] == task.node_id end)
+      # Routing after a human task. The subject is loaded rather than left nil so a
+      # post-approval gateway can route on the record as well as on the outcome --
+      # `subject.amount > 50000 and task.outcome = "approved"` is the shape every approval
+      # chain reaches for eventually.
+      expr_ctx = %{
+        "task" => %{"outcome" => to_string(outcome)},
+        "subject" => AshBpmn.Feel.to_feel_value(AshBpmn.Subject.load(instance, scope)),
+        "routing" => AshBpmn.Feel.to_feel_value(token.routing || %{})
+      }
 
-      # Determine which flow to follow based on outcome (for gateways after user tasks)
-      case outgoing do
-        [flow] ->
-          follow_flow(resources, instance, token, graph, flow, outcome, scope)
+      # Through `AshBpmn.Runtime.Routing`, the same router the interpreter's gateways use.
+      # This path had its own evaluator, and it was wrong in three ways that only showed up in
+      # production shapes: `_ -> false` collapsed FEEL null *and* engine errors into "branch
+      # not taken", so a condition that could not answer silently picked a branch and no
+      # `:condition_null` was ever recorded after a human task; the declared `default=` was
+      # looked up against flows read straight out of `Map.values(graph["flows"])`, which carry
+      # no `"id"`, so it never matched anything; and the last resort was `List.first(flows)`,
+      # which is the engine choosing a branch the diagram did not.
+      case Routing.choose(graph, task.node_id, expr_ctx, fallback: :single_unconditioned) do
+        {:error, reason} ->
+          # Not survivable by guessing: an expression that failed to evaluate is not a `false`.
+          raise "routing from #{task.node_id} after task completion failed: #{reason}"
 
-        flows when length(flows) > 1 ->
-          # Multiple flows — check if this connects to a gateway
-          # Use the first flow that has a matching condition or default
-          node_config = graph["nodes"][task.node_id]
-          default_flow = Enum.find(flows, fn f -> f["id"] == node_config["default_flow"] end)
-
-          # Routing after a human task. The subject is loaded rather than left nil so a
-          # post-approval gateway can route on the record as well as on the outcome --
-          # `subject.amount > 50000 and task.outcome = "approved"` is the shape every approval
-          # chain reaches for eventually, and it silently took the wrong branch while the
-          # subject here was hardcoded to nil.
-          expr_ctx = %{
-            "task" => %{"outcome" => to_string(outcome)},
-            "subject" => AshBpmn.Feel.to_feel_value(AshBpmn.Subject.load(instance, scope)),
-            "routing" => AshBpmn.Feel.to_feel_value(token.routing || %{})
-          }
-
-          chosen =
-            Enum.find(flows, fn flow ->
-              case AshBpmn.Feel.evaluate_condition(flow["condition"], expr_ctx) do
-                {:ok, true} -> true
-                _ -> false
-              end
-            end)
-
-          target_flow = chosen || default_flow || List.first(flows)
-
-          if target_flow do
-            follow_flow(resources, instance, token, graph, target_flow, outcome, scope)
-          end
-
-        _ ->
+        {:ok, %{flow: nil, nulls: nulls, outgoing: []}} ->
+          # A task with no outgoing flow is a modelling shape the compiler allows on an end
+          # path; nothing to advance to, and nothing wrong.
+          _ = nulls
           :ok
+
+        {:ok, %{flow: nil, nulls: nulls}} ->
+          record_null_conditions(resources, task, nulls, scope)
+
+          raise "no outgoing flow selected from #{task.node_id} after task completion" <>
+                  Routing.null_summary(nulls)
+
+        {:ok, %{flow: target_flow, nulls: nulls}} ->
+          record_null_conditions(resources, task, nulls, scope)
+          follow_flow(resources, instance, token, graph, target_flow, outcome, scope)
       end
     end
+  end
+
+  # Null-valued conditions are recorded on this path too, which they never were before. A
+  # condition that is silently never true looks exactly like one that is legitimately false,
+  # and is the worse bug of the two.
+  defp record_null_conditions(_resources, _task, [], _scope), do: :ok
+
+  defp record_null_conditions(resources, task, nulls, scope) do
+    Enum.each(nulls, fn flow ->
+      record_task_event(
+        resources,
+        task,
+        :condition_null,
+        %{
+          "flow_id" => flow["id"],
+          "expression" => AshBpmn.Feel.print(flow["condition"])
+        },
+        scope
+      )
+    end)
   end
 
   defp follow_flow(resources, instance, token, graph, flow, outcome, scope) do
@@ -736,8 +750,7 @@ defmodule AshBpmn do
       if join_info do
         handle_join(resources, instance, token, graph, next_node_id, join_info, outcome, scope)
       else
-        # Consume current token via direct SQL (same status validation issue as in AdvanceWorker)
-        consume_token_sql(token)
+        consume_token!(resources, token, scope)
 
         new_token =
           resources.token.create!(
@@ -763,8 +776,7 @@ defmodule AshBpmn do
   end
 
   defp handle_join(resources, instance, token, graph, join_node_id, join_info, _outcome, scope) do
-    # Consume this token via direct SQL (same status validation issue)
-    consume_token_sql(token)
+    consume_token!(resources, token, scope)
 
     # Count how many tokens have been consumed at this join node
     waits_for = join_info["waits_for"] || []
@@ -862,28 +874,21 @@ defmodule AshBpmn do
 
   defp gather_principal_ids(_), do: []
 
-  # Directly updates a token's status to :consumed via SQL, bypassing the
-  # Ash action system whose change-before-validation ordering prevents
-  # the StatusIsExecuting validation from seeing the correct status.
-  defp consume_token_sql(token) do
-    repo = AshPostgres.DataLayer.Info.repo(token.__struct__)
-    import Ecto.Query, only: [where: 3, update: 3]
-
-    # The table comes from the resource, not a literal, so a host that set
-    # `table:` on the Token macro is actually honoured -- writing "bpmn_tokens"
-    # here quietly updated nothing on a renamed table and returned a match error
-    # from the `{1, _}` below, which is a confusing way to find out.
-    #
-    # It is built by piping rather than with `from/2`: Ecto will not interpolate
-    # a source into the `in` position, so `from(t in ^table)` does not compile.
-    {1, _} =
-      token.__struct__
-      |> AshPostgres.DataLayer.Info.table()
-      |> Ecto.Queryable.to_query()
-      |> where([t], t.id == type(^token.id, Ecto.UUID))
-      |> update([t], set: [status: ^"consumed", updated_at: fragment("NOW()")])
-      |> repo.update_all([])
-
+  # Consumes a token through its own action, which is the only way the claim/consume state
+  # machine means anything.
+  #
+  # This was raw `update_all` SQL for a long time, with a comment blaming Ash's
+  # change-before-validation ordering for making `StatusIsExecuting` unusable here. That
+  # justification had gone stale: the validation reads `changeset.data.status` (token.ex, and
+  # the comment there explains why -- `get_attribute/2` would return the value the action is
+  # about to write and make the guard self-satisfying), so it sees `:executing` correctly.
+  #
+  # What the SQL cost, every time this ran: no audit row, no notifier, no tenant predicate on
+  # the update, and a `{1, _} = ` match that raised a bare `MatchError` when the row was not in
+  # the state it assumed. The timer worker's expiry path already used the action, so the two
+  # completion paths disagreed about whether consuming a token was an auditable event.
+  defp consume_token!(resources, token, scope) do
+    resources.token.consume!(token, Scope.engine(scope))
     :ok
   end
 end
