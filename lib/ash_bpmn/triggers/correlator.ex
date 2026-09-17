@@ -101,8 +101,15 @@ defmodule AshBpmn.Triggers.Correlator do
     feel_ctx = Feel.to_feel_value(raw_ctx)
 
     if listening?(feel_ctx) do
+      signal? = signal_event?(feel_ctx, ctx)
+
       subscriptions
-      |> Enum.filter(&matches?(&1, feel_ctx))
+      |> Enum.filter(fn subscription ->
+        # A signal subscription is only ever offered signal events, and a message
+        # subscription never is. Without this a `:message` subscription matching the signal
+        # resource by name would start a process on every signal thrown.
+        subscription.kind == :signal == signal? and matches?(subscription, feel_ctx)
+      end)
       |> Enum.each(&dispatch(&1, raw_ctx, feel_ctx, ctx))
     end
 
@@ -164,11 +171,9 @@ defmodule AshBpmn.Triggers.Correlator do
   # is a property plenty of business records share and mistaking one for a signal would wake
   # processes on an unrelated write.
   defp signal_signatures(feel_ctx, ctx) do
-    signal_module = Map.get(ctx.resources, :signal)
-    name = get_in(feel_ctx, [@data, "name"])
+    name = signal_name(feel_ctx)
 
-    if signal_module && is_binary(name) &&
-         ResourceName.short(signal_module) == feel_ctx[@event]["resource"] do
+    if is_binary(name) and signal_event?(feel_ctx, ctx) do
       ["signal:#{name}"]
     else
       []
@@ -363,6 +368,16 @@ defmodule AshBpmn.Triggers.Correlator do
       Index.interested?(feel_ctx[@event]["resource"], feel_ctx[@event]["action_type"])
   end
 
+  # Whether *this* event is a signal row, by resource rather than by the presence of a name
+  # field -- plenty of business records have a name, and mistaking one for a signal would
+  # start processes on an unrelated write.
+  defp signal_event?(feel_ctx, ctx) do
+    signal_module = Map.get(ctx.resources, :signal)
+
+    signal_module != nil and
+      ResourceName.short(signal_module) == feel_ctx[@event]["resource"]
+  end
+
   # ── stage 3: match ──────────────────────────────────────────────────────
 
   # The context's `event.resource` is already the short name — the adapter
@@ -371,6 +386,28 @@ defmodule AshBpmn.Triggers.Correlator do
   # compared directly. Getting this comparison wrong produces a subscription
   # that matches nothing, silently, which is why both spellings are pinned by
   # `ResourceName`.
+  @doc """
+  Whether this subscription would be offered this event, exposed for tests.
+
+  The kind gate and the match are one decision and are tested as one: a signal subscription
+  hearing a message event, or a message subscription hearing a signal, are the two ways this
+  goes wrong, and neither is reachable through `dispatch_event/3` without a whole instance
+  behind it.
+  """
+  @spec matches_for_test?(map(), map(), keyword()) :: boolean()
+  def matches_for_test?(subscription, feel_ctx, opts) do
+    signal? = Keyword.fetch!(opts, :signal?)
+    subscription.kind == :signal == signal? and matches?(subscription, feel_ctx)
+  end
+
+  # A signal subscription hears a *name*; a message subscription matches a resource and
+  # action. The two are told apart by the subscription's own kind rather than by sniffing the
+  # event, because a subscription that declared `signal_name` and then matched on resource
+  # would be a configuration nobody could debug from the outside.
+  defp matches?(%{kind: :signal} = subscription, feel_ctx) do
+    signal_name(feel_ctx) == subscription.signal_name
+  end
+
   defp matches?(subscription, feel_ctx) do
     event = feel_ctx[@event]
 
@@ -380,6 +417,10 @@ defmodule AshBpmn.Triggers.Correlator do
       (is_nil(subscription.match_action_type) or
          to_string(subscription.match_action_type) == event["action_type"])
   end
+
+  # A signal event carries its name in the row's data. `nil` for anything that is not one,
+  # which is what makes a signal subscription match nothing else.
+  defp signal_name(feel_ctx), do: get_in(feel_ctx, [@data, "name"])
 
   # ── stages 4–6 ──────────────────────────────────────────────────────────
 

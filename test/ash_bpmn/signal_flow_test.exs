@@ -113,6 +113,49 @@ defmodule AshBpmn.SignalFlowTest do
     end
   end
 
+  describe "starting a process from a signal" do
+    test "a signal subscription starts an instance; a message subscription does not" do
+      # Signal subscriptions hear a name. The guard that matters is the negative one: a
+      # message subscription that happened to match the signal resource would otherwise start
+      # a process on every signal thrown anywhere, which is the failure mode of matching on
+      # the event rather than on the subscription's own kind.
+      defn = compile!("signal_catch.bpmn") |> Definition.publish!()
+
+      signal_sub = %{
+        id: Ash.UUID.generate(),
+        kind: :signal,
+        signal_name: "Sig_Frozen",
+        match_resource: nil,
+        match_action: nil,
+        match_action_type: nil,
+        key: "on_freeze",
+        process_key: defn.key,
+        guard: nil,
+        target_kind: :static,
+        decision_key: nil,
+        max_starts_per_event: 1,
+        subject_source: nil,
+        variable_mapping: %{}
+      }
+
+      message_sub = %{
+        signal_sub
+        | id: Ash.UUID.generate(),
+          kind: :message,
+          signal_name: nil,
+          match_resource: AshBpmn.Resources.Subscription.ResourceName.short(Signal),
+          key: "on_any_signal_row"
+      }
+
+      assert Correlator.matches_for_test?(signal_sub, signal_ctx("Sig_Frozen"), signal?: true)
+
+      refute Correlator.matches_for_test?(message_sub, signal_ctx("Sig_Frozen"), signal?: true),
+             "a message subscription must not be offered a signal event"
+
+      refute Correlator.matches_for_test?(signal_sub, signal_ctx("Something_Else"), signal?: true)
+    end
+  end
+
   describe "refusing" do
     test "a signalRef with no declaration is refused, and says where the declaration goes" do
       xml =
@@ -206,6 +249,17 @@ defmodule AshBpmn.SignalFlowTest do
       event_source: AshBpmn.Test.EventSource,
       resources: resources,
       scope: AshBpmn.Scope.system(:sweep)
+    })
+  end
+
+  defp signal_ctx(name) do
+    AshBpmn.Feel.to_feel_value(%{
+      "event" => %{
+        "resource" => AshBpmn.Resources.Subscription.ResourceName.short(Signal),
+        "action" => "emit",
+        "action_type" => "create"
+      },
+      "data" => %{"name" => name}
     })
   end
 
