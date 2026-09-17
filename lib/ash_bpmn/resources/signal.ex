@@ -28,6 +28,24 @@ defmodule AshBpmn.Resources.Signal do
   and that asymmetry is deliberate: the signal *is* the event. Emitting it any other way would
   put a second, weaker ordering next to the one the log already provides.
 
+  ## What a host must get right, because nothing here can check it
+
+  Two things about the audited base decide whether signals work, and neither fails loudly.
+
+  **Without an audited base the row is written and no event reaches the log**, so nothing is
+  ever delivered. A host installing signals on a plain base gets a table that fills up and
+  does nothing at all.
+
+  **The event must carry the tenant the way the host's log expects it.** In the reference
+  application the audit chain's trigger takes `organization_id` from the event's *metadata*
+  and overwrites the column, so an event whose metadata omits it lands in the nil-tenant
+  chain — invisible to that tenant's export and to its chain verification, with the row
+  written, the hash correct and nothing raised. Whatever stamps correlation and tenancy onto
+  ordinary audited writes has to be on this path too.
+
+  Both are stated here rather than checked because they are properties of the *host's* base,
+  which this macro receives and cannot inspect.
+
   ## Payload, and what it is not
 
   `payload` carries the signal's own data, which is not the subject's. A catch event reads the
