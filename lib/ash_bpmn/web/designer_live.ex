@@ -478,13 +478,11 @@ defmodule AshBpmn.Web.DesignerLive do
           |> Ash.read_one!(AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns)))
           |> case do
             nil ->
-              definition_mod.create!(
-                %{
-                  key: socket.assigns.definition_key,
-                  name: String.capitalize(socket.assigns.definition_key) <> " process",
-                  xml: ash_bpmn_template_xml(socket.assigns.definition_key)
-                },
-                Keyword.put(opts, :authorize?, false)
+              AshBpmn.Web.DesignerDraft.create_or_reread!(
+                definition_mod,
+                socket.assigns.definition_key,
+                ash_bpmn_template_xml(socket.assigns.definition_key),
+                opts
               )
 
             defn ->
