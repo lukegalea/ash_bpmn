@@ -125,6 +125,21 @@ defmodule AshBpmn.Resources.Instance do
         # a new event with nothing linking it to the one that started the process, so the
         # count restarted at zero on every lap and the bound never fired. That is precisely
         # the cycle signals make possible.
+        # A child instance started by a call activity names the token waiting for it. Direct
+        # references rather than a correlation key, because there is nothing to correlate: the
+        # parent knows exactly which child it started, and a child has exactly one parent.
+        #
+        # `parent_token_id` is what the completion wakes. `parent_instance_id` is for the
+        # people reading afterwards -- "what did this run as part of?" is the question, and
+        # answering it by walking tokens would be needless.
+        attribute :parent_instance_id, :uuid do
+          public? true
+        end
+
+        attribute :parent_token_id, :uuid do
+          public? true
+        end
+
         attribute :trigger_depth, :integer do
           default 0
           allow_nil? false
@@ -166,7 +181,9 @@ defmodule AshBpmn.Resources.Instance do
             :started_by_id,
             :outcome,
             :definition_id,
-            :trigger_depth
+            :trigger_depth,
+            :parent_instance_id,
+            :parent_token_id
           ]
         end
 

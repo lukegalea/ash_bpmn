@@ -132,6 +132,36 @@ defmodule AshBpmn.MessageCatchTest do
     end
   end
 
+  describe "receive task sugar" do
+    test "a receive task waits exactly as the catch event does" do
+      # Earned by legibility rather than capability: this is the notation an analyst draws for
+      # something that already worked, and a subset that refuses it makes them redraw their
+      # diagram to suit the engine. It is worth having only because it is sugar -- it compiles
+      # to the same config and dispatches through the same clause.
+      xml = File.read!("test/fixtures/receive_task.bpmn")
+
+      defn = Definition.create!(%{key: unique_key(), name: "RT", xml: xml})
+      if is_nil(defn.graph), do: flunk("compile failed: #{inspect(defn.errors)}")
+
+      assert defn.graph["nodes"]["AwaitPayment"]["type"] == "receiveTask"
+      assert defn.graph["nodes"]["AwaitPayment"]["catch"]["kind"] == "message"
+
+      defn = Definition.publish!(defn)
+
+      {:ok, subject} =
+        AshBpmn.Test.Subject.create!(%{name: "rt", amount: 0, is_privileged: false})
+
+      {:ok, instance} =
+        AshBpmn.start_instance(AshBpmn.Test.Domain, definition: defn, subject: subject)
+
+      assert token_at(instance, "AwaitPayment").status == :waiting
+
+      deliver!(%{invoice_id: subject.id})
+
+      assert reload(instance).status == :completed
+    end
+  end
+
   describe "lookback" do
     test "the default is BPMN-strict: no window, and an early event is missed" do
       {instance, _subject} = start!()

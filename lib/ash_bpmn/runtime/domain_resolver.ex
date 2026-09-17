@@ -97,6 +97,19 @@ defmodule AshBpmn.Runtime.DomainResolver do
     end
   end
 
+  @doc """
+  The domain as a module, whatever shape it arrived in.
+
+  Job args are JSON, so a scope built from them carries the domain as a string. Callers that
+  need to hand it to something expecting a module -- `AshBpmn.start_instance/2`, say -- need
+  this rather than the raw value, which otherwise fails deep inside Ash with an error that
+  reads like Ash's fault.
+  """
+  @spec module!(module() | String.t() | nil) :: module() | nil
+  def module!(nil), do: nil
+  def module!(domain) when is_atom(domain), do: domain
+  def module!(domain) when is_binary(domain), do: existing_module!(domain)
+
   # Job args are JSON, so the domain arrives as a string. `to_existing_atom`
   # rather than `to_atom`: the module is compiled into the release running this
   # job, and if it is not -- a stale job naming a domain that has since been

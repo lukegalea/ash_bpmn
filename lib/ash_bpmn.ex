@@ -53,11 +53,24 @@ defmodule AshBpmn do
       by a trigger runs as a non-human actor but was caused by a person, and a system actor
       has no id to fall back on.
     * `:tenant`, `:correlation_id`.
+    * `:subject_type` / `:subject_id` — an alternative to `:subject` for callers that have the
+      identity but not the record. A call activity starting a child uses these, because the
+      parent already read the subject and re-reading it to hand it over would be a query to
+      produce something it has.
+    * `:parent_instance_id` / `:parent_token_id` — set by a call activity, so the child's
+      completion knows which token is waiting for it.
+    * `:trigger_depth` — how many hops produced this instance. Inherited and incremented by
+      anything that starts a process from a process; the bound that stops a cycle.
   """
   @spec start_instance(module(), keyword()) :: {:ok, map()} | {:error, term()}
   def start_instance(domain, opts) do
-    subject = Keyword.fetch!(opts, :subject)
+    subject = Keyword.get(opts, :subject)
     actor = Keyword.get(opts, :actor)
+
+    if is_nil(subject) and is_nil(opts[:subject_type]) do
+      raise ArgumentError, "start_instance/2 needs either :subject or :subject_type/:subject_id"
+    end
+
     scope = %{Scope.from_opts(opts) | domain: domain}
 
     {:ok, resources} = AshBpmn.Resources.for_domain(domain)
@@ -72,8 +85,11 @@ defmodule AshBpmn do
           resources.instance.create!(
             %{
               definition_id: definition.id,
-              subject_type: subject.__struct__ |> to_string(),
-              subject_id: subject.id,
+              subject_type: (subject && subject.__struct__ |> to_string()) || opts[:subject_type],
+              subject_id: (subject && subject.id) || opts[:subject_id],
+              parent_instance_id: opts[:parent_instance_id],
+              parent_token_id: opts[:parent_token_id],
+              trigger_depth: opts[:trigger_depth] || 0,
               # The actor and the person accountable are not the same thing, and conflating
               # them breaks two legitimate cases: an engine or system actor has no `:id` at
               # all and would raise here, and a process started on someone's behalf should

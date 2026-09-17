@@ -22,8 +22,9 @@ The compiler rejects, each with the offending element's id in the error:
   timer boundary events on user tasks, interrupting or not, message catch
   events, conditional catch events, signal
   throw and catch events, error end events, exclusive and parallel gateways,
-  conditional and default flows, and parallel multi-instance activities. Call activities, ad-hoc and
-  transactional sub-processes, throw events,
+  conditional and default flows, parallel multi-instance activities, call
+  activities and receive tasks. Call activities, ad-hoc and
+  transactional sub-processes,
   the rest of the event-definition taxonomy (message on anything but an
   intermediate catch event, signal on anything but an intermediate throw or
   catch, conditional on anything but an intermediate catch, error on anything
@@ -111,6 +112,12 @@ The compiler rejects, each with the offending element's id in the error:
   for a following gateway to read, a boundary leaves down its own flow with no
   outcome — so the same picture would mean something different after an
   upgrade. The two are made mutually exclusive on a user task instead.
+- **A call activity naming no child.** `calledElement`, BPMN's own attribute for
+  this, points at a process id inside the same definitions document, which is the
+  wrong reference here: a child is a published definition in its own right,
+  resolved by key and version at start time like every other process, and a
+  document-local id could only name one drawn in the same file. So it is
+  `ash:process key="..."`, and a call activity without one is refused.
 - **Sequential multi-instance**, and a collection that is not a list of scalars.
   Sequential execution is a loop, and a loop whose body can wait for a person
   needs a cursor on the token that parallel fan-out does not — so it is refused

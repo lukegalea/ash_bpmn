@@ -48,6 +48,7 @@ defmodule AshBpmn.Runtime.Interpreter do
   `task_ref` is an opaque placeholder that ties the three task effects together;
   the worker resolves it to the created row's real id.
     * `{:consume_token, true}` — consume the current token
+    * `{:start_child, spec}` — start a child instance that names this token as its parent
     * `{:multi_instance_join, spec}` — consume; the last instance of the fan-out follows on
     * `{:terminate_instance, outcome}` — kill every other live token, then complete
     * `{:error_instance, {outcome, error}}` — the same, but ending `:errored` not completed
@@ -146,6 +147,14 @@ defmodule AshBpmn.Runtime.Interpreter do
 
       "intermediateThrowEvent" ->
         signal_throw(graph, node_id, node, ctx)
+
+      "callActivity" ->
+        call_activity(node_id, node, ctx)
+
+      # Sugar. A receive task *is* a message catch, so it dispatches as one rather than
+      # through a parallel implementation that would have to be kept in step.
+      "receiveTask" ->
+        intermediate_catch_event(graph, node_id, node, ctx)
 
       other ->
         {:error, "unsupported node type: #{other}"}
@@ -857,6 +866,37 @@ defmodule AshBpmn.Runtime.Interpreter do
        "token_id" => ctx[:token].id,
        "node_id" => node_id
      }, [scheduled_at: DateTime.add(DateTime.utc_now(), seconds, :second)]}
+  end
+
+  # ── callActivity ─────────────────────────────────────────────────────────
+
+  # Park, and start the child. The token waits exactly as it would for a message, because
+  # from its point of view that is what is happening: something else is going to happen and
+  # then it carries on.
+  #
+  # No correlation key, and no signature the correlator would query. There is nothing to
+  # correlate -- the child records which token is waiting for it, so completion is a direct
+  # reference rather than a search. A signature would advertise an interest the correlator
+  # could match on, which is exactly what must not happen: a call activity is woken by *its*
+  # child and by nothing else.
+  defp call_activity(node_id, node, ctx) do
+    call = node["call_process"] || %{}
+
+    effects = [
+      park_token: %{
+        subscription_signature: nil,
+        correlation_key: nil
+      },
+      events: [
+        event_attrs(ctx, node_id, :node_entered, %{
+          "waiting_for" => "child_process",
+          "process_key" => call["key"]
+        })
+      ],
+      start_child: %{key: call["key"], node_id: node_id}
+    ]
+
+    {:ok, effects}
   end
 
   # ── multi-instance ───────────────────────────────────────────────────────

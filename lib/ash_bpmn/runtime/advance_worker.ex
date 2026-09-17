@@ -428,6 +428,9 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
             raise "signal throw #{spec.node_id} failed: #{inspect(reason)}"
         end
 
+      {:start_child, spec} ->
+        start_child_instance(resources, ctx, spec, scope)
+
       {:multi_instance_fan, token_attrs} ->
         # Created and enqueued together, so each job names the token it is for. Everything
         # else in this module can key a job by node id because a node holds one token; a
@@ -622,6 +625,130 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     )
   end
 
+  # A child that has finished wakes the token its parent left waiting.
+  #
+  # Direct, by the id the child was started with, rather than through the correlator. There is
+  # nothing to correlate: the parent knows which child it started and the child records which
+  # token is waiting. Routing the return through the sweep would add a delay and a delivery
+  # guarantee to a reference that cannot be wrong.
+  #
+  # Nothing happens for an instance with no parent, which is nearly all of them.
+  defp wake_parent(_resources, %{parent_token_id: nil}, _outcome, _scope), do: :ok
+
+  defp wake_parent(resources, instance, outcome, scope) do
+    parent_scope = Scope.from_record(instance, actor: Map.get(scope, :actor))
+
+    token =
+      resources.token
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(id == ^instance.parent_token_id)
+      |> Ash.read_one!(Scope.engine(parent_scope))
+
+    with false <- is_nil(token),
+         {:ok, token} <- resources.token.claim_waiting(token, Scope.engine(parent_scope)) do
+      parent =
+        resources.instance
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(id == ^token.instance_id)
+        |> Ash.read_one!(Scope.engine(parent_scope))
+
+      resources.process_event.create!(
+        %{
+          instance_id: parent.id,
+          token_id: token.id,
+          node_id: token.node_id,
+          kind: :child_completed,
+          data: %{"child_instance_id" => instance.id, "outcome" => to_outcome(outcome)}
+        },
+        Scope.engine(parent_scope)
+      )
+
+      continue_parent(resources, parent, token, parent_scope)
+    else
+      # The parent branch was pruned while the child ran -- a terminate, a cancel, or an
+      # interrupting boundary above it. The child still finished, and its work still happened;
+      # there is simply nobody left to tell.
+      _ -> :ok
+    end
+  end
+
+  defp continue_parent(resources, parent, token, scope) do
+    graph =
+      AshBpmn.DefinitionLoader.load!(
+        resources.definition,
+        parent.definition_id,
+        parent,
+        scope
+      ).graph
+
+    case AshBpmn.Runtime.Routing.outgoing(graph, token.node_id) do
+      [flow | _] ->
+        resources.token.consume!(token, Scope.engine(scope))
+
+        new_token =
+          resources.token.create!(
+            %{
+              instance_id: parent.id,
+              node_id: flow["to"],
+              status: :active,
+              routing: token.routing || %{}
+            },
+            Scope.engine(scope)
+          )
+
+        AshBpmn.Runtime.Oban.insert(
+          AshBpmn.Runtime.AdvanceWorker,
+          Scope.to_job_args(scope, %{
+            "instance_id" => parent.id,
+            "token_id" => new_token.id,
+            "node_id" => flow["to"]
+          })
+        )
+
+      [] ->
+        resources.token.consume!(token, Scope.engine(scope))
+    end
+  end
+
+  # Starts the child a call activity is waiting for, naming the waiting token so the child's
+  # completion knows where to go back to.
+  #
+  # The child is given the same subject as its parent. A call activity is the same work broken
+  # out, not work about something else -- and a child whose subject had to be computed would
+  # need a mapping vocabulary that nothing has asked for. The depth is inherited so a process
+  # that calls itself is bounded by the same counter as everything else.
+  defp start_child_instance(resources, ctx, spec, scope) do
+    instance = ctx[:instance]
+
+    # The domain arrives in job args as a string -- they are JSON -- so it is normalized the
+    # same way the worker normalized it to resolve `resources` in the first place. Passing the
+    # raw value reaches `Module.get_attribute` with a binary, which fails somewhere that reads
+    # like a bug in Ash rather than a bug here.
+    case AshBpmn.start_instance(DomainResolver.module!(scope.domain),
+           process: spec.key,
+           subject_type: instance.subject_type,
+           subject_id: instance.subject_id,
+           parent_instance_id: instance.id,
+           parent_token_id: ctx[:token] && ctx[:token].id,
+           trigger_depth: (instance.trigger_depth || 0) + 1,
+           actor: Map.get(scope, :actor),
+           tenant: Map.get(scope, :tenant)
+         ) do
+      {:ok, child} ->
+        record_event(resources, ctx, :child_started, %{
+          "process_key" => spec.key,
+          "child_instance_id" => child.id
+        })
+
+      {:error, reason} ->
+        # The parent is already parked. Raising sends the job back to Oban, which retries the
+        # whole dispatch -- and the park is idempotent under that because the token is no
+        # longer `:executing` and the claim fails. Better a retry than a token waiting for a
+        # child that was never started.
+        raise "call activity #{spec.node_id} could not start #{spec.key}: #{inspect(reason)}"
+    end
+  end
+
   # Mints the token the fan-out was holding back, once the last instance has finished.
   #
   # Routing comes from the *joining* token, minus the element key -- which is deliberate. Each
@@ -676,6 +803,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     if remaining == [] do
       resources.instance.mark_completed!(ctx[:instance], to_outcome(outcome), Scope.engine(scope))
       record_event(resources, ctx, :instance_completed, %{"outcome" => outcome})
+      wake_parent(resources, ctx[:instance], outcome, scope)
     else
       # Recorded, because "this branch finished and the process did not" is a fact somebody
       # reading the log will want, and its absence is what makes a stuck parallel process hard

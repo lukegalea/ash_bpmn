@@ -134,6 +134,11 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         # finished, and conflating the two makes a stuck parallel instance
                         # look like a completed one in the log.
                         :branch_completed,
+                        # A call activity started its child, and the child finished and woke
+                        # the token that was waiting. Two rows, because "it never came back"
+                        # and "it was never started" are different findings.
+                        :child_started,
+                        :child_completed,
                         :instance_failed,
                         # The process reached an error end event: it ended badly by design,
                         # which is not the same finding as `:instance_failed` and must not be

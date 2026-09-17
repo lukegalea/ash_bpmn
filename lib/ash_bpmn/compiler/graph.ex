@@ -162,8 +162,8 @@ defmodule AshBpmn.Compiler.Graph do
     ioSpecification dataInput dataOutput inputSet outputSet property
     dataObject dataObjectReference resourceRole performer humanPerformer
     potentialOwner correlationSubscription supports
-    callActivity subProcess adHocSubProcess transaction
-    receiveTask scriptTask manualTask task
+    subProcess adHocSubProcess transaction
+    scriptTask manualTask task
     complexGateway eventBasedGateway
   ))
 
@@ -805,6 +805,51 @@ defmodule AshBpmn.Compiler.Graph do
 
   # A throw waits for nothing: the token carries straight on through the outgoing flow while
   # the sweep delivers the signal to whoever was listening.
+  # A call activity starts a child process and waits for it to finish -- process-as-action.
+  #
+  #     <bpmn2:callActivity id="Onboard">
+  #       <bpmn2:extensionElements>
+  #         <ash:process key="vendor.onboarding"/>
+  #       </bpmn2:extensionElements>
+  #     </bpmn2:callActivity>
+  #
+  # `calledElement` is BPMN's own attribute for this and points at a process *id* in the same
+  # definitions document. That is the wrong reference here: a child is a published definition
+  # in its own right, resolved by key and version at start time like every other process, and
+  # a document-local id could only ever name one drawn in the same file.
+  defp build_node_config(node, "callActivity", _declarations) do
+    id = Xml.element_attr(node, "id")
+    ext = Xml.find_extension_elements(node)
+
+    case Xml.find_ash_elements(ext, "process") do
+      [] ->
+        {:error,
+         Errors.error(
+           id,
+           "callActivity '#{id}' has no ash:process naming the child to start"
+         )}
+
+      [_, _ | _] ->
+        {:error, Errors.error(id, "callActivity '#{id}' has more than one ash:process")}
+
+      [process] ->
+        key = Xml.element_attr(process, "key")
+
+        if blank?(key) do
+          {:error, Errors.error(id, "ash:process on '#{id}' has no key")}
+        else
+          {:ok, %{"call_process" => %{"key" => String.trim(key)}}}
+        end
+    end
+  end
+
+  # A receive task is a message catch wearing an activity's shape. Same configuration, same
+  # runtime, different rectangle -- which is the whole of what "sugar" should mean. If it
+  # needed semantics of its own it would not have been earned.
+  defp build_node_config(node, "receiveTask", _declarations) do
+    build_message_catch(Xml.element_attr(node, "id"), node)
+  end
+
   defp build_node_config(node, "intermediateThrowEvent", declarations) do
     build_signal_throw(Xml.element_attr(node, "id"), node, declarations.signals)
   end
