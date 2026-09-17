@@ -77,6 +77,18 @@ end
 # The triggers extension's three resources, tenant-scoped — the version
 # sequence is per key *within the tenant*, and the cursor is one row per
 # tenant, so attribute multitenancy is not optional for these.
+defmodule AshBpmn.TenantTest.TimerJob do
+  @moduledoc false
+  use AshBpmn.Resources.TimerJob,
+    domain: AshBpmn.TenantTest.Domain,
+    repo: AshBpmn.TestRepo,
+    instance: AshBpmn.TenantTest.Instance,
+    token: AshBpmn.TenantTest.Token,
+    task: AshBpmn.TenantTest.HumanTask,
+    table: "tenant_bpmn_timer_jobs",
+    tenant?: true
+end
+
 defmodule AshBpmn.TenantTest.Subscription do
   @moduledoc false
   use AshBpmn.Resources.Subscription,
@@ -120,5 +132,6 @@ defmodule AshBpmn.TenantTest.Domain do
     resource AshBpmn.TenantTest.Subscription
     resource AshBpmn.TenantTest.Cursor
     resource AshBpmn.TenantTest.Dispatch
+    resource AshBpmn.TenantTest.TimerJob
   end
 end

@@ -24,7 +24,12 @@ defmodule AshBpmn.Resources do
 
   @core_kinds [:definition, :instance, :token, :human_task, :task_candidate, :process_event]
   @trigger_kinds [:subscription, :cursor, :dispatch]
-  @kinds @core_kinds ++ @trigger_kinds
+
+  # The timer ledger is its own optional kind rather than a seventh core one, because a host
+  # that never draws a timer should not carry a table for them -- and because every writer
+  # already has to tolerate its absence the same way the trigger kinds are tolerated.
+  @ledger_kinds [:timer_job]
+  @kinds @core_kinds ++ @trigger_kinds ++ @ledger_kinds
 
   @doc "The kinds every BPMN domain must register."
   @spec core_kinds() :: [atom()]
@@ -33,6 +38,10 @@ defmodule AshBpmn.Resources do
   @doc "The triggers extension's kinds, which a domain may omit."
   @spec trigger_kinds() :: [atom()]
   def trigger_kinds, do: @trigger_kinds
+
+  @doc "The timer ledger's kinds, which a domain may omit."
+  @spec ledger_kinds() :: [atom()]
+  def ledger_kinds, do: @ledger_kinds
 
   @doc "Returns the `@ash_bpmn_kind` atom for a loaded module, or `:not_bpmn`."
   @spec kind(module()) :: atom()
