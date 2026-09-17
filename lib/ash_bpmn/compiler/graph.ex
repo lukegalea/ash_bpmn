@@ -225,6 +225,58 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
+  # `ash:load` names the relationships and calculations this node's expressions need on the
+  # subject:
+  #
+  #     <ash:load>
+  #       <ash:path name="customer"/>
+  #       <ash:path name="invoices.total"/>
+  #     </ash:load>
+  #
+  # The subject is read live on every advance, which is what keeps the process from becoming
+  # a second source of truth about the domain. The cost of that is a starved context: an
+  # unloaded relationship is a missing path, and a missing path is FEEL `null`, so
+  # `customer.tier = "gold"` was quietly never true rather than an error. Declaring the load
+  # ends the choice between loading everything for every node and hand-writing conditions
+  # around a context that cannot answer.
+  #
+  # Loading stays *strict*, and unloaded paths keep reading as null. That is deliberate: a
+  # node declares what it needs, and a path it did not declare is still honestly unavailable
+  # rather than silently fetched because some other node asked for it.
+  defp build_load(id, node) do
+    ext = Xml.find_extension_elements(node)
+
+    case Xml.find_ash_elements(ext, "load") do
+      [] ->
+        {:ok, []}
+
+      [_, _ | _] ->
+        {:error, Errors.error(id, "node '#{id}' has more than one ash:load")}
+
+      [load] ->
+        paths =
+          load
+          |> Xml.get_element_children()
+          |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "path"))
+          |> Enum.map(&Xml.element_attr(&1, "name"))
+
+        cond do
+          paths == [] ->
+            {:error,
+             Errors.error(id, "ash:load on '#{id}' declares no ash:path, so it loads nothing")}
+
+          Enum.any?(paths, &blank?/1) ->
+            {:error, Errors.error(id, "ash:load on '#{id}' has an ash:path with no name")}
+
+          true ->
+            {:ok, Enum.map(paths, &String.trim/1)}
+        end
+    end
+  end
+
+  defp maybe_put_load(config, []), do: config
+  defp maybe_put_load(config, load), do: Map.put(config, "load", load)
+
   # Every direct child of a supported node -- and every direct child of that
   # node's `extensionElements` -- must be something the compiler implements.
   # The ash: vocabulary inside extensionElements is parsed by the node config
@@ -403,12 +455,12 @@ defmodule AshBpmn.Compiler.Graph do
     else
       base = %{"type" => type, "name" => name}
 
-      case build_node_config(node, type, error_declarations) do
-        {:ok, config} ->
-          {:ok, {id, Map.merge(base, config)}}
-
-        {:error, error} ->
-          {:error, error}
+      # Parsed here rather than in each node clause, because what a node's expressions need
+      # loaded is orthogonal to what kind of node it is -- a gateway, a user task and a
+      # business rule task all read the subject the same way.
+      with {:ok, load} <- build_load(id, node),
+           {:ok, config} <- build_node_config(node, type, error_declarations) do
+        {:ok, {id, base |> Map.merge(config) |> maybe_put_load(load)}}
       end
     end
   end

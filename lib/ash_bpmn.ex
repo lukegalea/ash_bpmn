@@ -761,7 +761,17 @@ defmodule AshBpmn do
       # chain reaches for eventually.
       expr_ctx = %{
         "task" => %{"outcome" => to_string(outcome)},
-        "subject" => AshBpmn.Feel.to_feel_value(AshBpmn.Subject.load(instance, scope)),
+        # The task's own node declares what its outgoing conditions need loaded, exactly as
+        # it would for any other transition. Routing after a human task used to read a
+        # starved subject here while the same node's entry read a loaded one.
+        "subject" =>
+          AshBpmn.Feel.to_feel_value(
+            AshBpmn.Subject.load(
+              instance,
+              scope,
+              get_in(graph, ["nodes", task.node_id, "load"]) || []
+            )
+          ),
         "routing" => AshBpmn.Feel.to_feel_value(token.routing || %{})
       }
 

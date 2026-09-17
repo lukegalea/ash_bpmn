@@ -102,7 +102,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
                   scope
                 )
               else
-                ctx = build_context(instance, claimed_token, scope, task_outcome)
+                ctx = build_context(instance, claimed_token, scope, task_outcome, node["load"])
 
                 case Interpreter.dispatch(graph, node_id, node, ctx) do
                   {:ok, effects} ->
@@ -253,8 +253,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
   # ── Context building ───────────────────────────────────────────────────
 
-  defp build_context(instance, token, scope, task_outcome \\ nil) do
-    subject = load_subject(instance, scope)
+  defp build_context(instance, token, scope, task_outcome \\ nil, load \\ []) do
+    subject = load_subject(instance, scope, load)
 
     assigns =
       if task_outcome do
@@ -279,7 +279,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     }
   end
 
-  defp load_subject(instance, scope), do: AshBpmn.Subject.load(instance, scope)
+  defp load_subject(instance, scope, load),
+    do: AshBpmn.Subject.load(instance, scope, load || [])
 
   # ── Effect application ───────────────────────────────────────────────────
 

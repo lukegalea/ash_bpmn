@@ -128,6 +128,12 @@ The compiler rejects, each with the offending element's id in the error:
   process callers and bypassed by every other caller — the controller-layer
   authorization mistake in a new costume. Decisions, validations and
   authorization live in Ash actions; the graph orchestrates calls to them.
+- **An `ash:load` that loads nothing** — one declaring no `ash:path`, or a path
+  with no name. Loading is otherwise strict and stays that way: a node declares
+  what its expressions need on the subject, and a path it did not declare reads
+  as `null`, exactly as it would have without the feature. That is deliberate.
+  The alternative — loading whatever any node asked for — would make a
+  condition's answer depend on which other nodes happened to be in the diagram.
 - **Business data in tokens.** A token carries node ids, status, the scalars a
   node explicitly promoted for routing, and — while parked — what it is
   listening for. Never what the subject said. Reading the subject fresh through

@@ -161,6 +161,14 @@ defmodule AshBpmn.Test.Subject do
     end
   end
 
+  calculations do
+    # Exists for the `ash:load` tests, and a calculation is the right shape for them: it is
+    # not loaded unless asked for, so the same FEEL expression over it answers null on an
+    # undeclared node and a number on a declared one. A plain attribute could not show the
+    # difference, because attributes are always there.
+    calculate :doubled_amount, :integer, expr(amount * 2)
+  end
+
   code_interface do
     define :create!, action: :create
     define :update!, action: :update

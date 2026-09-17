@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+A gateway routing on a calculation the node declares it needs. Without the ash:load the
+path is unloaded, FEEL answers null, and the condition is never true; with it the gateway
+routes on a real number.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_ash_load"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_ash_load" name="Ash load" isExecutable="true">
+
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>Flow_1</bpmn2:outgoing></bpmn2:startEvent>
+
+    <bpmn2:exclusiveGateway id="Gate_1" name="Large?" default="Flow_Small">
+      <bpmn2:extensionElements>
+        <ash:load>
+          <ash:path name="doubled_amount"/>
+        </ash:load>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_Large</bpmn2:outgoing>
+      <bpmn2:outgoing>Flow_Small</bpmn2:outgoing>
+    </bpmn2:exclusiveGateway>
+
+    <bpmn2:serviceTask id="Large" name="Large">
+      <bpmn2:extensionElements><ash:taskConfig action="handle_large"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Large</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_LargeOut</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:serviceTask id="Small" name="Small">
+      <bpmn2:extensionElements><ash:taskConfig action="handle_small"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Small</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_SmallOut</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>Flow_LargeOut</bpmn2:incoming></bpmn2:endEvent>
+    <bpmn2:endEvent id="End_2"><bpmn2:incoming>Flow_SmallOut</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Gate_1"/>
+    <bpmn2:sequenceFlow id="Flow_Large" sourceRef="Gate_1" targetRef="Large">
+      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        language="feel">subject.doubled_amount > 100</bpmn2:conditionExpression>
+    </bpmn2:sequenceFlow>
+    <bpmn2:sequenceFlow id="Flow_Small" sourceRef="Gate_1" targetRef="Small"/>
+    <bpmn2:sequenceFlow id="Flow_LargeOut" sourceRef="Large" targetRef="End_1"/>
+    <bpmn2:sequenceFlow id="Flow_SmallOut" sourceRef="Small" targetRef="End_2"/>
+  </bpmn2:process>
+</bpmn2:definitions>
