@@ -969,7 +969,8 @@ defmodule AshBpmn.Runtime.Interpreter do
          "instance_id" => ctx[:instance].id,
          "token_id" => ctx[:token].id,
          "boundary_id" => boundary_id,
-         "attached_to" => node_id
+         "attached_to" => node_id,
+         "interrupting" => get_in(graph, ["nodes", boundary_id, "interrupting"]) != false
        },
        [
          scheduled_at: DateTime.add(DateTime.utc_now(), seconds, :second),

@@ -48,14 +48,74 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
       |> Ash.Query.filter(id == ^args["token_id"])
       |> Ash.read_one!(Scope.engine(scope))
 
-    if is_nil(token) do
-      {:cancel, :token_gone}
-    else
-      interrupt(resources, token, args, scope)
+    cond do
+      is_nil(token) ->
+        {:cancel, :token_gone}
+
+      # A dead or consumed token has no branch to run beside. The interrupting path finds this
+      # out at the claim; the non-interrupting path never claims, so it has to ask.
+      token.status not in [:waiting, :executing, :active] ->
+        {:ok, :not_live}
+
+      true ->
+        interrupt(resources, token, args, scope)
     end
   end
 
   defp interrupt(resources, token, args, scope) do
+    if args["interrupting"] == false do
+      spawn_branch(resources, token, args, scope)
+    else
+      do_interrupt(resources, token, args, scope)
+    end
+  end
+
+  # Non-interrupting: the activity keeps running and a *second* branch starts at the boundary.
+  #
+  # Nothing is claimed and nothing is cancelled, which is what makes it non-interrupting --
+  # the attached token stays exactly as it was, parked on its approval, and the new token is
+  # an ordinary live branch beside it. The instance now waits for both, which it could not do
+  # until completion moved from the first branch to the last.
+  #
+  # `parent_token_id` records where the branch came from. There is no join that reunites them
+  # and BPMN does not expect one: a non-interrupting branch runs to its own end.
+  defp spawn_branch(resources, token, args, scope) do
+    boundary_id = args["boundary_id"]
+
+    resources.process_event.create!(
+      record(resources, token, boundary_id, :activity_interrupted, %{
+        "timer_kind" => "boundary",
+        "interrupting" => false,
+        "attached_to" => args["attached_to"]
+      }),
+      Scope.engine(scope)
+    )
+
+    new_token =
+      resources.token.create!(
+        %{
+          instance_id: token.instance_id,
+          node_id: boundary_id,
+          status: :active,
+          parent_token_id: token.id,
+          routing: token.routing || %{}
+        },
+        Scope.engine(scope)
+      )
+
+    AshBpmn.Runtime.Oban.insert(
+      AshBpmn.Runtime.AdvanceWorker,
+      Scope.to_job_args(scope, %{
+        "instance_id" => token.instance_id,
+        "token_id" => new_token.id,
+        "node_id" => boundary_id
+      })
+    )
+
+    {:ok, :branch_started}
+  end
+
+  defp do_interrupt(resources, token, args, scope) do
     task = find_task(resources, token, args["attached_to"], scope)
 
     with :ok <- cancel_task(resources, task, scope),

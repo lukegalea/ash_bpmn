@@ -3,8 +3,9 @@
 SPDX-FileCopyrightText: 2026 Luke Galea
 SPDX-License-Identifier: MIT
 
-Non-interrupting: it would run a second branch alongside the activity, and there is no
-join that could ever reunite the two.
+A non-interrupting timer boundary: when it fires the approval carries on and a second branch
+starts beside it, running the escalation. Both branches have their own end event, which is
+why this shape needed the instance to finish on its last branch rather than its first.
 -->
 <bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"

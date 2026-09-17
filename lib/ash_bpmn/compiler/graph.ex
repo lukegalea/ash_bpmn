@@ -640,10 +640,12 @@ defmodule AshBpmn.Compiler.Graph do
       |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "timerEventDefinition"))
 
     with :ok <- check_attached_ref(id, ref),
-         :ok <- check_cancel_activity(id, Xml.element_attr(node, "cancelActivity")),
+         {:ok, interrupting?} <-
+           check_cancel_activity(id, Xml.element_attr(node, "cancelActivity")),
          {:ok, definition} <- single_boundary_definition(id, definitions),
          {:ok, %{"catch" => spec}} <- build_timer_catch(id, definition) do
-      {:ok, %{"attached_to" => String.trim(ref), "catch" => spec}}
+      {:ok,
+       %{"attached_to" => String.trim(ref), "catch" => spec, "interrupting" => interrupting?}}
     end
   end
 
@@ -1042,17 +1044,19 @@ defmodule AshBpmn.Compiler.Graph do
   # supported. Non-interrupting is refused by name rather than ignored: it spawns a second
   # branch while the activity keeps running, and the engine has no token topology for that --
   # no fork relating the two and no join that could reunite them.
-  defp check_cancel_activity(_id, value) when value in [nil, "true", "1"], do: :ok
+  # `cancelActivity` defaults to true. Both settings are supported, and they are genuinely
+  # different events rather than a flag on one: interrupting ends the activity and continues
+  # from the boundary, non-interrupting leaves the activity running and starts a *second*
+  # branch beside it.
+  #
+  # Non-interrupting was refused for a while, on the grounds that the engine had no token
+  # topology for two concurrent branches. That turned out to be true of a narrower thing: an
+  # instance completed on its first branch rather than its last, so any second branch was
+  # unrunnable. With that fixed the topology is the ordinary fork's, and the refusal had
+  # nothing left holding it up.
+  defp check_cancel_activity(_id, value) when value in [nil, "true", "1"], do: {:ok, true}
 
-  defp check_cancel_activity(id, value) when value in ["false", "0"] do
-    {:error,
-     Errors.error(
-       id,
-       "boundaryEvent '#{id}' is non-interrupting (cancelActivity=\"false\"), which is not " <>
-         "supported: it would run a second branch alongside the activity, and there is no " <>
-         "join that could ever reunite them"
-     )}
-  end
+  defp check_cancel_activity(_id, value) when value in ["false", "0"], do: {:ok, false}
 
   defp check_cancel_activity(id, value) do
     {:error,

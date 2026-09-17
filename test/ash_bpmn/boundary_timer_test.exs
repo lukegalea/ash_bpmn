@@ -11,7 +11,7 @@ defmodule AshBpmn.BoundaryTimerTest do
   require Ash.Query
 
   alias AshBpmn.Runtime.Oban.TestJobs
-  alias AshBpmn.Test.{Definition, HumanTask, Instance, ProcessEvent}
+  alias AshBpmn.Test.{Definition, HumanTask, Instance, ProcessEvent, Token}
 
   setup do
     AshBpmn.Test.Invoker.clear_calls()
@@ -49,8 +49,23 @@ defmodule AshBpmn.BoundaryTimerTest do
   end
 
   describe "refusing" do
-    test "a non-interrupting boundary is refused by name" do
-      assert errors_for!("refusal_boundary_non_interrupting.bpmn") =~ "non-interrupting"
+    test "a non-boolean cancelActivity is refused" do
+      xml =
+        String.replace(
+          File.read!("test/fixtures/boundary_non_interrupting.bpmn"),
+          ~s(cancelActivity="false"),
+          ~s(cancelActivity="perhaps")
+        )
+
+      defn =
+        Definition.create!(%{
+          key: "bt_#{System.unique_integer([:positive])}",
+          name: "BT",
+          xml: xml
+        })
+
+      refute defn.graph
+      assert Enum.map_join(defn.errors, " ", & &1["message"]) =~ "non-boolean cancelActivity"
     end
 
     test "a boundary on a service task is refused, and says what it is supported on" do
@@ -74,6 +89,54 @@ defmodule AshBpmn.BoundaryTimerTest do
       errors = errors_for!("refusal_boundary_and_expire.bpmn")
       assert errors =~ "expire"
       assert errors =~ "Keep one"
+    end
+  end
+
+  describe "non-interrupting" do
+    test "the activity keeps running and a second branch starts beside it" do
+      # The whole difference. An interrupting boundary cancels the approval; this one leaves
+      # somebody's open task exactly where it was and runs the escalation alongside.
+      {instance, task} = start!("boundary_non_interrupting.bpmn")
+
+      assert TestJobs.fire_due!(DateTime.add(DateTime.utc_now(), 5 * 3600, :second)) >= 1
+
+      assert reload_task(task).status == :open, "the approval must survive a nudge"
+      assert token_for(task).status == :waiting
+
+      # And the escalation ran on its own branch.
+      assert invoked?("escalate_it")
+
+      # The instance is still running, because the approval branch has not finished.
+      assert reload(instance).status == :running
+    end
+
+    test "the new branch records where it came from" do
+      {instance, task} = start!("boundary_non_interrupting.bpmn")
+      assert TestJobs.fire_due!(DateTime.add(DateTime.utc_now(), 5 * 3600, :second)) >= 1
+
+      spawned =
+        Token
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(instance_id == ^instance.id and node_id == "Boundary_1")
+        |> Ash.read!(authorize?: false)
+        |> List.first()
+
+      # There is no join that reunites them and BPMN does not expect one, so the parent link
+      # is the only record of the relationship.
+      assert spawned.parent_token_id == token_for(task).id
+    end
+
+    test "completing the approval afterwards finishes the instance" do
+      {instance, task} = start!("boundary_non_interrupting.bpmn")
+      assert TestJobs.fire_due!(DateTime.add(DateTime.utc_now(), 5 * 3600, :second)) >= 1
+
+      {:ok, _} =
+        AshBpmn.complete_task(reload_task(task),
+          outcome: :approved,
+          actor: %{id: Ash.UUID.generate()}
+        )
+
+      assert reload(instance).status == :completed
     end
   end
 
@@ -193,7 +256,9 @@ defmodule AshBpmn.BoundaryTimerTest do
       assert {:ok, reason} =
                AshBpmn.Runtime.BoundaryTimerWorker.perform(%Oban.Job{args: job.args})
 
-      assert reason in [:lost_to_completion, :not_waiting]
+      # `:not_live` is the earliest of the three: the token was consumed by the first run, so
+      # the redelivery stops before it even looks for the task.
+      assert reason in [:lost_to_completion, :not_waiting, :not_live]
 
       assert Enum.count(events(instance), &(&1.kind == :activity_interrupted)) == before
     end
@@ -226,8 +291,8 @@ defmodule AshBpmn.BoundaryTimerTest do
     Definition.create!(%{key: "bt_#{System.unique_integer([:positive])}", name: "BT", xml: xml})
   end
 
-  defp start! do
-    defn = compile!("boundary_timer.bpmn")
+  defp start!(fixture \\ "boundary_timer.bpmn") do
+    defn = compile!(fixture)
 
     # Through the resource's own `publish` action, not an UPDATE. Raw SQL here would skip
     # `ErrorsEmpty`, which is the validation that stops a definition with compile errors

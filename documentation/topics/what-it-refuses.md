@@ -19,7 +19,8 @@ The compiler rejects, each with the offending element's id in the error:
   Executable conformance class is barely larger. ash_bpmn executes that subset:
   start events, end events — including terminate end events — user, service,
   send and business rule tasks, intermediate catch events carrying a timer,
-  interrupting timer boundary events on user tasks, message catch events, signal
+  timer boundary events on user tasks, interrupting or not, message catch
+  events, signal
   throw and catch events, error end events, exclusive and parallel gateways,
   conditional and default flows. Call activities, ad-hoc and
   transactional sub-processes, throw events,
@@ -69,12 +70,9 @@ The compiler rejects, each with the offending element's id in the error:
   month writes `P30D` and means it. A duration of zero is refused on the same
   principle — a timer that waits for no time is a node drawn to do something it
   does not do.
-- **Non-interrupting boundary events** (`cancelActivity="false"`). One of these
-  starts a second branch while the activity carries on, and the engine has no
-  token topology for that: there is no fork relating the two branches and no
-  join that could ever reunite them. A diagram that draws one is describing
-  concurrency the engine would not provide.
-- **Boundary events on anything but a user task.** A service task's token is
+- **Boundary events on anything but a user task.** Both interrupting and
+  non-interrupting boundaries are supported; the attachment is what is
+  restricted. A service task's token is
   executing inside a running job. Oban cannot interrupt a running job and an Ash
   action that has already committed cannot be un-run — that is compensation,
   which this library refuses outright. "Interrupting" such an activity would
