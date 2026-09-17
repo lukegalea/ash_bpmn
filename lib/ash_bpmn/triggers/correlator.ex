@@ -105,7 +105,180 @@ defmodule AshBpmn.Triggers.Correlator do
       |> Enum.each(&dispatch(&1, raw_ctx, feel_ctx, ctx))
     end
 
+    # Deliberately outside the index gate above. `Index` is built from published
+    # *subscriptions*, and a token parked at a message catch is not one -- it is a running
+    # instance's private interest in something. Putting delivery behind that gate would mean a
+    # process waiting for a payment was woken only if some unrelated subscription happened to
+    # be watching payments too.
+    deliver_to_waiting(feel_ctx, ctx)
+
     :ok
+  end
+
+  # ── catch delivery ──────────────────────────────────────────────────────
+
+  # Waking the tokens parked at a message catch event for this kind of event.
+  #
+  # The query is the reason `subscription_signature` exists. It pins resource and action, is
+  # backed by a partial index on `status = 'waiting'`, and is therefore proportional to the
+  # tokens actually parked rather than to every token the system has ever created. The
+  # correlation key is compared afterwards, in memory, over an already small set.
+  #
+  # The `match` expression belongs to the *node*, not the token, so it is evaluated once per
+  # distinct node rather than once per token -- a hundred instances parked at the same catch
+  # event cost one evaluation, not a hundred.
+  defp deliver_to_waiting(feel_ctx, ctx) do
+    event = feel_ctx[@event]
+    token_resource = ctx.resources.token
+
+    signatures = [
+      "message:#{event["resource"]}:#{event["action"]}",
+      "message:#{event["resource"]}:*"
+    ]
+
+    token_resource
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(status == :waiting and subscription_signature in ^signatures)
+    |> Ash.read!(AshBpmn.Scope.engine(ctx.scope))
+    |> Enum.group_by(& &1.instance_id)
+    |> Enum.each(fn {instance_id, tokens} ->
+      deliver_to_instance(instance_id, tokens, feel_ctx, ctx)
+    end)
+  rescue
+    # A waiting token that cannot be read must not wedge the sweep -- the batch's other events
+    # are unrelated to it, and the cursor has to keep moving. The sweep wraps each event in
+    # its own transaction, so this costs one event's delivery.
+    error ->
+      Logger.error("ash_bpmn catch delivery failed: #{Exception.message(error)}")
+      :ok
+  end
+
+  defp deliver_to_instance(instance_id, tokens, feel_ctx, ctx) do
+    instance =
+      ctx.resources.instance
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(id == ^instance_id)
+      |> Ash.read_one!(AshBpmn.Scope.engine(ctx.scope))
+
+    graph =
+      AshBpmn.DefinitionLoader.load!(
+        ctx.resources.definition,
+        instance.definition_id,
+        instance,
+        ctx.scope
+      ).graph
+
+    tokens
+    |> Enum.group_by(& &1.node_id)
+    |> Enum.each(fn {node_id, node_tokens} ->
+      case expected_key(graph, node_id, feel_ctx) do
+        {:ok, key} ->
+          node_tokens
+          |> Enum.filter(&(&1.correlation_key == key))
+          |> Enum.each(&wake(&1, node_id, feel_ctx, ctx))
+
+        :skip ->
+          :ok
+      end
+    end)
+  end
+
+  # The key this event carries, by the node's own `match` expression. A null or an error means
+  # this event is not addressed to anything at this node -- an event of the right kind that
+  # simply does not carry the field -- which is an ordinary no, not a condition to report.
+  defp expected_key(graph, node_id, feel_ctx) do
+    spec = get_in(graph, ["nodes", node_id, "catch"]) || %{}
+
+    case spec["match"] && Feel.evaluate(spec["match"], feel_ctx) do
+      # `:skip`, not an empty string. Folding null into `""` would wake any token whose own
+      # key was empty, turning "this event carries no key" into "this event carries the empty
+      # key" -- the broadcast this design exists to avoid, reached from the other side.
+      #
+      # Not covered by a test: every route to an empty correlation key runs through a required
+      # attribute or a FEEL literal that does not survive the park, so the two behaviours are
+      # currently indistinguishable from outside. The distinction is kept because it costs
+      # nothing and stops being theoretical the moment a subject has an optional string field.
+      {:ok, nil} -> :skip
+      {:ok, value} -> {:ok, to_string(value)}
+      _ -> :skip
+    end
+  end
+
+  defp wake(token, node_id, feel_ctx, ctx) do
+    engine = AshBpmn.Scope.engine(ctx.scope)
+
+    case ctx.resources.token.claim_waiting(token, engine) do
+      # Losing is ordinary: a redelivered batch, or a branch pruned between the read and here.
+      {:error, _} ->
+        :ok
+
+      {:ok, token} ->
+        ctx.resources.process_event.create!(
+          %{
+            instance_id: token.instance_id,
+            token_id: token.id,
+            node_id: node_id,
+            kind: :message_received,
+            data: %{
+              "event_id" => feel_ctx[@event]["id"],
+              "resource" => feel_ctx[@event]["resource"],
+              "action" => feel_ctx[@event]["action"]
+            }
+          },
+          engine
+        )
+
+        advance_from_catch(token, node_id, ctx)
+    end
+  end
+
+  # The same shape as the timer catch's wake: consume, mint an active token on the outgoing
+  # flow, enqueue an ordinary advance. A catch event has exactly one way out, which the
+  # compiler guarantees.
+  defp advance_from_catch(token, node_id, ctx) do
+    engine = AshBpmn.Scope.engine(ctx.scope)
+
+    instance =
+      ctx.resources.instance
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(id == ^token.instance_id)
+      |> Ash.read_one!(engine)
+
+    graph =
+      AshBpmn.DefinitionLoader.load!(
+        ctx.resources.definition,
+        instance.definition_id,
+        instance,
+        ctx.scope
+      ).graph
+
+    case AshBpmn.Runtime.Routing.outgoing(graph, node_id) do
+      [flow | _] ->
+        ctx.resources.token.consume!(token, engine)
+
+        new_token =
+          ctx.resources.token.create!(
+            %{
+              instance_id: token.instance_id,
+              node_id: flow["to"],
+              status: :active,
+              routing: token.routing || %{}
+            },
+            engine
+          )
+
+        AshBpmn.Runtime.Oban.insert(
+          AshBpmn.Runtime.AdvanceWorker,
+          AshBpmn.Scope.to_job_args(ctx.scope, %{
+            "instance_id" => token.instance_id,
+            "token_id" => new_token.id,
+            "node_id" => flow["to"]
+          })
+        )
+
+      [] ->
+        ctx.resources.token.consume!(token, engine)
+    end
   end
 
   # ── stage 1: the index ──────────────────────────────────────────────────

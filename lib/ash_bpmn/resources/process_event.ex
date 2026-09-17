@@ -106,6 +106,9 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         :task_completed,
                         :task_cancelled,
                         :task_expired,
+                        # A message catch event was woken by an arriving event. Names the
+                        # event that did it, so "why did this resume at 04:12?" is answerable.
+                        :message_received,
                         :timer_fired,
                         :timer_cancelled,
                         # An escalation timer fired and its handler failed. Deliberately not

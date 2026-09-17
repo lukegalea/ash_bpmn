@@ -171,8 +171,15 @@ defmodule AshBpmn.Feel do
 
   `context` is expected to hold string keys; use `to_feel_value/1` on anything coming from Ash.
   """
-  @spec evaluate(String.t(), map(), keyword()) :: {:ok, term()} | {:error, String.t()}
-  def evaluate(source, context, opts \\ []) when is_binary(source) and is_map(context) do
+  @spec evaluate(String.t() | stored(), map(), keyword()) :: {:ok, term()} | {:error, String.t()}
+  def evaluate(source, context, opts \\ [])
+
+  # The stored form, unwrapped here rather than at every call site -- the same courtesy
+  # `evaluate_condition/3` already extends, and for the same reason: what is in a snapshot is
+  # the stored map, and making each caller reach into it is how one of them forgets.
+  def evaluate(%{"text" => source}, context, opts), do: evaluate(source, context, opts)
+
+  def evaluate(source, context, opts) when is_binary(source) and is_map(context) do
     timeout = Keyword.get(opts, :timeout, @default_timeout_ms)
 
     task = Task.async(fn -> Boxic.FEEL.evaluate(source, context) end)

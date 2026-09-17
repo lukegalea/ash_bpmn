@@ -644,9 +644,64 @@ defmodule AshBpmn.Runtime.Interpreter do
         _ = graph
         {:ok, effects}
 
+      "message" ->
+        message_catch(node_id, catch_spec, ctx)
+
       other ->
         {:error, "intermediate catch event #{node_id} has unsupported kind: #{inspect(other)}"}
     end
+  end
+
+  # A message catch parks and arms nothing. There is no job to schedule, because the thing
+  # that wakes it is an event elsewhere in the application, and the correlator is what finds
+  # it. That is the difference this state was added for: a token with no job is a healthy
+  # steady state here, not a symptom.
+  #
+  # The correlation key is computed once, now, from the subject as it is at this instant, and
+  # frozen onto the token. Recomputing at delivery would let a subject edited during the wait
+  # silently change what the token is listening for -- a correlation that works or fails
+  # depending on when you look.
+  defp message_catch(node_id, catch_spec, ctx) do
+    expr_ctx = build_expr_ctx(ctx)
+
+    case AshBpmn.Feel.evaluate(catch_spec["correlate"], expr_ctx) do
+      {:error, reason} ->
+        {:error, "message catch #{node_id}: correlate failed: #{reason}"}
+
+      {:ok, nil} ->
+        # A key of null would match every other null key, which is the opposite of
+        # correlating. The token cannot park meaningfully, so the branch fails loudly here
+        # rather than waiting forever for a message addressed to nobody.
+        {:error,
+         "message catch #{node_id}: correlate produced null, so this token has no address"}
+
+      {:ok, value} ->
+        park = %{
+          subscription_signature: message_signature(catch_spec),
+          correlation_key: to_string(value)
+        }
+
+        effects = [
+          park_token: park,
+          events: [
+            event_attrs(ctx, node_id, :node_entered, %{
+              "waiting_for" => "message",
+              "resource" => catch_spec["resource"],
+              "action" => catch_spec["action"]
+            })
+          ]
+        ]
+
+        {:ok, effects}
+    end
+  end
+
+  # The coarse key the correlator queries on, and the reason a waiting token is findable
+  # without a scan. It pins resource and action only; the correlation key does the rest, and
+  # is compared after the index has already narrowed the set.
+  @doc false
+  def message_signature(catch_spec) do
+    "message:#{catch_spec["resource"]}:#{catch_spec["action"] || "*"}"
   end
 
   # Scheduled from *now*, which is when the token actually arrived. Computing it at compile

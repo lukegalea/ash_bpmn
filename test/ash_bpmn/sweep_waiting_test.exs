@@ -183,14 +183,22 @@ defmodule AshBpmn.SweepWaitingTest do
     |> Enum.filter(&(Map.get(&1.data || %{}, "problem") == "orphaned_wait"))
   end
 
-  # `parked_at` is set by the `:park` action and accepted by nothing, which is correct -- a
-  # writable park timestamp is how a token stuck for a month starts looking fresh. So the
-  # ageing is done in SQL, in the test, where it cannot leak into the resource's surface.
+  # Raw SQL, deliberately, and this is the justification the house rule asks for.
+  #
+  # `parked_at` is written by the `:park` action and accepted by nothing else, which is
+  # correct: a writable park timestamp is exactly how a token stuck for a month starts
+  # looking like it parked this morning. Adding an action to move it, or an accept on the
+  # existing one, would put that capability in the application's surface to serve a test.
+  #
+  # So the ageing happens here, against the test repo, where it cannot leak. Parameterised
+  # rather than interpolated -- a test that builds SQL by string concatenation teaches the
+  # habit even when its inputs are safe.
   defp backdate_park!(token, days) do
     at = DateTime.add(DateTime.utc_now(), -days * 86_400, :second)
 
     AshBpmn.TestRepo.query!(
-      "UPDATE bpmn_tokens SET parked_at = '#{DateTime.to_iso8601(at)}' WHERE id = '#{token.id}'"
+      "UPDATE bpmn_tokens SET parked_at = $1 WHERE id = $2",
+      [at, Ecto.UUID.dump!(token.id)]
     )
 
     :ok
@@ -204,11 +212,10 @@ defmodule AshBpmn.SweepWaitingTest do
 
     if is_nil(defn.graph), do: raise("compile failed: #{inspect(defn.errors)}")
 
-    AshBpmn.TestRepo.query!(
-      "UPDATE bpmn_definitions SET status = 'published' WHERE id = '#{defn.id}'"
-    )
-
-    Definition.by_key_version!(defn.key, defn.version)
+    # Through the resource's own `publish` action, not an UPDATE. Raw SQL would skip
+    # `ErrorsEmpty`, the validation that stops a definition with compile errors being
+    # published -- so a test using it could publish something the application never would.
+    Definition.publish!(defn)
   end
 
   defp start!(defn) do

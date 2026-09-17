@@ -141,7 +141,8 @@ defmodule AshBpmn.Compiler.Graph do
   @implemented_event_definitions %{
     "terminateEventDefinition" => ["endEvent"],
     "timerEventDefinition" => ["intermediateCatchEvent", "boundaryEvent"],
-    "errorEventDefinition" => ["endEvent"]
+    "errorEventDefinition" => ["endEvent"],
+    "messageEventDefinition" => ["intermediateCatchEvent"]
   }
 
   # Children of a `timerEventDefinition`. Only `timeDuration` is implemented; the other two are
@@ -600,7 +601,12 @@ defmodule AshBpmn.Compiler.Graph do
     definitions =
       node
       |> Xml.get_element_children()
-      |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "timerEventDefinition"))
+      |> Enum.filter(
+        &(Xml.normalize_name(Xml.local_name(&1)) in [
+            "timerEventDefinition",
+            "messageEventDefinition"
+          ])
+      )
 
     case definitions do
       [] ->
@@ -610,7 +616,8 @@ defmodule AshBpmn.Compiler.Graph do
          Errors.error(
            id,
            "intermediateCatchEvent '#{id}' has no event definition; the token would wait " <>
-             "for something that can never arrive. Supported: timerEventDefinition"
+             "for something that can never arrive. Supported: timerEventDefinition, " <>
+             "messageEventDefinition"
          )}
 
       [_, _ | _] ->
@@ -618,7 +625,10 @@ defmodule AshBpmn.Compiler.Graph do
          Errors.error(id, "intermediateCatchEvent '#{id}' has more than one event definition")}
 
       [definition] ->
-        build_timer_catch(id, definition)
+        case Xml.normalize_name(Xml.local_name(definition)) do
+          "timerEventDefinition" -> build_timer_catch(id, definition)
+          "messageEventDefinition" -> build_message_catch(id, node)
+        end
     end
   end
 
@@ -631,6 +641,93 @@ defmodule AshBpmn.Compiler.Graph do
        when type in ["startEvent", "parallelGateway"] do
     {:ok, %{}}
   end
+
+  # A message catch waits for something that happens elsewhere in the application. The
+  # `messageEventDefinition` says *that* it waits; the `ash:subscribe` element says what for,
+  # because BPMN's own message plumbing (a `bpmn:message` declaration and a collaboration's
+  # message flows) describes messages between pools and has nothing to say about an Ash
+  # resource and action.
+  #
+  #   <bpmn2:intermediateCatchEvent id="AwaitPayment">
+  #     <bpmn2:messageEventDefinition id="Msg_1"/>
+  #     <bpmn2:extensionElements>
+  #       <ash:subscribe resource="Payment" action="create"
+  #                      correlate="subject.id" match="data.invoice_id"/>
+  #     </bpmn2:extensionElements>
+  #   </bpmn2:intermediateCatchEvent>
+  #
+  # Two expressions, evaluated at different times against different things, and the split is
+  # the whole correlation model. `correlate` runs once at park against the subject, and the
+  # answer is frozen onto the token -- so a subject edited during the wait cannot silently
+  # change what the token is listening for. `match` runs at delivery against the arriving
+  # event. A token is woken when the two answers are equal.
+  defp build_message_catch(id, node) do
+    ext = Xml.find_extension_elements(node)
+
+    case Xml.find_ash_elements(ext, "subscribe") do
+      [] ->
+        {:error,
+         Errors.error(
+           id,
+           "intermediateCatchEvent '#{id}' catches a message but declares no ash:subscribe, " <>
+             "so nothing says which event it is waiting for"
+         )}
+
+      [_, _ | _] ->
+        {:error,
+         Errors.error(id, "intermediateCatchEvent '#{id}' has more than one ash:subscribe")}
+
+      [subscribe] ->
+        build_message_subscription(id, subscribe)
+    end
+  end
+
+  defp build_message_subscription(id, subscribe) do
+    resource = Xml.element_attr(subscribe, "resource")
+    action = Xml.element_attr(subscribe, "action")
+    correlate = Xml.element_attr(subscribe, "correlate")
+    match = Xml.element_attr(subscribe, "match")
+
+    cond do
+      blank?(resource) ->
+        {:error, Errors.error(id, "ash:subscribe on '#{id}' has no resource")}
+
+      blank?(correlate) or blank?(match) ->
+        {:error,
+         Errors.error(
+           id,
+           "ash:subscribe on '#{id}' needs both correlate and match. Without them every " <>
+             "event of that kind would wake every token waiting for one, which is not " <>
+             "correlation, it is a broadcast"
+         )}
+
+      true ->
+        # Both parse at publish time, for the same reason flow conditions do: an expression
+        # that cannot parse should be a compile error naming the node, not a token that parks
+        # and is never woken because its key could not be computed at three in the morning.
+        with {:ok, correlate_stored} <- AshBpmn.Feel.compile(correlate),
+             {:ok, match_stored} <- AshBpmn.Feel.compile(match) do
+          {:ok,
+           %{
+             "catch" => %{
+               "kind" => "message",
+               "resource" => resource,
+               "action" => action,
+               "correlate" => correlate_stored,
+               "match" => match_stored
+             }
+           }}
+        else
+          {:error, reason} ->
+            {:error,
+             Errors.error(id, "ash:subscribe on '#{id}' has an invalid expression: #{reason}")}
+        end
+    end
+  end
+
+  defp blank?(nil), do: true
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blank?(_), do: false
 
   # An error end event says the process ended badly *on purpose*, which is a thing no diagram
   # could say before: `mark_failed` is reachable only from retry exhaustion and means "the

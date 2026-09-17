@@ -229,11 +229,11 @@ defmodule AshBpmn.BoundaryTimerTest do
   defp start! do
     defn = compile!("boundary_timer.bpmn")
 
-    AshBpmn.TestRepo.query!(
-      "UPDATE bpmn_definitions SET status = 'published' WHERE id = '#{defn.id}'"
-    )
-
-    defn = Definition.by_key_version!(defn.key, defn.version)
+    # Through the resource's own `publish` action, not an UPDATE. Raw SQL here would skip
+    # `ErrorsEmpty`, which is the validation that stops a definition with compile errors
+    # being published -- so a test using SQL could publish something the application never
+    # would, and then assert on its behaviour.
+    defn = Definition.publish!(defn)
 
     {:ok, subject} =
       AshBpmn.Test.Subject.create!(%{name: "boundary", amount: 0, is_privileged: false})

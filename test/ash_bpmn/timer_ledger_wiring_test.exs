@@ -145,11 +145,10 @@ defmodule AshBpmn.TimerLedgerWiringTest do
     defn = Definition.create!(%{key: key, name: key, xml: xml})
     if is_nil(defn.graph), do: raise("compile failed: #{inspect(defn.errors)}")
 
-    AshBpmn.TestRepo.query!(
-      "UPDATE bpmn_definitions SET status = 'published' WHERE id = '#{defn.id}'"
-    )
-
-    Definition.by_key_version!(defn.key, defn.version)
+    # Through the resource's own `publish` action, not an UPDATE. Raw SQL would skip
+    # `ErrorsEmpty`, the validation that stops a definition with compile errors being
+    # published -- so a test using it could publish something the application never would.
+    Definition.publish!(defn)
   end
 
   defp subject!(privileged) do

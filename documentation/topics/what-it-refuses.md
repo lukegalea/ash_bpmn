@@ -19,11 +19,11 @@ The compiler rejects, each with the offending element's id in the error:
   Executable conformance class is barely larger. ash_bpmn executes that subset:
   start events, end events — including terminate end events — user, service,
   send and business rule tasks, intermediate catch events carrying a timer,
-  interrupting timer boundary events on user tasks, error end events, exclusive
-  and parallel gateways, conditional and default flows. Call activities, ad-hoc and
+  interrupting timer boundary events on user tasks, message catch events, error
+  end events, exclusive and parallel gateways, conditional and default flows. Call activities, ad-hoc and
   transactional sub-processes, throw events,
-  the rest of the event-definition taxonomy (message, signal, error on
-  anything but an end event,
+  the rest of the event-definition taxonomy (message on anything but an
+  intermediate catch event, signal, error on anything but an end event,
   escalation, conditional, compensation, cancel, link), complex and
   event-based gateways, loop and multi-instance markers: rejected, loudly. A
   notation element a business analyst drew and a system silently ignored is how
@@ -101,6 +101,15 @@ The compiler rejects, each with the offending element's id in the error:
   `bpmn:error` declaration beside the process; and an end event carrying both a
   terminate and an error marker, which are two different endings where one would
   be ignored.
+- **A message catch that does not say what it is waiting for.** A
+  `messageEventDefinition` says only *that* the token waits; the `ash:subscribe`
+  element says what for, because BPMN's own message plumbing describes messages
+  between pools and has nothing to say about an Ash resource and action. Refused
+  without one, and refused without both a `correlate` and a `match` expression:
+  without them every event of that kind would wake every token waiting for one,
+  which is not correlation, it is a broadcast. A `correlate` that answers null
+  is also refused at run time rather than parked, because a null key matches
+  every other null key — the token would have no address.
 - **Malformed `ash:` bindings** — unknown attributes or elements in the ash
   namespace, user tasks without candidates or outcomes, service tasks without an
   action reference, unparseable conditions. Typo protection: a `candiates`

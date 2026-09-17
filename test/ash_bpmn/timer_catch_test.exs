@@ -149,11 +149,11 @@ defmodule AshBpmn.TimerCatchTest do
   defp publish!(fixture) do
     defn = compile!(fixture)
 
-    AshBpmn.TestRepo.query!(
-      "UPDATE bpmn_definitions SET status = 'published' WHERE id = '#{defn.id}'"
-    )
-
-    Definition.by_key_version!(defn.key, defn.version)
+    # Through the resource's own `publish` action, not an UPDATE. Raw SQL here would skip
+    # `ErrorsEmpty`, which is the validation that stops a definition with compile errors
+    # being published -- so a test using SQL could publish something the application never
+    # would, and then assert on its behaviour.
+    Definition.publish!(defn)
   end
 
   defp start!(defn) do
