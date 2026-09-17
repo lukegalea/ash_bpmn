@@ -120,6 +120,12 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         # differently because a condition that is silently never true looks
                         # identical to one that is legitimately false and is a far worse bug.
                         :condition_null,
+                        # A terminate end event ended the process. Distinct from
+                        # `:instance_completed`, which says the process reached an end; this
+                        # says it reached an end *while other branches were still live* and
+                        # they were killed. An auditor asking why a parallel branch has no
+                        # completion event needs this row to exist.
+                        :instance_terminated,
                         # A business rule task invoked a decision. Carries the decision
                         # reference, its version and which rules fired -- never the decision's
                         # full output, which belongs to the decision layer's own record.

@@ -225,7 +225,11 @@ defmodule AshBpmn.ResourcesTest do
         Instance.mark_completed!(instance, :approved)
 
       assert completed.status == :completed
-      assert completed.outcome == :approved
+
+      # An atom in, a string out. The attribute is a string because the value usually comes
+      # from modeller-authored XML, and a host passing an atom from its own code is still a
+      # reasonable thing to do -- it is cast rather than refused.
+      assert completed.outcome == "approved"
     end
 
     test "mark_failed and cancel" do

@@ -352,8 +352,25 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
           AshBpmn.Runtime.Oban.insert(worker, Scope.to_job_args(scope, args), opts)
         end)
 
+      {:terminate_instance, outcome} ->
+        killed = kill_live_tokens(resources, ctx, scope)
+
+        # One event, not one per token. The question this row answers is "why did that branch
+        # stop?", and it is answered by naming the node that terminated and how many branches
+        # it took down -- the tokens themselves already carry `:dead`.
+        record_event(resources, ctx, :instance_terminated, %{
+          "outcome" => outcome,
+          "terminated_by_node_id" => ctx[:token] && ctx[:token].node_id,
+          "tokens_killed" => length(killed),
+          "killed_token_ids" => Enum.map(killed, & &1.id),
+          "killed_node_ids" => Enum.map(killed, & &1.node_id)
+        })
+
+        resources.instance.mark_completed!(ctx[:instance], to_outcome(outcome), Scope.engine(scope))
+        record_event(resources, ctx, :instance_completed, %{"outcome" => outcome})
+
       {:complete_instance, outcome} ->
-        resources.instance.mark_completed!(ctx[:instance], outcome, Scope.engine(scope))
+        resources.instance.mark_completed!(ctx[:instance], to_outcome(outcome), Scope.engine(scope))
         record_event(resources, ctx, :instance_completed, %{"outcome" => outcome})
 
       {:tasks, _task_specs} ->
@@ -419,6 +436,38 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       Scope.engine(scope)
     )
   end
+
+  # Every live branch of the instance except the one that just terminated it.
+  #
+  # `:waiting` is in the list and is the case that makes this work at all: a branch parked on
+  # an approval has no job to cancel and no worker to interrupt, so terminating without killing
+  # it would leave a token that waits forever on an instance that has already completed --
+  # which is precisely the shape a terminate end event exists to prevent.
+  #
+  # The current token is excluded because the interpreter already consumed it, and consumed is
+  # not dead: it finished, it did not get cut off.
+  defp kill_live_tokens(resources, ctx, scope) do
+    current_id = ctx[:token] && ctx[:token].id
+    instance_id = ctx[:instance].id
+
+    resources.token
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(
+      instance_id == ^instance_id and status in [:active, :executing, :waiting]
+    )
+    |> Ash.read!(Scope.engine(scope))
+    |> Enum.reject(&(&1.id == current_id))
+    |> Enum.map(fn token ->
+      resources.token.kill!(token, Scope.engine(scope))
+      token
+    end)
+  end
+
+  # Outcomes reach here as a string from the diagram or as an atom from a host completing a
+  # task. Both are legal inputs and both are stored as text.
+  defp to_outcome(nil), do: nil
+  defp to_outcome(outcome) when is_binary(outcome), do: outcome
+  defp to_outcome(outcome) when is_atom(outcome), do: Atom.to_string(outcome)
 
   defp record_event(resources, ctx, kind, extra) do
     scope = ctx[:scope]

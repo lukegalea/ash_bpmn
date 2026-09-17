@@ -131,10 +131,19 @@ defmodule AshBpmn.Compiler.Graph do
   # carries them and they say nothing the flows do not.
   @benign_node_children MapSet.new(~w(incoming outgoing documentation extensionElements))
 
+  # Event definitions the compiler implements, and the node types they may legally sit on.
+  # Keyed both ways round on purpose: a `terminateEventDefinition` is meaningful on an end
+  # event and meaningless on a start event, and accepting it anywhere would let a diagram
+  # carry a marker the engine ignores -- which is the failure mode the unsupported-child
+  # check exists to prevent, arriving through the door marked "supported".
+  @implemented_event_definitions %{
+    "terminateEventDefinition" => ["endEvent"]
+  }
+
   @known_unimplemented MapSet.new(~w(
     timerEventDefinition messageEventDefinition signalEventDefinition
     errorEventDefinition escalationEventDefinition conditionalEventDefinition
-    compensationEventDefinition terminateEventDefinition cancelEventDefinition
+    compensationEventDefinition cancelEventDefinition
     linkEventDefinition multiInstanceLoopCharacteristics standardLoopCharacteristics
     dataInputAssociation dataOutputAssociation dataStore dataStoreReference
     ioSpecification dataInput dataOutput inputSet outputSet property
@@ -232,6 +241,19 @@ defmodule AshBpmn.Compiler.Graph do
 
       not bpmn? ->
         []
+
+      Map.has_key?(@implemented_event_definitions, normalized) ->
+        if type in @implemented_event_definitions[normalized] do
+          []
+        else
+          [
+            Errors.error(
+              id,
+              "#{type} '#{id}' carries a '#{normalized}', which is only meaningful on " <>
+                Enum.join(@implemented_event_definitions[normalized], ", ")
+            )
+          ]
+        end
 
       MapSet.member?(@known_unimplemented, normalized) ->
         [
@@ -496,9 +518,19 @@ defmodule AshBpmn.Compiler.Graph do
     ext = Xml.find_extension_elements(node)
     ash_task_configs = Xml.find_ash_elements(ext, "taskConfig")
 
+    # Read straight off the XML rather than inferred later: the marker is what makes this end
+    # event end the whole process instead of just this branch, and that difference has to be
+    # visible in the compiled snapshot or the interpreter cannot act on it.
+    terminate? =
+      node
+      |> Xml.get_element_children()
+      |> Enum.any?(&(Xml.normalize_name(Xml.local_name(&1)) == "terminateEventDefinition"))
+
+    base = if terminate?, do: %{"terminate" => true}, else: %{}
+
     case ash_task_configs do
       [] ->
-        {:ok, %{}}
+        {:ok, base}
 
       [config | _] ->
         outcome = Xml.element_attr(config, "outcome")
@@ -528,9 +560,9 @@ defmodule AshBpmn.Compiler.Graph do
           |> case do
             {:ok, _} ->
               if outcome do
-                {:ok, %{"outcome" => outcome}}
+                {:ok, Map.put(base, "outcome", outcome)}
               else
-                {:ok, %{}}
+                {:ok, base}
               end
 
             {:error, _} = err ->

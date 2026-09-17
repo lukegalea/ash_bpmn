@@ -255,7 +255,7 @@ defmodule AshBpmn.TypedNodesTest do
         AshBpmn.start_instance(AshBpmn.Test.Domain, process: "typed_high", subject: subject)
 
       assert instance.status == :completed
-      assert instance.outcome == :escalated
+      assert instance.outcome == "escalated"
 
       ctxs = Invoker.recorded_ctxs()
       assert Enum.any?(ctxs, fn {_id, action, _ctx} -> action == "send_notice" end)
@@ -296,7 +296,7 @@ defmodule AshBpmn.TypedNodesTest do
         AshBpmn.start_instance(AshBpmn.Test.Domain, process: "typed_low", subject: subject)
 
       assert instance.status == :completed
-      assert instance.outcome == :approved
+      assert instance.outcome == "approved"
 
       {_id, "record_risk", ctx} =
         Enum.find(Invoker.recorded_ctxs(), fn {_id, a, _} -> a == "record_risk" end)

@@ -37,7 +37,7 @@ defmodule AshBpmn.AshCallTest do
       # The high branch: the promoted tier reached routing, the gateway read it, and
       # the process ended on the escalated outcome.
       assert instance.status == :completed
-      assert instance.outcome == :escalated
+      assert instance.outcome == "escalated"
 
       assert [record] =
                CallablesRecorder.recorded()
@@ -68,7 +68,7 @@ defmodule AshBpmn.AshCallTest do
         AshBpmn.start_instance(AshBpmn.Test.Domain, process: "ash_call_low", subject: subject)
 
       assert instance.status == :completed
-      assert instance.outcome == :approved
+      assert instance.outcome == "approved"
     end
 
     test "a create callable goes through Ash.create" do

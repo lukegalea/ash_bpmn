@@ -97,7 +97,17 @@ defmodule AshBpmn.Resources.Instance do
           public? true
         end
 
-        attribute :outcome, :atom do
+        # A string, not an atom. The value comes from `ash:taskConfig outcome="..."` on an end
+        # event -- modeller-authored text in tenant-supplied XML -- and the only two ways to
+        # get an atom out of that are `String.to_atom/1`, which is an unbounded atom table fed
+        # by anyone who can edit a diagram, and `String.to_existing_atom/1`, which succeeds or
+        # fails depending on what happens to have been loaded. Neither is a reasonable thing to
+        # hang a process outcome on.
+        #
+        # This was an `:atom`, and no fixture ever set an outcome, so every definition that
+        # declared one would have failed at the moment it completed. Storage is unchanged --
+        # Ash writes both to text.
+        attribute :outcome, :string do
           public? true
         end
 

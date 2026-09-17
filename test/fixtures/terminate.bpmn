@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+A fork with two branches that do not join. One branch parks on a human approval; the other
+runs a service task and reaches a terminate end event. The point of the shape is that the
+parked branch has no job to cancel and no worker to interrupt ; if terminate only stopped
+what was running, that token would wait forever on a completed instance.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_terminate"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_terminate" name="Terminate process" isExecutable="true">
+
+    <bpmn2:startEvent id="Start_1" name="Start">
+      <bpmn2:outgoing>Flow_1</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <bpmn2:parallelGateway id="Fork_1" name="Fork">
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_Approval</bpmn2:outgoing>
+      <bpmn2:outgoing>Flow_Fast</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+
+    <bpmn2:userTask id="SlowApproval" name="Slow approval">
+      <bpmn2:extensionElements>
+        <ash:taskConfig>
+          <ash:candidates>
+            <ash:candidate kind="role" of="approver"/>
+          </ash:candidates>
+          <ash:outcomes>
+            <ash:outcome name="approved"/>
+            <ash:outcome name="rejected"/>
+          </ash:outcomes>
+        </ash:taskConfig>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Approval</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_ApprovalOut</bpmn2:outgoing>
+    </bpmn2:userTask>
+
+    <bpmn2:endEvent id="End_approved" name="Approved">
+      <bpmn2:incoming>Flow_ApprovalOut</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+    <bpmn2:serviceTask id="FastCheck" name="Fast check">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="fast_check"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Fast</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_FastOut</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_terminated" name="Withdrawn">
+      <bpmn2:extensionElements>
+        <ash:taskConfig outcome="withdrawn"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_FastOut</bpmn2:incoming>
+      <bpmn2:terminateEventDefinition id="Terminate_1"/>
+    </bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Fork_1"/>
+    <bpmn2:sequenceFlow id="Flow_Approval" sourceRef="Fork_1" targetRef="SlowApproval"/>
+    <bpmn2:sequenceFlow id="Flow_ApprovalOut" sourceRef="SlowApproval" targetRef="End_approved"/>
+    <bpmn2:sequenceFlow id="Flow_Fast" sourceRef="Fork_1" targetRef="FastCheck"/>
+    <bpmn2:sequenceFlow id="Flow_FastOut" sourceRef="FastCheck" targetRef="End_terminated"/>
+  </bpmn2:process>
+</bpmn2:definitions>

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+A terminate marker on a start event. Well-formed XML, meaningless BPMN, and exactly the kind
+of thing a modeller does by dragging the wrong marker. Refused rather than ignored.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_bad_terminate"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_bad_terminate" name="Bad terminate" isExecutable="true">
+    <bpmn2:startEvent id="Start_1" name="Start">
+      <bpmn2:terminateEventDefinition id="Terminate_1"/>
+      <bpmn2:outgoing>Flow_1</bpmn2:outgoing>
+    </bpmn2:startEvent>
+    <bpmn2:endEvent id="End_1" name="End">
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+    </bpmn2:endEvent>
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="End_1"/>
+  </bpmn2:process>
+</bpmn2:definitions>

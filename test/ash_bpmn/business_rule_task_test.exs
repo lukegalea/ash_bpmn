@@ -137,7 +137,7 @@ defmodule AshBpmn.BusinessRuleTaskTest do
         AshBpmn.start_instance(AshBpmn.Test.Domain, process: "brt_high", subject: subject)
 
       assert instance.status == :completed
-      assert instance.outcome == :escalated
+      assert instance.outcome == "escalated"
 
       calls = AshBpmn.Test.Invoker.recorded_calls()
       assert Enum.any?(calls, fn {_id, action, _ts} -> action == "escalate" end)
@@ -158,7 +158,7 @@ defmodule AshBpmn.BusinessRuleTaskTest do
         AshBpmn.start_instance(AshBpmn.Test.Domain, process: "brt_low", subject: subject)
 
       assert instance.status == :completed
-      assert instance.outcome == :approved
+      assert instance.outcome == "approved"
     end
 
     # The decision's own answer, the version that gave it and the rule that fired -- which is
