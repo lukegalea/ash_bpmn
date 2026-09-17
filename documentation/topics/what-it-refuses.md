@@ -111,6 +111,19 @@ The compiler rejects, each with the offending element's id in the error:
   for a following gateway to read, a boundary leaves down its own flow with no
   outcome — so the same picture would mean something different after an
   upgrade. The two are made mutually exclusive on a user task instead.
+- **Event sub-processes**, and this one is a deferral with a date rather than a
+  principled refusal. An event sub-process is a scoped set of catch events with
+  a body — very nearly a boundary event attached to the whole process, on
+  machinery that now exists. What is missing is nesting: the node collector
+  gathers every supported element by `//` descendant search, so a sub-process's
+  children are hoisted and compiled as though they sat at process level with the
+  boundary erased. Supporting containers properly means scoping collection,
+  giving the graph a notion of scope, teaching reachability about it, and
+  letting the runtime spawn a token into one — together, not in slices. The
+  half version, built on the collector as it is, would silently erase the
+  sub-process boundary, which is precisely the defect the bare-name refusal
+  exists to prevent; reintroducing it deliberately to claim the feature would be
+  worse than not having it.
 - **A conditional catch with no condition, or none naming the resource it
   watches.** The first would park a token waiting for nothing to become true.
   The second is refused even though the subject's type is known at run time,
