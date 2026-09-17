@@ -124,7 +124,14 @@ defmodule AshBpmn.Triggers.SweepWorker do
 
       {:ok, {events, _}} ->
         subscriptions = subscriptions(resources.subscription, scope)
-        ctx = %{scope: scope, tenant: tenant, domain: domain, resources: resources, event_source: event_source}
+
+        ctx = %{
+          scope: scope,
+          tenant: tenant,
+          domain: domain,
+          resources: resources,
+          event_source: event_source
+        }
 
         Enum.each(events, &dispatch_isolated(repo, tenant, &1, subscriptions, ctx))
 
@@ -233,10 +240,14 @@ defmodule AshBpmn.Triggers.SweepWorker do
   end
 
   defp telemetry(started, tenant, last_sequence, events) do
-    :telemetry.execute([:ash_bpmn, :triggers, :sweep], %{
-      duration_ms: System.monotonic_time(:millisecond) - started,
-      events: events
-    }, %{tenant: tenant, last_sequence: last_sequence})
+    :telemetry.execute(
+      [:ash_bpmn, :triggers, :sweep],
+      %{
+        duration_ms: System.monotonic_time(:millisecond) - started,
+        events: events
+      },
+      %{tenant: tenant, last_sequence: last_sequence}
+    )
   end
 
   @doc """
