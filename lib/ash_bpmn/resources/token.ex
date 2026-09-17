@@ -163,6 +163,7 @@ defmodule AshBpmn.Resources.Token do
         # tokens rather than by the number of tokens.
         attribute :subscription_signature, :string do
           public? true
+
           description "Coarse match key the correlator queries on. Not a substitute for the guard."
         end
 

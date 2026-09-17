@@ -179,7 +179,11 @@ defmodule AshBpmn.TokenWaitingTest do
     xml = File.read!("test/fixtures/linear.bpmn")
 
     defn =
-      Definition.create!(%{key: "waiting_#{System.unique_integer([:positive])}", name: "W", xml: xml})
+      Definition.create!(%{
+        key: "waiting_#{System.unique_integer([:positive])}",
+        name: "W",
+        xml: xml
+      })
 
     if is_nil(defn.graph), do: raise("definition failed to compile: #{inspect(defn.errors)}")
 

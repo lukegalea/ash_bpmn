@@ -205,8 +205,9 @@ defmodule AshBpmn.Feel do
         {:error,
          "evaluation exceeded #{timeout}ms and was killed" <>
            if(is_integer(reductions),
-             do: " (#{reductions} reductions; a very low count means the scheduler was " <>
-                   "starved rather than the expression runaway)",
+             do:
+               " (#{reductions} reductions; a very low count means the scheduler was " <>
+                 "starved rather than the expression runaway)",
              else: ""
            )}
     end

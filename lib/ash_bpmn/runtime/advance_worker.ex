@@ -366,11 +366,21 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
           "killed_node_ids" => Enum.map(killed, & &1.node_id)
         })
 
-        resources.instance.mark_completed!(ctx[:instance], to_outcome(outcome), Scope.engine(scope))
+        resources.instance.mark_completed!(
+          ctx[:instance],
+          to_outcome(outcome),
+          Scope.engine(scope)
+        )
+
         record_event(resources, ctx, :instance_completed, %{"outcome" => outcome})
 
       {:complete_instance, outcome} ->
-        resources.instance.mark_completed!(ctx[:instance], to_outcome(outcome), Scope.engine(scope))
+        resources.instance.mark_completed!(
+          ctx[:instance],
+          to_outcome(outcome),
+          Scope.engine(scope)
+        )
+
         record_event(resources, ctx, :instance_completed, %{"outcome" => outcome})
 
       {:tasks, _task_specs} ->
@@ -452,9 +462,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
     resources.token
     |> Ash.Query.for_read(:read)
-    |> Ash.Query.filter(
-      instance_id == ^instance_id and status in [:active, :executing, :waiting]
-    )
+    |> Ash.Query.filter(instance_id == ^instance_id and status in [:active, :executing, :waiting])
     |> Ash.read!(Scope.engine(scope))
     |> Enum.reject(&(&1.id == current_id))
     |> Enum.map(fn token ->

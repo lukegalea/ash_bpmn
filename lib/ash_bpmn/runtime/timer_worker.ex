@@ -124,61 +124,61 @@ defmodule AshBpmn.Runtime.TimerWorker do
           :ok
 
         {:ok, token} ->
-        if task.instance_id do
-          instance =
-            resources.instance
-            |> Ash.Query.for_read(:read)
-            |> Ash.Query.filter(id == ^task.instance_id)
-            |> Ash.read_one!(Scope.engine(scope))
+          if task.instance_id do
+            instance =
+              resources.instance
+              |> Ash.Query.for_read(:read)
+              |> Ash.Query.filter(id == ^task.instance_id)
+              |> Ash.read_one!(Scope.engine(scope))
 
-          definition =
-            AshBpmn.DefinitionLoader.load!(
-              resources.definition,
-              instance.definition_id,
-              instance,
-              scope
-            )
-
-          graph = definition.graph
-
-          # Through the shared router, which injects the flow id and sorts by it. The local
-          # version filtered `Map.values(graph["flows"])` -- flows with no `"id"`, in whatever
-          # order the map happened to yield -- and called the head of that "typically the
-          # default path". It is not: it is an arbitrary branch, stable only by luck, and a
-          # task with two outgoing flows expired down a different one depending on the map.
-          case Routing.outgoing(graph, task.node_id) do
-            [first_flow | _] ->
-              # Still the first flow, not an evaluated one: expiry is a timeout, and a
-              # timeout has no task outcome to route on. Now at least "first" means the
-              # lowest flow id rather than a map's internal order.
-              next_node_id = first_flow["to"]
-
-              # Consume the executing token and create a new one
-              resources.token.consume!(token, Scope.engine(scope))
-
-              new_token =
-                resources.token.create!(
-                  %{
-                    instance_id: instance.id,
-                    node_id: next_node_id,
-                    status: :active
-                  },
-                  Scope.engine(scope)
-                )
-
-              # Enqueue advance for the new token
-              AshBpmn.Runtime.Oban.insert(
-                AshBpmn.Runtime.AdvanceWorker,
-                Scope.to_job_args(scope, %{
-                  "instance_id" => instance.id,
-                  "token_id" => new_token.id,
-                  "node_id" => next_node_id
-                })
+            definition =
+              AshBpmn.DefinitionLoader.load!(
+                resources.definition,
+                instance.definition_id,
+                instance,
+                scope
               )
 
-            [] ->
-              :ok
-          end
+            graph = definition.graph
+
+            # Through the shared router, which injects the flow id and sorts by it. The local
+            # version filtered `Map.values(graph["flows"])` -- flows with no `"id"`, in whatever
+            # order the map happened to yield -- and called the head of that "typically the
+            # default path". It is not: it is an arbitrary branch, stable only by luck, and a
+            # task with two outgoing flows expired down a different one depending on the map.
+            case Routing.outgoing(graph, task.node_id) do
+              [first_flow | _] ->
+                # Still the first flow, not an evaluated one: expiry is a timeout, and a
+                # timeout has no task outcome to route on. Now at least "first" means the
+                # lowest flow id rather than a map's internal order.
+                next_node_id = first_flow["to"]
+
+                # Consume the executing token and create a new one
+                resources.token.consume!(token, Scope.engine(scope))
+
+                new_token =
+                  resources.token.create!(
+                    %{
+                      instance_id: instance.id,
+                      node_id: next_node_id,
+                      status: :active
+                    },
+                    Scope.engine(scope)
+                  )
+
+                # Enqueue advance for the new token
+                AshBpmn.Runtime.Oban.insert(
+                  AshBpmn.Runtime.AdvanceWorker,
+                  Scope.to_job_args(scope, %{
+                    "instance_id" => instance.id,
+                    "token_id" => new_token.id,
+                    "node_id" => next_node_id
+                  })
+                )
+
+              [] ->
+                :ok
+            end
           end
       end
     end

@@ -42,7 +42,7 @@ defmodule AshBpmn.TerminateTest do
       refute defn.graph
       assert Enum.any?(defn.errors, &(&1["path"] == "Start_1"))
 
-      message = defn.errors |> Enum.map(& &1["message"]) |> Enum.join(" ")
+      message = Enum.map_join(defn.errors, " ", & &1["message"])
       assert message =~ "terminateEventDefinition"
       assert message =~ "endEvent"
     end
