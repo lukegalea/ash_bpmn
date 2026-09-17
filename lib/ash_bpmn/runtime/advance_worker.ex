@@ -372,6 +372,33 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
           Scope.engine(scope)
         )
 
+      {:emit_signal, %{name: name} = spec} ->
+        # Through the facade, so a throw and a host call take the same path -- including the
+        # depth inheritance, which is what stops a signal that starts a process that throws a
+        # signal going round forever.
+        case AshBpmn.emit_signal(name,
+               instance: ctx[:instance],
+               node_id: spec.node_id,
+               actor: Map.get(scope, :actor),
+               tenant: Map.get(scope, :tenant)
+             ) do
+          {:ok, _signal} ->
+            :ok
+
+          {:error, :signals_not_installed} ->
+            # A published diagram throws a signal and the host has no signal resource. The
+            # process is not wrong and neither is the host -- they disagree about what is
+            # installed -- so the throw is recorded as having gone nowhere rather than
+            # failing an instance that would fail again on every retry.
+            record_event(resources, ctx, :signal_not_delivered, %{
+              "signal_name" => name,
+              "reason" => "signals_not_installed"
+            })
+
+          {:error, reason} ->
+            raise "signal throw #{spec.node_id} failed: #{inspect(reason)}"
+        end
+
       {:terminate_instance, outcome} ->
         killed = kill_live_tokens(resources, ctx, scope)
 

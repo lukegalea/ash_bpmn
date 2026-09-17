@@ -109,6 +109,13 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         # A message catch event was woken by an arriving event. Names the
                         # event that did it, so "why did this resume at 04:12?" is answerable.
                         :message_received,
+                        # A signal catch was woken by a throw. Names the signal and the row it
+                        # came from, so "why did this resume?" is answerable.
+                        :signal_received,
+                        # A throw found no signal resource installed. Recorded rather than
+                        # raised: the diagram and the host disagree about what is installed,
+                        # which retrying cannot fix.
+                        :signal_not_delivered,
                         :timer_fired,
                         :timer_cancelled,
                         # An escalation timer fired and its handler failed. Deliberately not

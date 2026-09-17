@@ -8,7 +8,7 @@ defmodule AshBpmn.Compiler.Graph do
   alias AshBpmn.Compiler.Xml
 
   @spec build(map()) :: {:ok, map()} | {:error, [map()]}
-  def build(process, error_declarations \\ %{}) do
+  def build(process, declarations \\ %{errors: %{}, signals: %{}}) do
     errors = []
     process_id = process.id || ""
 
@@ -40,7 +40,7 @@ defmodule AshBpmn.Compiler.Graph do
     errors = errors ++ check_node_children(supported_nodes)
 
     # Build nodes map
-    {nodes, node_errors} = build_nodes(supported_nodes, error_declarations)
+    {nodes, node_errors} = build_nodes(supported_nodes, declarations)
     errors = errors ++ node_errors
 
     # Build flows map
@@ -142,7 +142,8 @@ defmodule AshBpmn.Compiler.Graph do
     "terminateEventDefinition" => ["endEvent"],
     "timerEventDefinition" => ["intermediateCatchEvent", "boundaryEvent"],
     "errorEventDefinition" => ["endEvent"],
-    "messageEventDefinition" => ["intermediateCatchEvent"]
+    "messageEventDefinition" => ["intermediateCatchEvent"],
+    "signalEventDefinition" => ["intermediateCatchEvent", "intermediateThrowEvent"]
   }
 
   # Children of a `timerEventDefinition`. Only `timeDuration` is implemented; the other two are
@@ -152,7 +153,7 @@ defmodule AshBpmn.Compiler.Graph do
   @timer_definition_children MapSet.new(~w(timeDuration timeDate timeCycle))
 
   @known_unimplemented MapSet.new(~w(
-    timerEventDefinition messageEventDefinition signalEventDefinition
+    timerEventDefinition messageEventDefinition
     errorEventDefinition escalationEventDefinition conditionalEventDefinition
     compensationEventDefinition cancelEventDefinition
     linkEventDefinition multiInstanceLoopCharacteristics standardLoopCharacteristics
@@ -163,7 +164,6 @@ defmodule AshBpmn.Compiler.Graph do
     callActivity subProcess adHocSubProcess transaction
     receiveTask scriptTask manualTask task
     complexGateway eventBasedGateway
-    intermediateThrowEvent
   ))
 
   defp check_unsupported_process_children(process_xml, _supported_nodes, _flows_xml) do
@@ -422,10 +422,10 @@ defmodule AshBpmn.Compiler.Graph do
     end)
   end
 
-  defp build_nodes(nodes_xml, error_declarations) do
+  defp build_nodes(nodes_xml, declarations) do
     nodes =
       nodes_xml
-      |> Enum.map(fn node -> build_node(node, error_declarations) end)
+      |> Enum.map(fn node -> build_node(node, declarations) end)
       |> Enum.filter(fn
         {:ok, _} -> true
         _ -> false
@@ -435,7 +435,7 @@ defmodule AshBpmn.Compiler.Graph do
 
     node_errors =
       nodes_xml
-      |> Enum.map(fn node -> build_node(node, error_declarations) end)
+      |> Enum.map(fn node -> build_node(node, declarations) end)
       |> Enum.filter(fn
         {:error, _} -> true
         _ -> false
@@ -445,7 +445,7 @@ defmodule AshBpmn.Compiler.Graph do
     {nodes, node_errors}
   end
 
-  defp build_node(node, error_declarations) do
+  defp build_node(node, declarations) do
     id = Xml.element_attr(node, "id")
     type = Xml.node_type(node)
     name = Xml.element_attr(node, "name")
@@ -459,7 +459,7 @@ defmodule AshBpmn.Compiler.Graph do
       # loaded is orthogonal to what kind of node it is -- a gateway, a user task and a
       # business rule task all read the subject the same way.
       with {:ok, load} <- build_load(id, node),
-           {:ok, config} <- build_node_config(node, type, error_declarations) do
+           {:ok, config} <- build_node_config(node, type, declarations) do
         {:ok, {id, base |> Map.merge(config) |> maybe_put_load(load)}}
       end
     end
@@ -475,7 +475,7 @@ defmodule AshBpmn.Compiler.Graph do
   # Outputs are *promoted* one named scalar at a time rather than merged wholesale, because a
   # token carries routing and not business data. The decision's full result goes to the host's
   # own record and to a process event; only the declared signals reach the token.
-  defp build_node_config(node, "businessRuleTask", _error_declarations) do
+  defp build_node_config(node, "businessRuleTask", _declarations) do
     id = Xml.element_attr(node, "id")
     ext = Xml.find_extension_elements(node)
 
@@ -499,7 +499,7 @@ defmodule AshBpmn.Compiler.Graph do
   # and promoted signals are optional on both and, when absent, are left off the node
   # entirely so documents written before they existed compile exactly as they always
   # did.
-  defp build_node_config(node, type, _error_declarations)
+  defp build_node_config(node, type, _declarations)
        when type in ["serviceTask", "sendTask"] do
     id = Xml.element_attr(node, "id")
     ext = Xml.find_extension_elements(node)
@@ -569,7 +569,7 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
-  defp build_node_config(node, "userTask", _error_declarations) do
+  defp build_node_config(node, "userTask", _declarations) do
     ext = Xml.find_extension_elements(node)
     ash_task_configs = Xml.find_ash_elements(ext, "taskConfig")
 
@@ -601,7 +601,7 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
-  defp build_node_config(node, "endEvent", error_declarations) do
+  defp build_node_config(node, "endEvent", declarations) do
     id = Xml.element_attr(node, "id")
     ext = Xml.find_extension_elements(node)
     ash_task_configs = Xml.find_ash_elements(ext, "taskConfig")
@@ -619,7 +619,7 @@ defmodule AshBpmn.Compiler.Graph do
       |> Xml.get_element_children()
       |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "errorEventDefinition"))
 
-    with {:ok, error} <- build_error_end(id, error_definitions, error_declarations),
+    with {:ok, error} <- build_error_end(id, error_definitions, declarations.errors),
          :ok <- check_end_markers(id, terminate?, error) do
       base =
         %{}
@@ -630,7 +630,7 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
-  defp build_node_config(node, "boundaryEvent", _error_declarations) do
+  defp build_node_config(node, "boundaryEvent", _declarations) do
     id = Xml.element_attr(node, "id")
     ref = Xml.element_attr(node, "attachedToRef")
 
@@ -647,7 +647,7 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
-  defp build_node_config(node, "intermediateCatchEvent", _error_declarations) do
+  defp build_node_config(node, "intermediateCatchEvent", _declarations) do
     id = Xml.element_attr(node, "id")
 
     definitions =
@@ -656,7 +656,8 @@ defmodule AshBpmn.Compiler.Graph do
       |> Enum.filter(
         &(Xml.normalize_name(Xml.local_name(&1)) in [
             "timerEventDefinition",
-            "messageEventDefinition"
+            "messageEventDefinition",
+            "signalEventDefinition"
           ])
       )
 
@@ -669,7 +670,7 @@ defmodule AshBpmn.Compiler.Graph do
            id,
            "intermediateCatchEvent '#{id}' has no event definition; the token would wait " <>
              "for something that can never arrive. Supported: timerEventDefinition, " <>
-             "messageEventDefinition"
+             "messageEventDefinition, signalEventDefinition"
          )}
 
       [_, _ | _] ->
@@ -680,18 +681,108 @@ defmodule AshBpmn.Compiler.Graph do
         case Xml.normalize_name(Xml.local_name(definition)) do
           "timerEventDefinition" -> build_timer_catch(id, definition)
           "messageEventDefinition" -> build_message_catch(id, node)
+          "signalEventDefinition" -> build_signal_catch(id, definition)
         end
     end
   end
 
-  defp build_node_config(node, "exclusiveGateway", _error_declarations) do
+  defp build_node_config(node, "exclusiveGateway", _declarations) do
     default_flow = Xml.element_attr(node, "default")
     {:ok, Map.filter(%{"default_flow" => default_flow}, fn {_, v} -> v != nil end)}
   end
 
-  defp build_node_config(_node, type, _error_declarations)
+  # A throw waits for nothing: the token carries straight on through the outgoing flow while
+  # the sweep delivers the signal to whoever was listening.
+  defp build_node_config(node, "intermediateThrowEvent", declarations) do
+    build_signal_throw(Xml.element_attr(node, "id"), node, declarations.signals)
+  end
+
+  defp build_node_config(_node, type, _declarations)
        when type in ["startEvent", "parallelGateway"] do
     {:ok, %{}}
+  end
+
+  # A signal throw broadcasts a name and waits for nothing: the token carries straight on
+  # through the outgoing flow while the sweep delivers to whoever was listening.
+  #
+  # `signalRef` points at a `bpmn:signal` declared beside the process, exactly as `errorRef`
+  # points at a `bpmn:error` -- which is why the error work had to come first, and why the
+  # declaration table is now threaded into every node builder. The *name* is what travels, not
+  # the id: a catch in another diagram has its own declaration with its own id, and only the
+  # names can agree.
+  defp build_signal_throw(id, node, declarations) do
+    definitions =
+      node
+      |> Xml.get_element_children()
+      |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "signalEventDefinition"))
+
+    case definitions do
+      [] ->
+        {:error,
+         Errors.error(
+           id,
+           "intermediateThrowEvent '#{id}' has no event definition; it would be a node that " <>
+             "does nothing. Supported: signalEventDefinition"
+         )}
+
+      [_, _ | _] ->
+        {:error,
+         Errors.error(id, "intermediateThrowEvent '#{id}' has more than one event definition")}
+
+      [definition] ->
+        with {:ok, signal} <- resolve_signal(id, definition, declarations) do
+          {:ok, %{"throw" => signal}}
+        end
+    end
+  end
+
+  # A catch listens by *ref*, resolved to a name the same way a throw is, so a diagram that
+  # throws and catches its own signal agrees with itself and one that catches another's agrees
+  # on the name alone.
+  defp build_signal_catch(id, definition) do
+    with {:ok, ref} <- signal_ref(id, definition) do
+      {:ok, %{"catch" => %{"kind" => "signal", "ref" => ref}}}
+    end
+  end
+
+  defp signal_ref(id, definition) do
+    case Xml.element_attr(definition, "signalRef") do
+      nil ->
+        {:error,
+         Errors.error(
+           id,
+           "signalEventDefinition on '#{id}' has no signalRef; a catch with no name would " <>
+             "hear every signal, which is not listening"
+         )}
+
+      ref ->
+        {:ok, ref}
+    end
+  end
+
+  defp resolve_signal(id, definition, declarations) do
+    with {:ok, ref} <- signal_ref(id, definition) do
+      case Map.fetch(declarations, ref) do
+        {:ok, %{"name" => name}} when is_binary(name) and name != "" ->
+          {:ok, %{"ref" => ref, "name" => name}}
+
+        {:ok, _} ->
+          {:error,
+           Errors.error(
+             id,
+             "signal '#{ref}' is declared with no name. The name is what travels between " <>
+               "diagrams; the id is local to this one"
+           )}
+
+        :error ->
+          {:error,
+           Errors.error(
+             id,
+             "'#{id}' references signal '#{ref}', which is not declared. A bpmn:signal " <>
+               "element with that id must sit beside the process, not inside it"
+           )}
+      end
+    end
   end
 
   # A message catch waits for something that happens elsewhere in the application. The

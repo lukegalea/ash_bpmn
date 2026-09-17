@@ -19,11 +19,13 @@ The compiler rejects, each with the offending element's id in the error:
   Executable conformance class is barely larger. ash_bpmn executes that subset:
   start events, end events — including terminate end events — user, service,
   send and business rule tasks, intermediate catch events carrying a timer,
-  interrupting timer boundary events on user tasks, message catch events, error
-  end events, exclusive and parallel gateways, conditional and default flows. Call activities, ad-hoc and
+  interrupting timer boundary events on user tasks, message catch events, signal
+  throw and catch events, error end events, exclusive and parallel gateways,
+  conditional and default flows. Call activities, ad-hoc and
   transactional sub-processes, throw events,
   the rest of the event-definition taxonomy (message on anything but an
-  intermediate catch event, signal, error on anything but an end event,
+  intermediate catch event, signal on anything but an intermediate throw or
+  catch, error on anything but an end event,
   escalation, conditional, compensation, cancel, link), complex and
   event-based gateways, loop and multi-instance markers: rejected, loudly. A
   notation element a business analyst drew and a system silently ignored is how
@@ -110,6 +112,12 @@ The compiler rejects, each with the offending element's id in the error:
   for a following gateway to read, a boundary leaves down its own flow with no
   outcome — so the same picture would mean something different after an
   upgrade. The two are made mutually exclusive on a user task instead.
+- **A signal event with no `signalRef`, or a ref with no declaration.** A catch
+  with no name would hear every signal thrown anywhere, which is not listening.
+  A `bpmn:signal` is declared beside the process, like `bpmn:error`, and the
+  *name* on that declaration is what travels — a catch in another diagram has
+  its own declaration with its own id, so only the names can agree. A
+  declaration with no name is refused for the same reason.
 - **A message catch that does not say what it is waiting for.** A
   `messageEventDefinition` says only *that* the token waits; the `ash:subscribe`
   element says what for, because BPMN's own message plumbing describes messages

@@ -91,6 +91,9 @@ defmodule AshBpmn.Runtime.Interpreter do
       "boundaryEvent" ->
         boundary_event(graph, node_id, node, ctx)
 
+      "intermediateThrowEvent" ->
+        signal_throw(graph, node_id, node, ctx)
+
       other ->
         {:error, "unsupported node type: #{other}"}
     end
@@ -647,6 +650,9 @@ defmodule AshBpmn.Runtime.Interpreter do
       "message" ->
         message_catch(node_id, catch_spec, ctx)
 
+      "signal" ->
+        signal_catch(node_id, catch_spec, ctx)
+
       other ->
         {:error, "intermediate catch event #{node_id} has unsupported kind: #{inspect(other)}"}
     end
@@ -704,6 +710,30 @@ defmodule AshBpmn.Runtime.Interpreter do
     end
   end
 
+  # A signal catch parks with a name and **no correlation key**, and that absence is the whole
+  # difference from a message. A message is addressed: one event wakes the one token whose key
+  # it matches. A signal is broadcast: one event wakes every token listening for that name, and
+  # asking which one it was "for" is a question with no answer.
+  #
+  # So there is nothing to freeze at park, and nothing that can go null -- which is why this
+  # clause is four lines where the message one is thirty.
+  defp signal_catch(node_id, catch_spec, ctx) do
+    effects = [
+      park_token: %{
+        subscription_signature: "signal:#{catch_spec["ref"]}",
+        correlation_key: nil
+      },
+      events: [
+        event_attrs(ctx, node_id, :node_entered, %{
+          "waiting_for" => "signal",
+          "signal_ref" => catch_spec["ref"]
+        })
+      ]
+    ]
+
+    {:ok, effects}
+  end
+
   # A token with no lookback arms nothing, which is the ordinary case and the default.
   defp lookback_jobs(_ctx, _node_id, 0), do: []
 
@@ -738,6 +768,32 @@ defmodule AshBpmn.Runtime.Interpreter do
        "token_id" => ctx[:token].id,
        "node_id" => node_id
      }, [scheduled_at: DateTime.add(DateTime.utc_now(), seconds, :second)]}
+  end
+
+  # ── intermediateThrowEvent ───────────────────────────────────────────────
+
+  # A throw is not a wait. The token passes through in the same advance that emitted the
+  # signal, and delivery to whoever was listening happens on the sweep's own schedule -- which
+  # is what makes a signal a broadcast rather than a handshake. A throw whose signal nobody
+  # catches is the ordinary case, not a failure.
+  #
+  # The emit is an *effect* rather than a call made here, because the interpreter is pure: it
+  # says what should happen and the advance worker is what touches the world.
+  defp signal_throw(graph, node_id, node, ctx) do
+    signal = node["throw"] || %{}
+
+    effects = [
+      consume_token: true,
+      emit_signal: %{name: signal["name"], node_id: node_id},
+      events: [
+        event_attrs(ctx, node_id, :node_completed, %{
+          "signal_name" => signal["name"],
+          "signal_ref" => signal["ref"]
+        })
+      ]
+    ]
+
+    {:ok, effects ++ follow_flows(graph, find_outgoing_flows(graph, node_id), ctx)}
   end
 
   # ── boundaryEvent ────────────────────────────────────────────────────────

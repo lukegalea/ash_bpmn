@@ -10,7 +10,7 @@ defmodule AshBpmn.Compiler.Xml do
   # The ash: namespace URI is https://github.com/lukegalea/ash_bpmn/ns, but it
   # is never compared against: xmerl scans without :namespace_conform, so
   # extension attributes arrive as prefixed atoms and are matched by prefix.
-  @supported_node_types ~w(startEvent endEvent userTask serviceTask sendTask businessRuleTask exclusiveGateway parallelGateway intermediateCatchEvent boundaryEvent)
+  @supported_node_types ~w(startEvent endEvent userTask serviceTask sendTask businessRuleTask exclusiveGateway parallelGateway intermediateCatchEvent boundaryEvent intermediateThrowEvent)
   @supported_node_types_with_prefix Enum.map(@supported_node_types, &"bpmn2:#{&1}")
   @supported_node_types_bpmn_prefix Enum.map(@supported_node_types, &"bpmn:#{&1}")
 
@@ -324,23 +324,36 @@ defmodule AshBpmn.Compiler.Xml do
   anyone edited started reporting a problem it did not have.
   """
   @spec error_declarations(tuple()) :: %{optional(String.t()) => map()}
-  def error_declarations(doc) do
+  def error_declarations(doc), do: declarations(doc, "error", ["errorCode", "name"])
+
+  @doc """
+  The `bpmn:signal` declarations at definitions level, keyed by id.
+
+  Read the same way and for the same reason as the errors: they are siblings of `<process>`,
+  and the graph builder is handed only the process element.
+  """
+  @spec signal_declarations(tuple()) :: %{optional(String.t()) => map()}
+  def signal_declarations(doc), do: declarations(doc, "signal", ["name"])
+
+  defp declarations(doc, local_name, attrs) do
     doc
     |> definitions_siblings()
-    |> Enum.filter(&(normalize_name(element_name(&1)) == "error"))
+    |> Enum.filter(&(normalize_name(element_name(&1)) == local_name))
     |> Enum.reduce(%{}, fn element, acc ->
       case element_attr(element, "id") do
         nil ->
           acc
 
         id ->
-          Map.put(acc, id, %{
-            "code" => element_attr(element, "errorCode"),
-            "name" => element_attr(element, "name")
-          })
+          Map.put(acc, id, Map.new(attrs, fn a -> {attr_key(a), element_attr(element, a)} end))
       end
     end)
   end
+
+  # `errorCode` is stored as `"code"`, because the graph speaks about errors rather than about
+  # the XML attribute that carried one.
+  defp attr_key("errorCode"), do: "code"
+  defp attr_key(other), do: other
 
   # Every element under `elements` (any depth) whose normalized name matches.
   @spec descendants([tuple()], String.t()) :: [tuple()]

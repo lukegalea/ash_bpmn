@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+Waits for a signal by name, then carries on. The bpmn:signal declaration sits beside the
+process, like bpmn:error does, because it is what a throw in another diagram agrees with.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_signal_catch"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+
+  <bpmn2:signal id="Sig_Frozen" name="account.frozen"/>
+
+  <bpmn2:process id="Process_signal_catch" name="Signal catch" isExecutable="true">
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>Flow_1</bpmn2:outgoing></bpmn2:startEvent>
+
+    <bpmn2:intermediateCatchEvent id="AwaitFreeze" name="Await freeze">
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
+      <bpmn2:signalEventDefinition id="SigDef_1" signalRef="Sig_Frozen"/>
+    </bpmn2:intermediateCatchEvent>
+
+    <bpmn2:serviceTask id="React" name="React">
+      <bpmn2:extensionElements><ash:taskConfig action="react"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_2</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_3</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>Flow_3</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="AwaitFreeze"/>
+    <bpmn2:sequenceFlow id="Flow_2" sourceRef="AwaitFreeze" targetRef="React"/>
+    <bpmn2:sequenceFlow id="Flow_3" sourceRef="React" targetRef="End_1"/>
+  </bpmn2:process>
+</bpmn2:definitions>

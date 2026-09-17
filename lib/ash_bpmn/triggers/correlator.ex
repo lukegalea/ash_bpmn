@@ -79,6 +79,7 @@ defmodule AshBpmn.Triggers.Correlator do
   # one edit.
   @event "event"
   @metadata "metadata"
+  @data "data"
 
   @doc """
   Runs every matching subscription against one event.
@@ -131,10 +132,14 @@ defmodule AshBpmn.Triggers.Correlator do
     event = feel_ctx[@event]
     token_resource = ctx.resources.token
 
-    signatures = [
-      "message:#{event["resource"]}:#{event["action"]}",
-      "message:#{event["resource"]}:*"
-    ]
+    # A signal event carries the name it broadcast, so its signature is derived from the
+    # *payload* rather than from the resource and action the way a message's is. Both shapes
+    # are queried together because a single read over one partial index beats two.
+    signatures =
+      [
+        "message:#{event["resource"]}:#{event["action"]}",
+        "message:#{event["resource"]}:*"
+      ] ++ signal_signatures(feel_ctx, ctx)
 
     token_resource
     |> Ash.Query.for_read(:read)
@@ -151,6 +156,23 @@ defmodule AshBpmn.Triggers.Correlator do
     error ->
       Logger.error("ash_bpmn catch delivery failed: #{Exception.message(error)}")
       :ok
+  end
+
+  # `["signal:<ref>"]` when this event is a signal row, `[]` otherwise.
+  #
+  # Identified by resource rather than by the presence of a name field, because "has a name"
+  # is a property plenty of business records share and mistaking one for a signal would wake
+  # processes on an unrelated write.
+  defp signal_signatures(feel_ctx, ctx) do
+    signal_module = Map.get(ctx.resources, :signal)
+    name = get_in(feel_ctx, [@data, "name"])
+
+    if signal_module && is_binary(name) &&
+         ResourceName.short(signal_module) == feel_ctx[@event]["resource"] do
+      ["signal:#{name}"]
+    else
+      []
+    end
   end
 
   defp deliver_to_instance(instance_id, tokens, feel_ctx, ctx) do
@@ -182,7 +204,8 @@ defmodule AshBpmn.Triggers.Correlator do
   def deliver_one(token, graph, feel_ctx, ctx) do
     case expected_key(graph, token.node_id, feel_ctx) do
       {:ok, key} ->
-        if token.correlation_key == key, do: wake(token, token.node_id, feel_ctx, ctx)
+        if token.correlation_key == key,
+          do: wake(token, token.node_id, feel_ctx, ctx, graph)
 
       :skip ->
         :ok
@@ -203,14 +226,14 @@ defmodule AshBpmn.Triggers.Correlator do
     tokens
     |> Enum.group_by(& &1.node_id)
     |> Enum.each(fn {node_id, node_tokens} ->
-      case expected_key(graph, node_id, feel_ctx) do
-        {:ok, key} ->
-          node_tokens
-          |> Enum.filter(&(&1.correlation_key == key))
-          |> Enum.each(&wake(&1, node_id, feel_ctx, ctx))
-
-        :skip ->
-          :ok
+      # Broadcast versus addressed, and it is the only branch in delivery that matters. A
+      # signal wakes every token listening for that name -- there is no key to compare, and
+      # asking which token it was "for" is a question with no answer. The signature has
+      # already narrowed the set to tokens listening for this exact name.
+      if signal_node?(graph, node_id) do
+        Enum.each(node_tokens, &wake(&1, node_id, feel_ctx, ctx, graph))
+      else
+        deliver_addressed(node_tokens, graph, node_id, feel_ctx, ctx)
       end
     end)
   end
@@ -218,6 +241,22 @@ defmodule AshBpmn.Triggers.Correlator do
   # The key this event carries, by the node's own `match` expression. A null or an error means
   # this event is not addressed to anything at this node -- an event of the right kind that
   # simply does not carry the field -- which is an ordinary no, not a condition to report.
+  defp deliver_addressed(tokens, graph, node_id, feel_ctx, ctx) do
+    case expected_key(graph, node_id, feel_ctx) do
+      {:ok, key} ->
+        tokens
+        |> Enum.filter(&(&1.correlation_key == key))
+        |> Enum.each(&wake(&1, node_id, feel_ctx, ctx, graph))
+
+      :skip ->
+        :ok
+    end
+  end
+
+  defp signal_node?(graph, node_id) do
+    get_in(graph, ["nodes", node_id, "catch", "kind"]) == "signal"
+  end
+
   defp expected_key(graph, node_id, feel_ctx) do
     spec = get_in(graph, ["nodes", node_id, "catch"]) || %{}
 
@@ -236,7 +275,7 @@ defmodule AshBpmn.Triggers.Correlator do
     end
   end
 
-  defp wake(token, node_id, feel_ctx, ctx) do
+  defp wake(token, node_id, feel_ctx, ctx, graph) do
     engine = AshBpmn.Scope.engine(ctx.scope)
 
     case ctx.resources.token.claim_waiting(token, engine) do
@@ -250,7 +289,7 @@ defmodule AshBpmn.Triggers.Correlator do
             instance_id: token.instance_id,
             token_id: token.id,
             node_id: node_id,
-            kind: :message_received,
+            kind: if(signal_node?(graph, node_id), do: :signal_received, else: :message_received),
             data: %{
               "event_id" => feel_ctx[@event]["id"],
               "resource" => feel_ctx[@event]["resource"],
