@@ -87,6 +87,22 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
       Scope.engine(scope)
     )
 
+    # Terminate the ledger row, looked up by the token rather than by a task -- a catch timer
+    # has no task. This runs only on the winning claim path, which is right: a losing claim
+    # did not fire anything, and its row is cancelled by whoever pruned the branch.
+    #
+    # Non-bang, for the same reason as the task timers: the wake has already happened, and a
+    # failed bookkeeping write must not fail the job and send it round again.
+    if resources.timer_job do
+      row =
+        resources.timer_job
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(token_id == ^token.id and kind == :catch and status == :scheduled)
+        |> Ash.read_one!(Scope.engine(scope))
+
+      row && resources.timer_job.record_fired(row, Scope.engine(scope))
+    end
+
     # A catch event has exactly one way out -- it is a point on a path, not a decision -- so
     # this is `:none` rather than the router's condition evaluation. A catch event with two
     # outgoing flows is an implicit gateway, and the compiler's business, not this worker's.

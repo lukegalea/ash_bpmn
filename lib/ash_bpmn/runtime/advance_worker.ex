@@ -349,7 +349,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
               args
             end
 
-          AshBpmn.Runtime.Oban.insert(worker, Scope.to_job_args(scope, args), opts)
+          insert_job(resources, worker, args, opts, scope)
         end)
 
       {:terminate_instance, outcome} ->
@@ -398,24 +398,40 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         end)
 
       {:timers, {task_ref, timer_specs}} ->
-        attach_timers(resources, Map.fetch!(task_id_map, task_ref), timer_specs, scope)
+        attach_timers(resources, Map.fetch!(task_id_map, task_ref), timer_specs, ctx, scope)
     end)
   end
 
   # Enqueues a task's timers and records the resulting job ids on the task, so
   # completing the task early can cancel them. Without the ids on the row there
   # is nothing to cancel and a decided task still fires its escalation.
-  defp attach_timers(_resources, _task_id, [], _scope), do: :ok
+  defp attach_timers(_resources, _task_id, [], _ctx, _scope), do: :ok
 
-  defp attach_timers(resources, task_id, timer_specs, scope) do
+  defp attach_timers(resources, task_id, timer_specs, ctx, scope) do
     job_ids =
       Enum.map(timer_specs, fn {worker, args, opts} ->
+        # The ledger row is written BEFORE the Oban insert, and the job id attached after.
+        # A crash between the two then leaves a row saying a timer was meant to exist, which
+        # is evidence; the other order leaves a scheduled job nothing knows about, which is a
+        # ghost.
+        row =
+          ledger_row(resources, scope, %{
+            instance_id: ctx[:instance] && ctx[:instance].id,
+            token_id: ctx[:token] && ctx[:token].id,
+            task_id: task_id,
+            node_id: ctx[:token] && ctx[:token].node_id,
+            kind: timer_kind(args["kind"]),
+            due_at: Keyword.get(opts, :scheduled_at)
+          })
+
         {:ok, job} =
           AshBpmn.Runtime.Oban.insert(
             worker,
             Scope.to_job_args(scope, Map.put(args, "task_id", task_id)),
             opts
           )
+
+        row && resources.timer_job.attach_job!(row, job.id, Scope.engine(scope))
 
         job.id
       end)
@@ -430,6 +446,46 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
     :ok
   end
+
+  # A catch timer earns a ledger row; an ordinary advance job does not. This clause is
+  # generic over every job the interpreter emits, so the gate is the worker module rather
+  # than a flag threaded through the effect.
+  defp insert_job(resources, AshBpmn.Runtime.CatchTimerWorker = worker, args, opts, scope) do
+    row =
+      ledger_row(resources, scope, %{
+        instance_id: args["instance_id"],
+        token_id: args["token_id"],
+        node_id: args["node_id"],
+        kind: :catch,
+        due_at: Keyword.get(opts, :scheduled_at)
+      })
+
+    {:ok, job} = AshBpmn.Runtime.Oban.insert(worker, Scope.to_job_args(scope, args), opts)
+    row && resources.timer_job.attach_job!(row, job.id, Scope.engine(scope))
+    :ok
+  end
+
+  defp insert_job(_resources, worker, args, opts, scope) do
+    AshBpmn.Runtime.Oban.insert(worker, Scope.to_job_args(scope, args), opts)
+    :ok
+  end
+
+  # `nil` when the host has not installed the ledger, which is a supported configuration --
+  # the kind is optional exactly like the trigger kinds. Every caller must therefore treat
+  # `nil` as "not installed" rather than as a failure.
+  defp ledger_row(resources, scope, attrs) do
+    if resources.timer_job && attrs.kind do
+      resources.timer_job.create!(attrs, Scope.engine(scope))
+    end
+  end
+
+  # Mapped explicitly rather than through `String.to_existing_atom/1`. The kind arrives from
+  # the diagram, and an unrecognized one must not take the whole advance down over a
+  # bookkeeping row -- it loses its ledger entry and the timer still arms.
+  defp timer_kind("remind"), do: :remind
+  defp timer_kind("escalate"), do: :escalate
+  defp timer_kind("expire"), do: :expire
+  defp timer_kind(_), do: nil
 
   # ── Instance failure ─────────────────────────────────────────────────────
 

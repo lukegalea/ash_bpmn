@@ -227,7 +227,7 @@ defmodule AshBpmn do
     # Usage rule 6: a completion path cancels the task's outstanding timers.
     # The cancellation is also *recorded*, so the log shows not just that the
     # task was decided but that its escalate/expire clocks were stopped with it.
-    cancel_task_timers(resources, completed, scope)
+    cancel_task_timers(resources, completed, :task_decided, scope)
 
     # If this is a process task, advance the token
     if completed.token_id do
@@ -364,9 +364,17 @@ defmodule AshBpmn do
   # `:timer_cancelled` event for it. A timer cancelled with its task is a fact
   # about the task's history: the audit log should show that the escalation
   # clock stopped *because* the task was decided, not leave a reader to infer
-  # it. Only fires when there is something to cancel -- a task without timers
-  # records nothing.
-  defp cancel_task_timers(resources, task, scope) do
+  # it.
+  #
+  # `reason` is why, and it is the whole point. Oban can be told to cancel a job and cannot
+  # be told why; the Pruner then deletes the row entirely. So without this, "the escalation
+  # never fired" and "the escalation stopped because somebody decided at 14:07" are the same
+  # absence a week later.
+  defp cancel_task_timers(resources, task, reason, scope) do
+    # Cancelling the Oban jobs still depends on having their ids, because that is what a
+    # cancel addresses. The ledger sweep below deliberately does NOT -- a task whose ids were
+    # never persisted (the window between insert and attach) is exactly the case the ledger
+    # exists to cover, and gating it on the same empty list would blind it there.
     case task.timer_job_ids || [] do
       [] ->
         :ok
@@ -376,6 +384,25 @@ defmodule AshBpmn do
 
         record_task_event(resources, task, :timer_cancelled, %{"job_ids" => job_ids}, scope)
     end
+
+    cancel_ledger_rows(resources, task, reason, scope)
+  end
+
+  defp cancel_ledger_rows(resources, task, reason, scope) do
+    if resources.timer_job do
+      resources.timer_job
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(task_id == ^task.id and status == :scheduled)
+      |> Ash.read!(Scope.engine(scope))
+      |> Enum.each(fn row ->
+        # Non-bang. A losing race -- the timer fired between the read and the write -- is
+        # ordinary, and failing to record a cancellation must not fail the decision that
+        # caused it.
+        resources.timer_job.record_cancelled(row, reason, Scope.engine(scope))
+      end)
+    end
+
+    :ok
   end
 
   defp reload_task!(resources, task, scope) do
@@ -467,7 +494,7 @@ defmodule AshBpmn do
 
     Enum.each(open_tasks, fn task ->
       resources.human_task.cancel!(task, Scope.engine(scope))
-      cancel_task_timers(resources, task, scope)
+      cancel_task_timers(resources, task, :instance_cancelled, scope)
     end)
 
     cancelled = resources.instance.cancel!(instance, Scope.engine(scope))

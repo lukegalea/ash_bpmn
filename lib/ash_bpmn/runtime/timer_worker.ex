@@ -59,6 +59,8 @@ defmodule AshBpmn.Runtime.TimerWorker do
       Scope.engine(scope)
     )
 
+    record_fire(resources, task, :remind, scope)
+
     {:ok, :reminded}
   end
 
@@ -87,6 +89,8 @@ defmodule AshBpmn.Runtime.TimerWorker do
       Scope.engine(scope)
     )
 
+    record_fire(resources, task, :escalate, scope)
+
     {:ok, :escalated}
   rescue
     _ -> {:ok, :escalated}
@@ -108,6 +112,8 @@ defmodule AshBpmn.Runtime.TimerWorker do
       },
       Scope.engine(scope)
     )
+
+    record_fire(resources, task, :expire, scope)
 
     # If this is a process task (has token_id), advance the token
     if task.token_id do
@@ -188,5 +194,28 @@ defmodule AshBpmn.Runtime.TimerWorker do
 
   defp fire_timer(_resources, _task, kind, _scope) do
     {:error, "unknown timer kind: #{kind}"}
+  end
+
+  # Terminates the ledger row for a timer that has just fired.
+  #
+  # Looked up by (task, kind, scheduled) rather than carried in the job args, because the
+  # args predate the ledger and a job armed before this shipped still has to be recordable.
+  #
+  # Non-bang, and losing is ordinary: a redelivered worker finds the row already terminal,
+  # and the firing it is re-running has already happened. A retry that cannot re-record its
+  # own firing must still be allowed to complete, or Oban retries it until max_attempts over
+  # a bookkeeping write.
+  defp record_fire(resources, task, kind, scope) do
+    if resources.timer_job do
+      row =
+        resources.timer_job
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(task_id == ^task.id and kind == ^kind and status == :scheduled)
+        |> Ash.read_one!(Scope.engine(scope))
+
+      row && resources.timer_job.record_fired(row, Scope.engine(scope))
+    end
+
+    :ok
   end
 end
