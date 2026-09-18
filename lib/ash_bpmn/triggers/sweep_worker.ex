@@ -115,11 +115,14 @@ defmodule AshBpmn.Triggers.SweepWorker do
     scope = %Scope{Scope.from_job(args, :sweep) | domain: domain}
     repo = AshPostgres.DataLayer.Info.repo(resources.cursor)
 
-    cursor = ensure_cursor(resources.cursor, event_source, tenant, scope)
+    # Through the cursor store rather than the cursor resource, per ADR 0036. The sweep does
+    # not care where the position is kept, which is what lets it be moved.
+    store_ctx = %{resources: resources, scope: scope, event_source: event_source}
+    {:ok, position} = AshBpmn.Triggers.CursorStore.impl().read(tenant, store_ctx)
 
-    case event_source.stream(tenant, cursor.last_sequence, @batch) do
+    case event_source.stream(tenant, position, @batch) do
       {:ok, {[], _}} ->
-        telemetry(started, tenant, cursor.last_sequence, 0)
+        telemetry(started, tenant, position, 0)
         :ok
 
       {:ok, {events, _}} ->
@@ -136,7 +139,10 @@ defmodule AshBpmn.Triggers.SweepWorker do
         Enum.each(events, &dispatch_isolated(repo, tenant, &1, subscriptions, ctx))
 
         last_sequence = event_source.sequence(List.last(events))
-        advance(repo, tenant, resources.cursor, cursor, last_sequence, scope)
+
+        # Still inside the per-tenant advisory lock the dispatch loop holds: the position must
+        # not move for a batch another sweep is also walking.
+        advance_position(repo, tenant, last_sequence, store_ctx)
         telemetry(started, tenant, last_sequence, length(events))
 
         :ok
@@ -164,10 +170,10 @@ defmodule AshBpmn.Triggers.SweepWorker do
       :ok
   end
 
-  defp advance(repo, tenant, cursor_resource, cursor, last_sequence, scope) do
+  defp advance_position(repo, tenant, last_sequence, store_ctx) do
     repo.transaction(fn ->
       lock(repo, tenant)
-      cursor_resource.advance!(cursor, last_sequence, Scope.engine(scope))
+      AshBpmn.Triggers.CursorStore.impl().advance(tenant, last_sequence, store_ctx)
     end)
 
     :ok
@@ -189,42 +195,6 @@ defmodule AshBpmn.Triggers.SweepWorker do
 
   defp event_id(event) do
     if is_map(event) and is_map_key(event, :id), do: event.id, else: inspect(event)
-  end
-
-  # Returns this tenant's cursor, creating it at the **current high-water
-  # mark** if absent. Read first, create only when nil: the create is an
-  # upsert, so stamping unconditionally would reset an existing cursor to the
-  # log's end and silently skip everything in between.
-  defp ensure_cursor(cursor_resource, event_source, tenant, scope) do
-    cursor_resource
-    |> Ash.Query.for_read(:read)
-    |> Ash.read_one!(Scope.engine(scope))
-    |> case do
-      nil ->
-        cursor_resource.create!(
-          %{last_sequence: high_water(event_source, tenant)},
-          Scope.engine(scope)
-        )
-
-      cursor ->
-        cursor
-    end
-  end
-
-  # The adapter's contract is forward-only (`stream/3` after a sequence), so
-  # the high-water mark is found by paging to the end once. Bounded by the
-  # same 500-page batch size; paid once per tenant, before anything dispatches.
-  defp high_water(event_source, tenant, after_sequence \\ 0, last \\ nil)
-
-  defp high_water(event_source, tenant, after_sequence, last) do
-    case event_source.stream(tenant, after_sequence, @batch) do
-      {:ok, {[], _}} ->
-        last || 0
-
-      {:ok, {events, _}} ->
-        last = event_source.sequence(List.last(events))
-        high_water(event_source, tenant, last, last)
-    end
   end
 
   # One read per batch: the funnel's per-event match is in-memory against this
