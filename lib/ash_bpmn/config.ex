@@ -131,19 +131,19 @@ defmodule AshBpmn.Config do
   """
   @spec definition_loader() :: module()
   def definition_loader do
-    Application.get_env(:ash_bpmn, :definition_loader, AshBpmn.DefinitionLoader.Default)
+    get(:definition_loader, AshBpmn.DefinitionLoader.Default)
   end
 
   @doc "Returns the Oban queue name for BPMN jobs (default `:bpmn`)."
   @spec queue() :: atom()
   def queue do
-    Application.get_env(:ash_bpmn, :queue, :bpmn)
+    get(:queue, :bpmn)
   end
 
   @doc "Returns the max retry attempts for advance jobs (default `5`)."
   @spec max_attempts() :: pos_integer()
   def max_attempts do
-    Application.get_env(:ash_bpmn, :max_attempts, 5)
+    get(:max_attempts, 5)
   end
 
   @doc """
@@ -227,7 +227,7 @@ defmodule AshBpmn.Config do
   """
   @spec trigger_tenants() :: [term()]
   def trigger_tenants do
-    case Application.get_env(:ash_bpmn, :trigger_tenants, []) do
+    case get(:trigger_tenants, []) do
       {m, f, a} when is_atom(m) and is_atom(f) and is_list(a) -> apply(m, f, a)
       tenants when is_list(tenants) -> tenants
     end
@@ -244,7 +244,7 @@ defmodule AshBpmn.Config do
   """
   @spec trigger_max_depth() :: pos_integer()
   def trigger_max_depth do
-    Application.get_env(:ash_bpmn, :trigger_max_depth, 5)
+    get(:trigger_max_depth, 5)
   end
 
   @doc """
@@ -256,7 +256,7 @@ defmodule AshBpmn.Config do
   """
   @spec nudge_resource_field() :: atom()
   def nudge_resource_field do
-    Application.get_env(:ash_bpmn, :nudge_resource_field, :resource)
+    get(:nudge_resource_field, :resource)
   end
 
   @doc """
@@ -269,6 +269,26 @@ defmodule AshBpmn.Config do
   """
   @spec nudge_tenant_field() :: atom()
   def nudge_tenant_field do
-    Application.get_env(:ash_bpmn, :nudge_tenant_field, :organization_id)
+    get(:nudge_tenant_field, :organization_id)
+  end
+
+  # Every defaulted read goes through here, and the reason is narrow and real.
+  #
+  # `Application.get_env/3`'s default does not fire for a key that is *present with a nil
+  # value*, and `Application.put_env(key, nil)` makes it present. So a caller that captures
+  # configuration before setting it and restores what it captured writes a present nil back --
+  # and every later reader gets `nil` where it had every reason to expect the default. It is a
+  # test-cleanup idiom rather than an exotic mistake, and a host can write the same nil in a
+  # config file just as easily.
+  #
+  # Found after it did exactly that here: eighteen tests failed in a file about something else
+  # entirely, with `nil.read/2`, because one test restored a nil it had captured as unset.
+  # Unset and nil mean the same thing to every caller of this module, so they are made to mean
+  # the same thing in one place rather than at fifteen call sites that each look correct.
+  defp get(key, default) do
+    case Application.get_env(:ash_bpmn, key) do
+      nil -> default
+      value -> value
+    end
   end
 end

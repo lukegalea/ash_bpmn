@@ -55,6 +55,28 @@ defmodule AshBpmn.CursorStoreTest do
     assert CursorStore.impl() == CursorStore.Legacy
   end
 
+  test "every defaulted config read survives a key present with a nil value" do
+    # The class, not the instance. `Config.get/2` exists because `get_env/3`'s default does
+    # not fire for a present nil, and a test restoring captured-as-unset config writes exactly
+    # that. Each of these looked correct at its own call site.
+    for {key, default} <- [
+          definition_loader: AshBpmn.DefinitionLoader.Default,
+          queue: :bpmn,
+          max_attempts: 5,
+          trigger_max_depth: 5,
+          nudge_resource_field: :resource,
+          nudge_tenant_field: :organization_id
+        ] do
+      previous = Application.get_env(:ash_bpmn, key)
+      Application.put_env(:ash_bpmn, key, nil)
+
+      on_exit(fn -> restore(key, previous) end)
+
+      assert apply(AshBpmn.Config, key, []) == default,
+             "#{key} should fall back to its default when present-but-nil"
+    end
+  end
+
   test "a key explicitly set to nil still resolves to the legacy store" do
     # Not a hypothetical: `put_env(key, nil)` leaves the key *present*, so `get_env/3`'s
     # default never fires and the caller gets `nil.read/2`. Any test restoring configuration

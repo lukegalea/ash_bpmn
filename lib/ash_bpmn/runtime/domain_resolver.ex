@@ -30,8 +30,11 @@ defmodule AshBpmn.Runtime.DomainResolver do
   """
   @spec domains() :: [module()]
   def domains do
-    case Application.get_env(:ash_bpmn, :ash_domains, []) do
-      [] -> Application.get_env(:ash, :ash_domains, [])
+    # `|| []` rather than the third argument, for the reason `AshBpmn.Config.get/2` exists: a
+    # key present with a nil value skips `get_env/3`'s default, and a nil here would fall
+    # through the `[]` clause into `domains -> domains` and return nil as the domain list.
+    case Application.get_env(:ash_bpmn, :ash_domains) || [] do
+      [] -> Application.get_env(:ash, :ash_domains) || []
       domains -> domains
     end
   end
