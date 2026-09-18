@@ -285,6 +285,13 @@ defmodule AshBpmn.Config do
   # entirely, with `nil.read/2`, because one test restored a nil it had captured as unset.
   # Unset and nil mean the same thing to every caller of this module, so they are made to mean
   # the same thing in one place rather than at fifteen call sites that each look correct.
+  #
+  # The sharper framing, which is the other session's: the question is not whether a read has
+  # a default but *where the default is applied*. `get_env(app, key, default)` applies it
+  # inside a function that distinguishes unset from present-nil, and fires only for unset.
+  # `value || default` applies it at the point of use, where both are falsy and neither needs
+  # telling apart. The pattern that looks lazier is the correct one, and this is it with a
+  # name.
   defp get(key, default) do
     case Application.get_env(:ash_bpmn, key) do
       nil -> default
