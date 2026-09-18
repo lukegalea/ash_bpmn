@@ -55,7 +55,11 @@ defmodule AshBpmn.Triggers.CursorStore do
   """
   @spec impl() :: module()
   def impl do
-    Application.get_env(:ash_bpmn, :cursor_store, AshBpmn.Triggers.CursorStore.Legacy)
+    # `||` rather than `get_env/3`'s default, because a key explicitly set to `nil` is *set*
+    # as far as `get_env/3` is concerned and the default never fires. A test restoring config
+    # it captured before setting it writes exactly that nil back, and every later caller then
+    # gets `nil.read/2`. Treating unset and nil alike is what a caller means either way.
+    Application.get_env(:ash_bpmn, :cursor_store) || AshBpmn.Triggers.CursorStore.Legacy
   end
 end
 

@@ -38,8 +38,12 @@ defmodule AshBpmn.CursorStoreTest do
     converged = Application.get_env(:ash_bpmn, :converged_cursor_store)
 
     on_exit(fn ->
-      Application.put_env(:ash_bpmn, :cursor_store, previous)
-      Application.put_env(:ash_bpmn, :converged_cursor_store, converged)
+      # Delete when it was unset. `put_env(key, nil)` is not the same as never having set it:
+      # the key becomes present with a nil value, and every later reader that relied on a
+      # default gets nil instead. That leaked out of this file and failed eighteen tests in
+      # another one.
+      restore(:cursor_store, previous)
+      restore(:converged_cursor_store, converged)
       Stub.clear()
     end)
 
@@ -48,6 +52,14 @@ defmodule AshBpmn.CursorStoreTest do
 
   test "the default is the legacy store, so a host that has not opted in is unchanged" do
     Application.delete_env(:ash_bpmn, :cursor_store)
+    assert CursorStore.impl() == CursorStore.Legacy
+  end
+
+  test "a key explicitly set to nil still resolves to the legacy store" do
+    # Not a hypothetical: `put_env(key, nil)` leaves the key *present*, so `get_env/3`'s
+    # default never fires and the caller gets `nil.read/2`. Any test restoring configuration
+    # it captured before setting writes exactly that.
+    Application.put_env(:ash_bpmn, :cursor_store, nil)
     assert CursorStore.impl() == CursorStore.Legacy
   end
 
@@ -137,6 +149,9 @@ defmodule AshBpmn.CursorStoreTest do
 
   # The tenant domain, because the trigger kinds are optional and only it registers a Cursor.
   # A cursor store test against a domain with no cursor would be testing the nil path.
+  defp restore(key, nil), do: Application.delete_env(:ash_bpmn, key)
+  defp restore(key, value), do: Application.put_env(:ash_bpmn, key, value)
+
   defp ctx do
     {:ok, resources} = AshBpmn.Resources.for_domain(AshBpmn.TenantTest.Domain)
 
