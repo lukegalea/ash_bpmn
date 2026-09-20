@@ -110,6 +110,8 @@ defmodule AshBpmn.Triggers.Index do
 
   @impl true
   def init(_opts) do
+    # Observable in :observer and process listings (OTP 26+ process labels).
+    :proc_lib.set_label(:bpmn_trigger_index)
     :ets.new(@table, [:named_table, :public, :bag, read_concurrency: true])
     {:ok, %{}, {:continue, :load}}
   end
