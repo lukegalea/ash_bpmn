@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Luke Galea
+# SPDX-License-Identifier: MIT
+
 defmodule AshBpmn.RoutingTest do
   @moduledoc """
   The one router, and the three bugs that existed because there were three of them.

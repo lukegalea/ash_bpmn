@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Luke Galea
+# SPDX-License-Identifier: MIT
+
 defmodule AshBpmn.ObanWrapperTest do
   @moduledoc """
   The Oban seam, and the three gaps that made Phase 3 timers unbuildable on it.
