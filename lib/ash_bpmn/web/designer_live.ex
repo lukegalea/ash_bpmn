@@ -424,37 +424,28 @@ defmodule AshBpmn.Web.DesignerLive do
       # disagrees with.
       defp ash_bpmn_load_catalogues(socket) do
         socket
-        |> assign(:decisions, ash_bpmn_catalogue(@ash_bpmn_designer_decisions_mfa, socket))
-        |> assign(:actions, ash_bpmn_catalogue(@ash_bpmn_designer_actions_mfa, socket))
+        |> assign(
+          :decisions,
+          AshBpmn.Web.DesignerLive.catalogue(@ash_bpmn_designer_decisions_mfa, socket)
+        )
+        |> assign(
+          :actions,
+          AshBpmn.Web.DesignerLive.catalogue(@ash_bpmn_designer_actions_mfa, socket)
+        )
         |> assign(:callables, AshBpmn.Web.DesignerLive.callable_entries())
         |> assign(:decision_editor_href, ash_bpmn_editor_href_fn(socket))
       end
 
-      # A catalogue outage must degrade to free-text inputs, not to a broken page.
-      defp ash_bpmn_catalogue(mfa, socket) do
-        case mfa do
-          nil -> []
-          {m, f, a} -> apply(m, f, a ++ [socket])
-        end
-      rescue
-        _ -> []
-      end
-
       # The editor link is resolved per decision key at render time, against the socket
-      # this navigation came in on.
+      # this navigation came in on. The case lives in the shared module — see the note
+      # on `catalogue/2` for why it must not be inlined here.
       defp ash_bpmn_editor_href_fn(socket) do
-        case @ash_bpmn_designer_decision_editor_mfa do
-          nil ->
-            nil
-
-          {m, f, a} ->
-            fn key ->
-              try do
-                apply(m, f, a ++ [key, socket])
-              rescue
-                _ -> nil
-              end
-            end
+        fn key ->
+          AshBpmn.Web.DesignerLive.editor_href(
+            @ash_bpmn_designer_decision_editor_mfa,
+            key,
+            socket
+          )
         end
       end
 
@@ -747,6 +738,43 @@ defmodule AshBpmn.Web.DesignerLive do
       defp definition_status_class(:retired),
         do: "bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
     end
+  end
+
+  @doc """
+  Resolves a catalogue option (`:decisions` or `:actions`) into its entries.
+
+  Accepts either `nil` (no catalogue configured — the panel falls back to free
+  text) or a `{module, function, args}` tuple, which is called with the socket
+  appended to `args`. Any failure degrades to an empty list rather than a broken
+  page.
+
+  Public and living here rather than in the `use`-injected module for the same
+  reason as `AshBpmn.Web.TaskListLive.resolve_principal_ids/2`: the option is a
+  compile-time constant in the generated module, so an inline `case` there
+  leaves the tuple clause provably dead for every host that omits the option,
+  and dialyzer rightly complains about it.
+  """
+  @spec catalogue(nil | {module(), atom(), list()}, Phoenix.LiveView.Socket.t()) :: list()
+  def catalogue(nil, _socket), do: []
+
+  def catalogue({module, function, args}, socket) do
+    apply(module, function, args ++ [socket])
+  rescue
+    _ -> []
+  end
+
+  @doc """
+  Resolves the `:decision_editor` option for one decision key into an href, or
+  `nil` when the option is absent or the call fails.
+  """
+  @spec editor_href(nil | {module(), atom(), list()}, String.t(), Phoenix.LiveView.Socket.t()) ::
+          String.t() | nil
+  def editor_href(nil, _key, _socket), do: nil
+
+  def editor_href({module, function, args}, key, socket) do
+    apply(module, function, args ++ [key, socket])
+  rescue
+    _ -> nil
   end
 
   @doc false
