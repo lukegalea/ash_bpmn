@@ -76,6 +76,63 @@ defmodule AshBpmn.CompilerTest do
     end
   end
 
+  # ── Non-ASCII documents ──────────────────────────────────────────────────
+
+  describe "non-ASCII documents" do
+    # The regression: the parser used to hand xmerl *codepoints*
+    # (`:unicode.characters_to_list/1`) instead of raw octets, so any
+    # non-ASCII character — an em dash in a comment, an accented name in
+    # interface copy — was rejected as `{:wfc_Legal_Character,
+    # {:bad_character, 8212}}` even though the document declares UTF-8.
+    # xmerl does its own decoding and expects bytes; the same fix, with the
+    # same explanation, lives in `AshDecisions.Tck.Xml.parse/1`.
+    @non_ascii """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!-- Clinician notes — an em dash and accented copy: révision, approbation -->
+    <bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                       xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                       id="Definitions_1"
+                       targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+      <bpmn2:process id="Process_accent" name="Demande d'accès — révision" isExecutable="true">
+        <bpmn2:startEvent id="Start_1" name="Début">
+          <bpmn2:outgoing>Flow_1</bpmn2:outgoing>
+        </bpmn2:startEvent>
+        <bpmn2:userTask id="Task_1" name="Approbation du médecin">
+          <bpmn2:extensionElements>
+            <ash:taskConfig>
+              <ash:candidates>
+                <ash:candidate kind="user" of="actor"/>
+              </ash:candidates>
+              <ash:outcomes>
+                <ash:outcome name="approuvé"/>
+                <ash:outcome name="rejeté"/>
+              </ash:outcomes>
+            </ash:taskConfig>
+          </bpmn2:extensionElements>
+          <bpmn2:incoming>Flow_1</bpmn2:incoming>
+          <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
+        </bpmn2:userTask>
+        <bpmn2:endEvent id="End_1" name="Fin">
+          <bpmn2:incoming>Flow_2</bpmn2:incoming>
+        </bpmn2:endEvent>
+        <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Task_1"/>
+        <bpmn2:sequenceFlow id="Flow_2" sourceRef="Task_1" targetRef="End_1"/>
+      </bpmn2:process>
+    </bpmn2:definitions>
+    """
+
+    test "parses a document whose comment and names are non-ASCII" do
+      assert {:ok, _doc} = AshBpmn.Compiler.Xml.parse(@non_ascii)
+    end
+
+    test "compiles and keeps the accented names intact" do
+      assert {:ok, graph} = Compiler.compile(@non_ascii)
+      assert graph["process_id"] == "Process_accent"
+      assert graph["nodes"]["Task_1"]["name"] == "Approbation du médecin"
+      assert graph["nodes"]["Start_1"]["name"] == "Début"
+    end
+  end
+
   # ── Exclusive gateway fixture ────────────────────────────────────────────
 
   describe "exclusive.bpmn" do

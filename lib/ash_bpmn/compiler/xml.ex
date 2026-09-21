@@ -16,9 +16,14 @@ defmodule AshBpmn.Compiler.Xml do
 
   @spec parse(String.t()) :: {:ok, tuple()} | {:error, String.t()}
   def parse(xml) when is_binary(xml) do
+    # Bytes, not codepoints. `:unicode.characters_to_list/1` yields codepoints above 255
+    # for any non-ASCII character, and xmerl rejects those as illegal characters even
+    # though the document declares UTF-8 -- it does its own decoding and expects the raw
+    # octets. An em dash in a comment or an accented name in a diagram is enough to
+    # trigger it. Same fix, same reason, as `AshDecisions.Tck.Xml.parse/1`.
     {doc, _} =
       :xmerl_scan.string(
-        :unicode.characters_to_list(xml),
+        :binary.bin_to_list(xml),
         [
           # NOTE: no :namespace_conform here. The default keeps prefixed
           # names ('bpmn2:process'), which is what the matchers expect;
