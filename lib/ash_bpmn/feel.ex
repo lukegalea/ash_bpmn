@@ -126,7 +126,8 @@ defmodule AshBpmn.Feel do
       true ->
         case Boxic.FEEL.parse(trimmed) do
           {:ok, _ast} -> {:ok, %{"language" => "feel", "text" => trimmed}}
-          {:error, error} -> {:error, describe(error)}
+          # Boxic.FEEL.Error enforces :message, so the field is always there to read.
+          {:error, error} -> {:error, error.message}
         end
     end
   end
@@ -301,7 +302,4 @@ defmodule AshBpmn.Feel do
     do: to_string(value)
 
   def to_feel_value(value, _depth), do: value
-
-  defp describe(%{message: message}), do: message
-  defp describe(other), do: inspect(other)
 end

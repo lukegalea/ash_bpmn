@@ -318,8 +318,12 @@ defmodule AshBpmn.Compiler.Verify do
     errors =
       reachable
       |> Enum.filter(fn id ->
+        # A plain map, not a MapSet: the visited-set is threaded through this recursive
+        # call and an Enum.any? closure, and dialyzer's fixpoint widens the MapSet struct
+        # enough that the member? call then "breaks opacity" -- a false positive that a
+        # map costs nothing to avoid.
         nodes[id]["type"] != "endEvent" and
-          not can_reach_end?(id, outgoing, end_nodes, MapSet.new())
+          not can_reach_end?(id, outgoing, end_nodes, %{})
       end)
       |> Enum.map(fn id ->
         Errors.error(id, "Node '#{id}' cannot reach any end event")
@@ -359,10 +363,10 @@ defmodule AshBpmn.Compiler.Verify do
   end
 
   defp can_reach_end?(node_id, outgoing, end_nodes, visited) do
-    if MapSet.member?(visited, node_id) do
+    if Map.has_key?(visited, node_id) do
       false
     else
-      visited = MapSet.put(visited, node_id)
+      visited = Map.put(visited, node_id, true)
 
       if MapSet.member?(end_nodes, node_id) do
         true

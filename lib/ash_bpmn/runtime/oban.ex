@@ -169,8 +169,10 @@ defmodule AshBpmn.Runtime.Oban do
 
         # Inline mode has no clock to snooze against. Recording it rather than re-running keeps
         # the call total and lets a test assert the worker asked to be retried.
+        # `meta` is always a map -- the Oban.Job schema defaults it to %{} -- so there is
+        # nothing to coalesce.
         {:snooze, seconds} ->
-          {:ok, %{job | meta: Map.put(job.meta || %{}, "snoozed_for", seconds)}}
+          {:ok, %{job | meta: Map.put(job.meta, "snoozed_for", seconds)}}
 
         {:error, reason} ->
           raise "AshBpmn inline Oban worker #{inspect(worker_module)} returned {:error, #{inspect(reason)}}"
@@ -206,11 +208,22 @@ defmodule AshBpmn.Runtime.Oban do
       #
       # A non-nil id with `conflict?: true` is the ordinary dedupe outcome and is a success --
       # that is the nudge's debounce doing its job.
-      {:ok, %Oban.Job{id: nil, conflict?: true}} ->
-        {:error,
-         {:not_inserted,
-          "unique insert for #{inspect(worker_module)} could not take the advisory lock; " <>
-            "no row was written"}}
+      #
+      # The nil check goes through `Map.get/3` rather than `job.id`, deliberately:
+      # dialyzer's success typing for `Oban.insert/1` says `id: pos_integer()`, so a
+      # direct `is_nil(job.id)` — or a `%Job{id: nil}` pattern — is "proven" dead. But
+      # the Basic engine really does return an unsaved job with a nil id from
+      # `Changeset.apply_action/2` when the lock is lost; the type is wrong, not the
+      # code, and `Map.get/3`'s contract keeps the nil case checkable.
+      {:ok, %Oban.Job{conflict?: true} = job} ->
+        if is_nil(Map.get(job, :id)) do
+          {:error,
+           {:not_inserted,
+            "unique insert for #{inspect(worker_module)} could not take the advisory lock; " <>
+              "no row was written"}}
+        else
+          {:ok, job}
+        end
 
       other ->
         other
