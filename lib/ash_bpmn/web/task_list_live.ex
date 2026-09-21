@@ -115,17 +115,18 @@ defmodule AshBpmn.Web.TaskListLive do
             },
             socket
           ) do
-        outcome_atom =
-          if is_binary(outcome) and outcome != "" do
-            String.to_atom(outcome)
-          else
-            :completed
-          end
+        # The outcome is the text the form submitted. It is cast and validated
+        # by the `complete` action against a `:string` attribute -- never made
+        # into an atom here. The field is free text on the wire, and
+        # `String.to_atom/1` on it is an unbounded atom table fed by anyone who
+        # can open the task list. A blank field keeps the historical default.
+        outcome =
+          if is_binary(outcome) and outcome != "", do: outcome, else: "completed"
 
         result =
           @ash_bpmn_tasklist_actions_mod.complete(
             task_id,
-            outcome_atom,
+            outcome,
             comment,
             domain: @ash_bpmn_tasklist_domain
           )

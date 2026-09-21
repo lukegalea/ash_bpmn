@@ -98,6 +98,18 @@ defmodule AshBpmn.Web.TaskListWrapper do
     principal_ids: []
 end
 
+# A task list whose principal exists, so candidate-matched tasks render and the
+# complete form can be driven end to end. The principal id is a fixed UUID
+# because a candidate's principal_id is a :uuid column -- it must not be a
+# mnemonic string.
+defmodule AshBpmn.Web.TaskListPrincipalWrapper do
+  @moduledoc false
+
+  use AshBpmn.Web.TaskListLive,
+    domain: AshBpmn.Test.Domain,
+    principal_ids: ["ecad80a4-6a2b-4c1e-9d0f-3f2a5b7c8d91"]
+end
+
 # ── Router (before Endpoint) ─────────────────────────────────────────────
 
 defmodule AshBpmn.Web.TestRouter do
@@ -126,6 +138,7 @@ defmodule AshBpmn.Web.TestRouter do
 
     live("/viewer/:id", ViewerWrapper, :show, as: :viewer)
     live("/tasks", TaskListWrapper, :index, as: :tasks)
+    live("/tasks-principal", TaskListPrincipalWrapper, :index, as: :tasks_principal)
   end
 end
 

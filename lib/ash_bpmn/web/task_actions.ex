@@ -137,13 +137,17 @@ defmodule AshBpmn.Web.DefaultTaskActions do
       |> Ash.Query.filter(id == ^task_id)
       |> Ash.read_one!(Scope.engine(scope))
 
-    outcome_atom =
-      if is_atom(outcome), do: outcome, else: String.to_atom(outcome)
-
+    # The outcome travels as given. The `complete` action stores it in a
+    # `:string` attribute and validates presence, and Ash casts an atom to
+    # that string on the way in for callers still passing `:approved`.
+    # Converting a caller's string to an atom here would grow the atom table
+    # with a value anyone holding the form can choose, and nothing in the
+    # engine ever wanted the atom -- every comparison downstream goes through
+    # `to_string/1`.
     human_task_mod.complete(
       task,
       %{
-        outcome: outcome_atom,
+        outcome: outcome,
         comment: comment
       },
       Scope.engine(scope)

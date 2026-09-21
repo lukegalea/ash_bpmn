@@ -804,6 +804,121 @@ defmodule AshBpmn.WebTest do
       assert updated.status == :claimed
       assert updated.assignee_id == principal_id
     end
+
+    test "a junk outcome string costs no atoms and is stored as text", %{task2: task2} do
+      # The iron-law boundary: the outcome arrives from the wire as text and
+      # must reach the `:string` attribute as that same text. The old path
+      # called `String.to_atom/1` on it first -- an unbounded atom table fed
+      # by anyone who can open the task list.
+      junk = "not-a-declared-outcome-#{System.unique_integer([:positive])}"
+
+      # Warm the action's first-touch atoms so the window below measures the
+      # outcome string's own journey and nothing else.
+      assert {:ok, _} =
+               AshBpmn.Web.DefaultTaskActions.complete(
+                 task2.id,
+                 "warmup-outcome",
+                 nil,
+                 domain: AshBpmn.Test.Domain
+               )
+
+      before = :erlang.system_info(:atom_count)
+
+      assert {:ok, completed} =
+               AshBpmn.Web.DefaultTaskActions.complete(
+                 warm_task().id,
+                 junk,
+                 nil,
+                 domain: AshBpmn.Test.Domain
+               )
+
+      assert :erlang.system_info(:atom_count) == before
+      assert completed.status == :completed
+      assert completed.outcome == junk
+    end
+
+    defp warm_task do
+      task =
+        HumanTask.create!(%{
+          node_id: "warmup_node",
+          name: "Warmup",
+          status: :claimed,
+          subject_type: "AshBpmn.Test.Subject",
+          subject_id: Ash.UUID.generate()
+        })
+
+      TaskCandidate.create!(%{
+        task_id: task.id,
+        principal_type: :user,
+        principal_id: Ash.UUID.generate()
+      })
+
+      task
+    end
+
+    test "the complete form submits the outcome as text, not an atom" do
+      principal_id = "ecad80a4-6a2b-4c1e-9d0f-3f2a5b7c8d91"
+
+      make_claimed_task = fn node_id ->
+        task =
+          HumanTask.create!(%{
+            node_id: node_id,
+            name: "Sign the thing",
+            status: :claimed,
+            subject_type: "AshBpmn.Test.Subject",
+            subject_id: Ash.UUID.generate()
+          })
+
+        TaskCandidate.create!(%{
+          task_id: task.id,
+          principal_type: :user,
+          principal_id: principal_id
+        })
+
+        task
+      end
+
+      warm_task = make_claimed_task.("approval_form_warm")
+      junk_task = make_claimed_task.("approval_form")
+      blank_task = make_claimed_task.("approval_form_blank")
+
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/tasks-principal")
+
+      # Warm every layer the assertion below spans -- the submit handler, the
+      # action, Ash's first cast of this shape -- so the atom-count delta that
+      # follows measures only the outcome string's own journey.
+      view
+      |> element("#task-#{warm_task.id} form[phx-submit='complete']")
+      |> render_submit(%{
+        "task_id" => warm_task.id,
+        "outcome" => "warmup-outcome",
+        "comment" => ""
+      })
+
+      junk = "wire-outcome-#{System.unique_integer([:positive])}"
+      before = :erlang.system_info(:atom_count)
+
+      view
+      |> element("#task-#{junk_task.id} form[phx-submit='complete']")
+      |> render_submit(%{
+        "task_id" => junk_task.id,
+        "outcome" => junk,
+        "comment" => "submitted from the form"
+      })
+
+      assert :erlang.system_info(:atom_count) == before
+      # Completed tasks leave the claimed list, and the row tells the truth.
+      refute render(view) =~ junk_task.id
+      assert %{status: :completed, outcome: ^junk} = Ash.get!(HumanTask, junk_task.id)
+
+      # Blank keeps the historical default, as text.
+      view
+      |> element("#task-#{blank_task.id} form[phx-submit='complete']")
+      |> render_submit(%{"task_id" => blank_task.id, "outcome" => "", "comment" => ""})
+
+      assert %{status: :completed, outcome: "completed"} = Ash.get!(HumanTask, blank_task.id)
+    end
   end
 
   # ── Helpers ────────────────────────────────────────────────────────────
