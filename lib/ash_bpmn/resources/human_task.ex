@@ -112,7 +112,20 @@ defmodule AshBpmn.Resources.HumanTask do
           public? true
         end
 
-        attribute :outcome, :atom do
+        # A string, not an atom. An outcome is declared per node in `ash:outcomes` --
+        # modeller-authored text in tenant-supplied XML -- so there is no compile-time
+        # `one_of` list to constrain an :atom against, and the only two ways to get an
+        # atom out of that are `String.to_atom/1`, which is an unbounded atom table fed
+        # by anyone who can edit a diagram, and `String.to_existing_atom/1`, which
+        # succeeds or fails depending on what happens to have been loaded.
+        #
+        # Worse, it could not be read back at all: with no `one_of`, Ash's atom type
+        # refuses to cast the stored string back into an atom on load, so any read that
+        # touched a completed task -- `AshBpmn.instance_report/2` with it -- failed with
+        # `cannot load "approved" as type ...`. Same defect, and same fix, as
+        # `AshBpmn.Resources.Instance.outcome`. Storage is unchanged -- Ash writes both
+        # to text, so existing rows become loadable with no migration.
+        attribute :outcome, :string do
           public? true
         end
 

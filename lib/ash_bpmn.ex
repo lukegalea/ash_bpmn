@@ -175,7 +175,7 @@ defmodule AshBpmn do
   Completes a human task (process-bound or standalone).
 
   Options:
-    * `:outcome` — required outcome atom
+    * `:outcome` — required outcome (an atom or a string; stored and read back as a string)
     * `:comment` — optional comment
     * `:actor` — required, the user completing the task
   """

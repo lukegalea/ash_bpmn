@@ -190,7 +190,7 @@ defmodule AshBpmn.BoundaryTimerTest do
       assert TestJobs.fire_due!(DateTime.add(DateTime.utc_now(), 5 * 3600, :second)) >= 0
 
       assert reload_task(task).status == :completed
-      assert reload_task(task).outcome == :approved
+      assert reload_task(task).outcome == "approved"
       refute invoked?("escalate_it")
 
       refute Enum.any?(events(instance), &(&1.kind == :activity_interrupted))
@@ -224,7 +224,7 @@ defmodule AshBpmn.BoundaryTimerTest do
       assert {:ok, :lost_to_completion} =
                AshBpmn.Runtime.BoundaryTimerWorker.perform(%Oban.Job{args: job.args})
 
-      assert reload_task(task).outcome == :approved
+      assert reload_task(task).outcome == "approved"
       assert reload_task(task).status == :completed
       refute invoked?("escalate_it")
       refute Enum.any?(events(instance), &(&1.kind == :activity_interrupted))

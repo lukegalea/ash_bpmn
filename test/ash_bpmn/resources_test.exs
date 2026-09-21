@@ -4,6 +4,8 @@
 defmodule AshBpmn.ResourcesTest do
   use AshBpmn.DataCase, async: false
 
+  require Ash.Query
+
   alias AshBpmn.Test.{
     Definition,
     HumanTask,
@@ -376,7 +378,44 @@ defmodule AshBpmn.ResourcesTest do
         })
 
       assert completed.status == :completed
-      assert completed.outcome == :approved
+      assert completed.outcome == "approved"
+    end
+
+    test "a completed task can be read back (outcome stored as a string)" do
+      instance = create_test_instance!("ht_readback")
+      token = create_test_token!(instance, "node_1")
+
+      task =
+        HumanTask.create!(%{
+          instance_id: instance.id,
+          token_id: token.id,
+          node_id: "approval_1",
+          name: "Approve"
+        })
+
+      claimed = HumanTask.claim!(task, %{assignee_type: :user, assignee_id: Ash.UUID.generate()})
+
+      HumanTask.complete!(claimed, %{
+        outcome: :approved,
+        comment: "Looks good",
+        decided_by_id: Ash.UUID.generate()
+      })
+
+      # The regression: `outcome` used to be an unconstrained :atom, which Ash stores as
+      # text but refuses to cast back into an atom on load (there is no `one_of` to match
+      # against). Every read touching a completed task raised `cannot load "approved" as
+      # type ...`, taking `AshBpmn.instance_report/2` -- the instance viewer -- with it.
+      # It is a string now, so the row loads.
+      reloaded =
+        HumanTask
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(status == ^:completed)
+        |> Ash.read!(authorize?: false)
+
+      assert [%{outcome: "approved"}] = reloaded
+
+      report = AshBpmn.instance_report(instance)
+      assert [%{outcome: "approved"}] = Enum.filter(report.tasks, &(&1.status == :completed))
     end
 
     test "cancel from open and claimed" do
@@ -438,7 +477,7 @@ defmodule AshBpmn.ResourcesTest do
         HumanTask.force_complete!(task, :expired)
 
       assert forced.status == :completed
-      assert forced.outcome == :expired
+      assert forced.outcome == "expired"
       assert forced.decided_by_id == nil
     end
   end

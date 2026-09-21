@@ -184,7 +184,7 @@ defmodule AshBpmn.EngineTest do
       {:ok, completed_task} = AshBpmn.complete_task(task, outcome: :approved, actor: actor)
 
       assert completed_task.status == :completed
-      assert completed_task.outcome == :approved
+      assert completed_task.outcome == "approved"
 
       # Instance should complete with provision_access invoked
       assert instance.status == :running
@@ -340,7 +340,7 @@ defmodule AshBpmn.EngineTest do
         # Task should be force-completed with expired outcome
         {:ok, task} = fetch_task(task.id)
         assert task.status == :completed
-        assert task.outcome == :expired
+        assert task.outcome == "expired"
       end
     end
   end

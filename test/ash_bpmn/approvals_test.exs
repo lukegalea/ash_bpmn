@@ -154,7 +154,7 @@ defmodule AshBpmn.ApprovalsTest do
       # Decide approved
       {:ok, completed} = AshBpmn.decide(claimed, outcome: :approved, actor: manager)
       assert completed.status == :completed
-      assert completed.outcome == :approved
+      assert completed.outcome == "approved"
 
       # Verify on_complete action was invoked
       calls = AshBpmn.Test.Invoker.recorded_calls()
@@ -192,7 +192,7 @@ defmodule AshBpmn.ApprovalsTest do
       {:ok, claimed} = AshBpmn.claim_task(task, actor: manager)
       {:ok, completed} = AshBpmn.decide(claimed, outcome: :rejected, actor: manager)
 
-      assert completed.outcome == :rejected
+      assert completed.outcome == "rejected"
 
       # handle_approved should NOT be invoked
       calls = AshBpmn.Test.Invoker.recorded_calls()
@@ -235,7 +235,7 @@ defmodule AshBpmn.ApprovalsTest do
         |> then(&{:ok, &1})
 
       assert task.status == :completed
-      assert task.outcome == :expired
+      assert task.outcome == "expired"
 
       # on_complete should NOT be invoked for expiry
       calls = AshBpmn.Test.Invoker.recorded_calls()
