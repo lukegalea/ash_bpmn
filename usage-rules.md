@@ -155,3 +155,55 @@ gateway conditions, never in resolver specs, never in the invoker.
   starvation, instance failure after max attempts. A process suite that only tests
   the happy path is testing a distributed system for the absence of its defining
   property.
+
+## The iron laws and the judge
+
+Agent work here is also governed by the **26 Iron Laws** — adapted from the
+phxagents project (phxagents.dev/iron-laws, MIT), codified in the
+`ash_agent_tools` package with a deterministic judge (`mix ash_agent.laws`).
+This package adds **no dependency** for that: run the judge from any checkout
+that has it, or judge a snippet in-VM with `AshAgentTools.judge_laws/1`.
+
+    mix ash_agent.laws                            # the law registry as JSON
+    mix ash_agent.laws FILE [FILE...]             # judge files
+    mix ash_agent.laws --code 'SNIPPET'           # judge a snippet
+    git diff main | mix ash_agent.laws - --diff   # judge only added lines
+
+The laws with the most teeth *for this codebase*:
+
+- **#7 — jobs are idempotent.** The engine's workers run at-least-once
+  (`advance` allows ten attempts; the timers allow three). Double-advance is
+  made safe by the token claim gate (rule 14), not by job uniqueness — the
+  runtime workers deliberately declare no `unique:` because a uniqueness window
+  would suppress a legitimate redelivery, and the trigger sweeps declare
+  uniqueness at the insert site instead. Do not "fix" the missing `unique:` on
+  a runtime worker. And remember the inline test shim reads `unique:` differently
+  from production (`AshBpmn.Runtime.Oban`).
+- **#8 — Oban args are string-keyed.** Job args serialize through JSON, so a
+  worker reads `args["instance_id"]`, `args["tenant"]`, `args["kind"]`. An
+  atom-keyed read matches nothing and fails silently, and the failure is a
+  parked token, not an error. This is also why a timer kind arriving from args
+  is mapped explicitly rather than through `String.to_existing_atom/1`.
+- **#9 — store IDs, not structs.** Job args carry `instance_id` and
+  `token_id`; the worker re-reads the rows through Ash under
+  `AshBpmn.Scope.from_job/2`. Freezing state at enqueue time is wrong here by
+  more than the usual staleness: between enqueue and run the instance may have
+  been superseded (rule 20), and the only honest move is to read it fresh and
+  fail the claim.
+- **#10 — no `String.to_atom` on anything a diagram or a form can produce.**
+  This is a scar, not a style preference: the bespoke expression engine this
+  package deleted called `String.to_atom/1` on FEEL path segments from
+  tenant-authored XML, and task outcomes were stored as atoms until a
+  completed task could not be read back — which is why they are strings now.
+  Runtime names resolve through `String.to_existing_atom/1` (subject,
+  subscription, interpreter, domain resolver) or fixed allow-lists. A new
+  conversion of a diagram- or form-derived string to a fresh atom is a bug.
+- **#20 — wrap third-party surfaces once.** FEEL goes through `AshBpmn.Feel`
+  and nowhere else (rule 9); the bpmn-js designer is embedded in one module;
+  Oban is reached through `AshBpmn.Runtime.Oban` so the inline test shim and
+  production share one seam. A second call site is where the decimal-number
+  rule and the watermark get forgotten.
+- **#22 — verify before claiming done.** Compile, run the suite against real
+  Postgres with the inline Oban shim, and show the output — on the negative
+  paths, per Testing above: expiry, cancellation, lost claim races, join
+  starvation.
