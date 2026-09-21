@@ -281,7 +281,7 @@ defmodule AshBpmn.Resources.Instance.FilterInFlight do
     |> filter_key(Ash.Query.get_argument(query, :definition_key))
     |> filter_ids(Ash.Query.get_argument(query, :instance_ids))
     |> filter_parent_tokens(Ash.Query.get_argument(query, :parent_token_ids))
-    |> Ash.Query.load(:definition)
+    |> AshBpmn.Scope.engine_load(:definition)
     |> Ash.Query.sort(inserted_at: :asc, id: :asc)
   end
 

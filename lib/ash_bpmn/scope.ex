@@ -128,6 +128,68 @@ defmodule AshBpmn.Scope do
   end
 
   @doc """
+  Loads relationships on a query the engine is already making, carrying its mark with them.
+
+  `engine/2` sets `context: %{private: %{ash_bpmn?: true}}`, and
+  `AshBpmn.Checks.AshBpmnInteraction` recognises it — on **that** query. Ash builds a fresh
+  query for each relationship it loads and copies only `:shared` context and a handful of
+  named private keys into it, so the mark does not travel. That is Ash working as designed:
+  private context is per-query, and a flag that leaked into every related read would be a
+  worse default than one that does not travel.
+
+  The consequence is not obvious and was not noticed for a while. A read the engine makes
+  against a resource whose relationship is *also* policy-guarded — which is every generated
+  resource, since each carries the bypass — is authorized on the outer resource and forbidden
+  on the related one. In this package's own test suite it was invisible, because the
+  single-tenant test resources carry a second, permissive bypass that covered for it; the
+  tenant-scoped ones carry only the engine bypass, and `AshBpmn.StateExport.export/2` could
+  not read a tenant's instances at all.
+
+  So the mark is applied to each related query explicitly, one level at a time, down as many
+  levels as the load statement has:
+
+      query |> AshBpmn.Scope.engine_load(instance: [:definition])
+
+  It is applied **only** when the query being loaded onto already carries the mark. A host
+  calling `:in_flight` as itself gets an ordinary load and its own policies, which is the whole
+  point: this propagates the engine's authority, it does not grant it.
+
+  Entries that are not relationships — a calculation, an aggregate — are passed through
+  untouched, because there is no related query for them to be set on.
+  """
+  @spec engine_load(Ash.Query.t(), term()) :: Ash.Query.t()
+  def engine_load(%Ash.Query{} = query, load) do
+    if query.context[:private][:ash_bpmn?] do
+      Ash.Query.load(query, marked(query.resource, load))
+    else
+      Ash.Query.load(query, load)
+    end
+  end
+
+  defp marked(resource, load) do
+    load
+    |> List.wrap()
+    |> Enum.map(fn
+      {name, nested} -> mark_entry(resource, name, nested)
+      name when is_atom(name) -> mark_entry(resource, name, [])
+    end)
+  end
+
+  defp mark_entry(resource, name, nested) do
+    case Ash.Resource.Info.relationship(resource, name) do
+      nil -> if nested == [], do: name, else: {name, nested}
+      relationship -> {name, marked_query(relationship.destination, nested)}
+    end
+  end
+
+  defp marked_query(destination, nested) do
+    destination
+    |> Ash.Query.new()
+    |> Ash.Query.set_context(%{private: %{ash_bpmn?: true}})
+    |> Ash.Query.load(marked(destination, nested))
+  end
+
+  @doc """
   A scope from a changeset already in flight.
 
   For the reads a change or validation makes against its own resource. The

@@ -345,7 +345,7 @@ defmodule AshBpmn.Resources.Token.FilterInFlight do
     query
     |> Ash.Query.filter(status in ^statuses)
     |> filter_instances(instance_ids)
-    |> Ash.Query.load(instance: [:definition])
+    |> AshBpmn.Scope.engine_load(instance: [:definition])
     |> Ash.Query.sort(instance_id: :asc, inserted_at: :asc, id: :asc)
   end
 

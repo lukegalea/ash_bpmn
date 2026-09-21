@@ -287,11 +287,60 @@ defmodule AshBpmn.StateExportTest do
 
       assert child.parent_instance_id == parent.id
     end
+
+    test "they carry the engine's mark into the relationships they load" do
+      # Ash builds a fresh query per relationship and copies only shared context into it, so
+      # the private flag `AshBpmn.Checks.AshBpmnInteraction` recognises does not travel on its
+      # own. The single-tenant test resources above carry a second, permissive bypass that
+      # covers for that; these do not, which is why a tenant-scoped export is the only place
+      # the gap was observable -- and the whole export was forbidden, not merely thin.
+      tenant = Ecto.UUID.generate()
+      instance = tenanted_instance!(tenant)
+
+      export = StateExport.export!(AshBpmn.TenantTest.Domain, tenant: tenant)
+
+      assert [exported] = export["instances"]
+      assert exported["id"] == instance.id
+      assert exported["definition_key"]
+      assert exported["tenant_id"] == tenant
+
+      # The token read loads `instance: [:definition]`, two levels down, so it fails
+      # separately from the instance read and has to be marked separately too.
+      assert [token] = exported["tokens"]
+      assert token["node_type"]
+    end
   end
 
   # ── helpers ──────────────────────────────────────────────────────────────
 
   defp unique_key, do: "se_#{System.unique_integer([:positive])}"
+
+  # The tenant-scoped instantiation of the same resources, which carries only the engine
+  # bypass. A timer catch, so the instance parks and stays running with nothing to correlate.
+  defp tenanted_instance!(tenant) do
+    scope = AshBpmn.Scope.engine(%AshBpmn.Scope{tenant: tenant})
+    key = unique_key()
+
+    definition =
+      AshBpmn.TenantTest.Definition.create!(
+        %{key: key, name: key, xml: File.read!("test/fixtures/timer_catch.bpmn")},
+        scope
+      )
+
+    if is_nil(definition.graph), do: raise("compile failed: #{inspect(definition.errors)}")
+
+    {:ok, subject} =
+      AshBpmn.Test.Subject.create!(%{name: key, amount: 0, is_privileged: false})
+
+    {:ok, instance} =
+      AshBpmn.start_instance(AshBpmn.TenantTest.Domain,
+        definition: AshBpmn.TenantTest.Definition.publish!(definition, scope),
+        subject: subject,
+        tenant: tenant
+      )
+
+    instance
+  end
 
   defp elements!(path), do: path |> File.read!() |> elements_from_xml!()
 
