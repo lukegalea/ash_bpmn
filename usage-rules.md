@@ -113,6 +113,23 @@ gateway conditions, never in resolver specs, never in the invoker.
     `AshBpmn.Checks.AshBpmnInteraction` at the top of the base's policy set or set
     `config :ash_bpmn, engine_actor:`. See `AshBpmn.Config.engine_actor/0`.
 
+18. **Ask the export, not the tables, what is in flight.** `AshBpmn.StateExport.export/2`
+    produces a stable JSON document of every live instance, its tokens, what each
+    parked token is listening for, and a digest of the DSL element it is standing on.
+    It is digest-only by construction: routing values and correlation keys are
+    hashed, never emitted, so the document is safe to store, send and keep. The reads
+    behind it are ordinary actions — `:in_flight` on the instance and token resources
+    — so narrow it with arguments rather than by querying the tables.
+19. **Classify before you migrate in-flight instances.** An instance pins its
+    definition version for life, so publishing a new one changes nothing until
+    somebody moves the running instances onto it.
+    `AshBpmn.Migration.Classifier.classify/3` takes an export and the target
+    definitions and answers, per instance, `safe_to_continue`, `needs_restart`,
+    `needs_manual_attention` or `unknown` — the last with the reason attached. Treat
+    `unknown` as work to do, not as a pass: it means the artefacts did not decide,
+    and the two common causes (a target that was not supplied, a FEEL engine change
+    under a conditional gateway) are both real.
+
 ## Testing
 
 - Engine tests run against real Postgres with the Oban shim in `:inline` mode
