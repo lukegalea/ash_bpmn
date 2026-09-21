@@ -173,6 +173,36 @@ defmodule AshBpmn.Resources.Instance do
           primary? true
         end
 
+        # The instance half of `AshBpmn.StateExport`'s read. `parent_token_ids` is what makes
+        # a call activity's child reachable: the parent token is parked with no signature and
+        # no correlation key on purpose, so the only link between the two is the child's own
+        # `parent_token_id`, and an export that could not follow it would report a token
+        # waiting for nothing.
+        read :in_flight do
+          description "Instances by status, optionally by definition key or by the token that started them."
+
+          argument :statuses, {:array, :atom} do
+            constraints items: [one_of: [:running, :completed, :failed, :errored, :cancelled]]
+            default [:running]
+
+            description "Which statuses to include. The default is the one that is still in flight."
+          end
+
+          argument :definition_key, :string do
+            description "Restrict to instances of this process key."
+          end
+
+          argument :instance_ids, {:array, :uuid} do
+            description "Restrict to these instances."
+          end
+
+          argument :parent_token_ids, {:array, :uuid} do
+            description "Restrict to children started by these tokens."
+          end
+
+          prepare AshBpmn.Resources.Instance.FilterInFlight
+        end
+
         create :create do
           accept [
             :subject_type,
@@ -222,6 +252,7 @@ defmodule AshBpmn.Resources.Instance do
 
       code_interface do
         define :create, action: :create
+        define :in_flight, action: :in_flight
         define :mark_completed, action: :mark_completed, args: [:outcome]
         define :mark_errored, action: :mark_errored
         define :mark_failed, action: :mark_failed
@@ -229,6 +260,41 @@ defmodule AshBpmn.Resources.Instance do
       end
     end
   end
+end
+
+defmodule AshBpmn.Resources.Instance.FilterInFlight do
+  @moduledoc """
+  Narrows an instance read by status and, optionally, by definition key, id or parent token.
+
+  Every argument except `:statuses` is optional and nil means "do not narrow on this", which
+  is why each is applied by its own clause rather than folded into one expression: a filter
+  built from a nil is a filter that quietly matches nothing.
+  """
+  use Ash.Resource.Preparation
+
+  require Ash.Query
+
+  @impl true
+  def prepare(query, _opts, _context) do
+    query
+    |> Ash.Query.filter(status in ^(Ash.Query.get_argument(query, :statuses) || []))
+    |> filter_key(Ash.Query.get_argument(query, :definition_key))
+    |> filter_ids(Ash.Query.get_argument(query, :instance_ids))
+    |> filter_parent_tokens(Ash.Query.get_argument(query, :parent_token_ids))
+    |> Ash.Query.load(:definition)
+    |> Ash.Query.sort(inserted_at: :asc, id: :asc)
+  end
+
+  defp filter_key(query, nil), do: query
+  defp filter_key(query, key), do: Ash.Query.filter(query, definition.key == ^key)
+
+  defp filter_ids(query, nil), do: query
+  defp filter_ids(query, ids) when is_list(ids), do: Ash.Query.filter(query, id in ^ids)
+
+  defp filter_parent_tokens(query, nil), do: query
+
+  defp filter_parent_tokens(query, ids) when is_list(ids),
+    do: Ash.Query.filter(query, parent_token_id in ^ids)
 end
 
 defmodule AshBpmn.Resources.Instance.StatusIsRunning do

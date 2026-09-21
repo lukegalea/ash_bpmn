@@ -200,6 +200,27 @@ defmodule AshBpmn.Resources.Token do
           primary? true
         end
 
+        # The read behind `AshBpmn.StateExport`, and the only supported way to ask "what is
+        # still in flight?" without writing the status list out by hand at each call site --
+        # which is how `:waiting` came to be omitted from the sweep's recovery set in the
+        # first place. An action owns the definition of "in flight" so there is one.
+        read :in_flight do
+          description "Live tokens -- active, executing or waiting -- with their instance and definition."
+
+          argument :statuses, {:array, :atom} do
+            constraints items: [one_of: [:active, :executing, :waiting, :consumed, :dead]]
+            default [:active, :executing, :waiting]
+
+            description "Which statuses count as in flight. The default is every live one."
+          end
+
+          argument :instance_ids, {:array, :uuid} do
+            description "Restrict to these instances. Nil means every instance."
+          end
+
+          prepare AshBpmn.Resources.Token.FilterInFlight
+        end
+
         create :create do
           accept [
             :node_id,
@@ -285,6 +306,7 @@ defmodule AshBpmn.Resources.Token do
 
       code_interface do
         define :create, action: :create
+        define :in_flight, action: :in_flight
         define :claim, action: :claim
         define :park, action: :park
         define :claim_waiting, action: :claim_waiting
@@ -294,6 +316,43 @@ defmodule AshBpmn.Resources.Token do
         define :promote_routing, action: :promote_routing
       end
     end
+  end
+end
+
+defmodule AshBpmn.Resources.Token.FilterInFlight do
+  @moduledoc """
+  Narrows a token read to the live tokens, with the instance and definition already loaded.
+
+  The load is part of the action rather than left to the caller because every consumer of
+  this read needs the same three things — the token, the instance it belongs to and the
+  definition the instance pinned — and a caller who forgets the load gets `%Ash.NotLoaded{}`
+  where an export expects a definition key. Loading the definition's `graph` is the point:
+  the node a token is sitting on only means something against the graph that was published
+  with it.
+
+  The sort is not decoration. An export is digested, and a digest over a list whose order
+  comes from whatever the planner felt like is a digest that changes for no reason.
+  """
+  use Ash.Resource.Preparation
+
+  require Ash.Query
+
+  @impl true
+  def prepare(query, _opts, _context) do
+    statuses = Ash.Query.get_argument(query, :statuses) || []
+    instance_ids = Ash.Query.get_argument(query, :instance_ids)
+
+    query
+    |> Ash.Query.filter(status in ^statuses)
+    |> filter_instances(instance_ids)
+    |> Ash.Query.load(instance: [:definition])
+    |> Ash.Query.sort(instance_id: :asc, inserted_at: :asc, id: :asc)
+  end
+
+  defp filter_instances(query, nil), do: query
+
+  defp filter_instances(query, ids) when is_list(ids) do
+    Ash.Query.filter(query, instance_id in ^ids)
   end
 end
 
