@@ -145,6 +145,16 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         # counted with it.
                         :instance_errored,
                         :instance_cancelled,
+                        # A restart, from both ends. `:instance_superseded` is written on the
+                        # instance that stopped and names its successor; `:instance_restarted`
+                        # is written on the instance that started and names its predecessor
+                        # and everything the restart threw away. Two rows for the same reason
+                        # `:child_started` and `:child_completed` are two: "this one stopped
+                        # here" and "that one began there" are different findings, and an
+                        # operator reading either instance's log must not have to read the
+                        # other one to learn that a restart happened at all.
+                        :instance_superseded,
+                        :instance_restarted,
                         :sweep_recovered,
                         # A gateway condition that produced FEEL's `null` rather than a
                         # boolean -- a path the subject does not have, a type mismatch. The

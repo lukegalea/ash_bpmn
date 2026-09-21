@@ -517,36 +517,7 @@ defmodule AshBpmn do
     resources = DomainResolver.resolve!()
     scope = Scope.from_record(instance, opts)
 
-    # Every live token, `:waiting` included.
-    #
-    # It used to be `:active` and `:executing` only, which was complete when those were the
-    # only live states. A parked token left behind by a cancel is not merely untidy: the
-    # correlator finds waiting tokens by signature and knows nothing about instance status, so
-    # an event arriving afterwards would wake it and resume a process nobody is running any
-    # more. Found by the one test Phase 3's exit criterion names for it.
-    active_tokens =
-      resources.token
-      |> Ash.Query.for_read(:read)
-      |> Ash.Query.filter(instance_id == ^instance.id)
-      |> Ash.Query.filter(status in [:active, :executing, :waiting])
-      |> Ash.read!(Scope.engine(scope))
-
-    Enum.each(active_tokens, fn token ->
-      resources.token.kill!(token, Scope.engine(scope))
-    end)
-
-    # Cancel open tasks
-    open_tasks =
-      resources.human_task
-      |> Ash.Query.for_read(:read)
-      |> Ash.Query.filter(instance_id == ^instance.id)
-      |> Ash.Query.filter(status in [:open, :claimed])
-      |> Ash.read!(Scope.engine(scope))
-
-    Enum.each(open_tasks, fn task ->
-      resources.human_task.cancel!(task, Scope.engine(scope))
-      cancel_task_timers(resources, task, :instance_cancelled, scope)
-    end)
+    halt_instance_work(resources, instance, :instance_cancelled, scope)
 
     cancelled = resources.instance.cancel!(instance, Scope.engine(scope))
 
@@ -563,6 +534,76 @@ defmodule AshBpmn do
   rescue
     e -> {:error, e}
   end
+
+  @doc false
+  # Stops an instance doing anything further: every live token killed, every open task closed,
+  # every clock attached to those tasks defused. The half of `cancel_instance/2` that is not
+  # about the word "cancelled".
+  #
+  # Shared with `AshBpmn.Migration.Restart`, because a superseded instance has to stop exactly
+  # as hard as a cancelled one. A parked token left behind by either is not merely untidy: the
+  # correlator finds waiting tokens by signature and knows nothing about instance status, so an
+  # event arriving afterwards would wake it and resume a process nobody is running any more.
+  # That was found for cancellation by the one test Phase 3's exit criterion names for it, and
+  # a restart that reimplemented this would have had to find it a second time.
+  #
+  # `reason` is what the timer ledger records, and it is a parameter rather than a constant so
+  # a cancelled clock and a restarted one stay distinguishable in the ledger.
+  #
+  # What this deliberately does not chase is a *catch* timer, which belongs to a token rather
+  # than to a task and so is not in any task's job list. It is left armed and loses when it
+  # fires: `claim_waiting` admits only a `:waiting` token, and this has just killed it. That is
+  # a wasted job rather than a wrong one, and chasing it would mean a second index of job ids
+  # with the window that motivated `AshBpmn.Runtime.Oban.cancel_all/1` in the first place.
+  @spec halt_instance_work(map(), map(), atom(), Scope.t()) :: :ok
+  def halt_instance_work(resources, instance, reason, scope) do
+    # Every live token, `:waiting` included. It used to be `:active` and `:executing` only,
+    # which was complete when those were the only live states.
+    live_tokens =
+      resources.token
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(instance_id == ^instance.id)
+      |> Ash.Query.filter(status in [:active, :executing, :waiting])
+      |> Ash.read!(Scope.engine(scope))
+
+    Enum.each(live_tokens, fn token ->
+      resources.token.kill!(token, Scope.engine(scope))
+    end)
+
+    open_tasks =
+      resources.human_task
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(instance_id == ^instance.id)
+      |> Ash.Query.filter(status in [:open, :claimed])
+      |> Ash.read!(Scope.engine(scope))
+
+    Enum.each(open_tasks, fn task ->
+      resources.human_task.cancel!(task, Scope.engine(scope))
+      cancel_task_timers(resources, task, reason, scope)
+    end)
+
+    :ok
+  end
+
+  @doc """
+  Restarts a running instance under another definition, superseding the old one.
+
+  The answer to `AshBpmn.Migration.Classifier`'s `needs_restart` verdict. See
+  `AshBpmn.Migration.Restart` for what "restart" was decided to mean, what is carried across
+  and what is deliberately not.
+
+  Returns `{:ok, %{superseded: old, successor: new, decision: record}}`.
+  """
+  @spec restart_instance(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  defdelegate restart_instance(instance, opts \\ []), to: AshBpmn.Migration.Restart, as: :restart
+
+  @doc """
+  `restart_instance/2`, raising instead of returning `{:error, reason}`.
+  """
+  @spec restart_instance!(map(), keyword()) :: map()
+  defdelegate restart_instance!(instance, opts \\ []),
+    to: AshBpmn.Migration.Restart,
+    as: :restart!
 
   @doc """
   Returns tasks where the given principal is a candidate.

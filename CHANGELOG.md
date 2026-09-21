@@ -26,6 +26,15 @@ Nothing has been released yet. Everything below is the initial body of work.
   args. Resource macros take `:base`/`:base_opts`, so a human task can inherit a
   host's base resource. See
   [authorization and tenancy](documentation/topics/authorization-and-tenancy.md).
+- **In-flight instances can be moved onto a new definition.**
+  `AshBpmn.StateExport` writes down what is running, `AshBpmn.Migration.Classifier`
+  says per instance whether it can continue, and `AshBpmn.restart_instance/2` acts
+  on the `needs_restart` verdict: the old instance moves to `:superseded` — its own
+  status, keeping its tokens and events and naming its successor — while a new
+  instance of the target definition starts at that definition's start node. Nothing
+  about how far the old run had got crosses, deliberately; everything abandoned,
+  down to the parked waits nothing will now wake, is written into the process event
+  log. See `AshBpmn.Migration.Restart`.
 - Six host-instantiated resources for process definitions, instances, tokens,
   human tasks, task candidates and process events.
 - A BPMN XML compiler (Common Executable subset) producing an immutable,

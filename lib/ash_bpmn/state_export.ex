@@ -71,7 +71,10 @@ defmodule AshBpmn.StateExport do
   @format_version 1
 
   @live_token_statuses [:active, :executing, :waiting]
-  @all_instance_statuses [:running, :completed, :failed, :errored, :cancelled]
+  # Every terminal status, `:superseded` included. A child that was restarted while its
+  # parent's wake was still queued is exactly the state an operator needs to see, and a
+  # follow that skipped it would report the parent as waiting for a child that vanished.
+  @all_instance_statuses [:running, :completed, :failed, :errored, :cancelled, :superseded]
 
   # A call activity's child may itself call an activity. Following the chain to a fixpoint is
   # right; following it without a bound means a diagram that (incorrectly) recurses takes the

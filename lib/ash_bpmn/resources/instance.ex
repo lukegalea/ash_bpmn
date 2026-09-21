@@ -46,6 +46,21 @@ defmodule AshBpmn.Resources.Instance do
       postgres do
         table unquote(table)
         repo unquote(repo)
+
+        custom_indexes do
+          # "What was this instance restarted from?" is answered by a reverse lookup on the
+          # successor link rather than by a second column on the successor, because the link
+          # is the thing a write has to get right and one column cannot disagree with itself.
+          # Unindexed that lookup scans every instance the system has ever run; restricted to
+          # the rows that actually have a successor it is proportional to the number of
+          # restarts, which is a handful.
+          #
+          # Under attribute multitenancy AshPostgres prepends `organization_id` to the key
+          # list, so the tenant copy comes out tenant-leading without being written twice.
+          index [:superseded_by_instance_id],
+            where: "superseded_by_instance_id IS NOT NULL",
+            name: "#{unquote(table)}_superseded_by_index"
+        end
       end
 
       if unquote(tenant?) do
@@ -96,7 +111,14 @@ defmodule AshBpmn.Resources.Instance do
           # a withdrawn request. Merging them would put "the integration is down" and "the
           # answer was no" in one bucket, and would let `retry_instance/2` offer to retry a
           # decision.
-          constraints one_of: [:running, :completed, :failed, :errored, :cancelled]
+          #
+          # `:superseded` is the same call made a third time. A superseded instance was wound
+          # down exactly as a cancelled one is -- live tokens killed, open tasks closed -- but
+          # it was not abandoned: the work it was doing is being done again, from the start,
+          # by the instance named in `superseded_by_instance_id`. Spelling that `:cancelled`
+          # would make "the customer withdrew" and "we moved this onto version 4" one number
+          # on every report anybody builds, and would leave the successor unfindable.
+          constraints one_of: [:running, :completed, :failed, :errored, :cancelled, :superseded]
           default :running
           allow_nil? false
           public? true
@@ -150,6 +172,24 @@ defmodule AshBpmn.Resources.Instance do
           public? true
         end
 
+        # The restart link, and the only two columns a supersede adds.
+        #
+        # A superseded instance keeps everything it had -- its tokens, its events, its tasks --
+        # and gains a pointer to the instance that is doing the work again. Nothing is
+        # rewritten and nothing is deleted, because the question a superseded instance exists
+        # to answer is "what was running before we moved it?", and an instance edited to look
+        # like its successor cannot answer it.
+        attribute :superseded_by_instance_id, :uuid do
+          public? true
+
+          description "The instance that restarted this one's work. Set once, by `:supersede`."
+        end
+
+        attribute :superseded_at, :utc_datetime_usec do
+          public? true
+          description "When this instance was superseded."
+        end
+
         if unquote(tenant?) do
           attribute :organization_id, :uuid do
             allow_nil? false
@@ -182,7 +222,17 @@ defmodule AshBpmn.Resources.Instance do
           description "Instances by status, optionally by definition key or by the token that started them."
 
           argument :statuses, {:array, :atom} do
-            constraints items: [one_of: [:running, :completed, :failed, :errored, :cancelled]]
+            constraints items: [
+                          one_of: [
+                            :running,
+                            :completed,
+                            :failed,
+                            :errored,
+                            :cancelled,
+                            :superseded
+                          ]
+                        ]
+
             default [:running]
 
             description "Which statuses to include. The default is the one that is still in flight."
@@ -248,6 +298,26 @@ defmodule AshBpmn.Resources.Instance do
           validate AshBpmn.Resources.Instance.StatusIsRunning
           change set_attribute(:status, :cancelled)
         end
+
+        # The old half of a restart. `AshBpmn.Migration.Restart` calls it last, inside the
+        # transaction that created the successor, so the link is never written against an
+        # instance that does not exist.
+        #
+        # Guarded on `:running` like every other transition, which is also what makes a restart
+        # non-repeatable: the second attempt finds the instance `:superseded` and is refused
+        # here even if the caller went around the facade's own check.
+        update :supersede do
+          description "Ends this instance because its work is being restarted by another."
+
+          accept [:superseded_by_instance_id]
+          require_atomic? false
+
+          validate AshBpmn.Resources.Instance.StatusIsRunning
+          validate AshBpmn.Resources.Instance.SupersededByIsAnotherInstance
+
+          change set_attribute(:status, :superseded)
+          change set_attribute(:superseded_at, &DateTime.utc_now/0)
+        end
       end
 
       code_interface do
@@ -257,6 +327,7 @@ defmodule AshBpmn.Resources.Instance do
         define :mark_errored, action: :mark_errored
         define :mark_failed, action: :mark_failed
         define :cancel, action: :cancel
+        define :supersede, action: :supersede, args: [:superseded_by_instance_id]
       end
     end
   end
@@ -295,6 +366,38 @@ defmodule AshBpmn.Resources.Instance.FilterInFlight do
 
   defp filter_parent_tokens(query, ids) when is_list(ids),
     do: Ash.Query.filter(query, parent_token_id in ^ids)
+end
+
+defmodule AshBpmn.Resources.Instance.SupersededByIsAnotherInstance do
+  @moduledoc """
+  The successor link must name a real other instance.
+
+  Two things are refused, and both were reachable from a caller holding the facade wrong. A
+  nil successor would leave an instance in `:superseded` with nothing to follow, which is
+  strictly worse than `:cancelled` because it reads as though a successor exists. An instance
+  pointing at itself would make the reverse lookup a cycle of one, and the operator reading it
+  would conclude the restart is still in flight.
+  """
+  use Ash.Resource.Validation
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    successor = Ash.Changeset.get_attribute(changeset, :superseded_by_instance_id)
+
+    cond do
+      is_nil(successor) ->
+        {:error,
+         field: :superseded_by_instance_id,
+         message: "a superseded instance must name the instance that restarted its work"}
+
+      successor == changeset.data.id ->
+        {:error,
+         field: :superseded_by_instance_id, message: "an instance cannot supersede itself"}
+
+      true ->
+        :ok
+    end
+  end
 end
 
 defmodule AshBpmn.Resources.Instance.StatusIsRunning do

@@ -239,6 +239,11 @@ defmodule AshBpmn.Resources.TimerJob do
                         # boundary event, a terminate end event, or a cancelled instance.
                         :token_consumed,
                         :instance_cancelled,
+                        # The instance was restarted under another definition. Distinct from
+                        # `:instance_cancelled` because the work is not over -- it is being
+                        # done again by the successor, whose own timers are armed fresh -- and
+                        # an auditor counting abandoned clocks must not count these.
+                        :instance_superseded,
                         # A later arming of the same timer replaced this one. Kept distinct from
                         # the others because it is the only reason that means the clock is still
                         # running, just on a different row.

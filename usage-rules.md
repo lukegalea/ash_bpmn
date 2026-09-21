@@ -129,6 +129,21 @@ gateway conditions, never in resolver specs, never in the invoker.
     `unknown` as work to do, not as a pass: it means the artefacts did not decide,
     and the two common causes (a target that was not supplied, a FEEL engine change
     under a conditional gateway) are both real.
+20. **A restart supersedes; it does not resume.** `AshBpmn.restart_instance/2` is
+    what a `needs_restart` verdict is for. The old instance moves to `:superseded` —
+    its own status, not `:cancelled` — keeps its tokens and events, and gains
+    `superseded_by_instance_id`; a new instance of the target starts at that
+    definition's start node. **Nothing about how far the old run had got crosses**,
+    and not for want of trying: carrying the tokens the classifier called safe would
+    produce a marking the target can never reach by running, which is the process
+    running twice in a sequential diagram and a starved join in a parallel one. What
+    crosses is identity — subject, correlation id, accountability, the parent link,
+    and `trigger_depth`, which is carried rather than reset because it is the bound
+    that stops a subscription cycle. Everything abandoned is written into an
+    `:instance_restarted` event on the successor and an `:instance_superseded` event
+    on the predecessor, per token, including the parked waits that nothing will now
+    wake and the call-activity children left with nobody to return to. Read that
+    record; it is the only place those say anything.
 
 ## Testing
 

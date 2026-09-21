@@ -13,7 +13,7 @@ defmodule AshBpmn.Migration.Classifier do
   | Verdict | Meaning |
   |---|---|
   | `safe_to_continue` | Every live token is standing somewhere the new definition spells identically. Repoint the instance and carry on. |
-  | `needs_restart` | A live token's immediate situation changed. The instance can be re-run from the start under the new definition, but not resumed where it stands. |
+  | `needs_restart` | A live token's immediate situation changed. The instance can be re-run from the start under the new definition, but not resumed where it stands — `AshBpmn.restart_instance/2` does that. |
   | `needs_manual_attention` | Something a restart does not fix: a node a token is standing on is gone, a parked wait will never be woken, a join now waits for a branch that never forked. A person has to decide. |
   | `unknown` | Not decidable from the artefacts given, **with the reason attached**. |
 
@@ -31,6 +31,19 @@ defmodule AshBpmn.Migration.Classifier do
   specification. Not its name, and not anything downstream — a change three nodes ahead of a
   parked token is usually the point of the migration, and treating it as breaking would make
   every migration need manual attention.
+
+  ## What to do with a verdict
+
+  | Verdict | The call |
+  |---|---|
+  | `safe_to_continue` | Repoint the instance. Nothing here needs a restart. |
+  | `needs_restart` | `AshBpmn.restart_instance/2`, which supersedes the instance and starts a successor at the target's start node. See `AshBpmn.Migration.Restart` for what crosses and what does not. |
+  | `needs_manual_attention` | A person decides. A restart *is* often what they decide, and `AshBpmn.restart_instance/2` will do it — it refuses on the instance's status, never on its classification, because an operator overruling this module is a legitimate act and one that should be recorded rather than prevented. What the restart cannot do is make the finding go away: an abandoned parked wait is abandoned either way, and the restart's decision record says so in as many words. |
+  | `unknown` | Work to do, not a pass. |
+
+  A restart records the classification it was performed under, taken by running this module
+  against a narrow export at that moment — so the verdict an operator acted on is the verdict
+  in the audit log, rather than one recomputed later against definitions that have moved on.
 
   ## Severity ordering
 
