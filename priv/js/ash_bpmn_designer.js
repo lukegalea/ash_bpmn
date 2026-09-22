@@ -903,9 +903,19 @@ export const AshBpmnDesigner = {
 // AshBpmnViewer — Phoenix LiveView hook (plain object, NOT a class)
 //
 // LV → Hook  (handleEvent):
-//   highlight  %{ node_ids: [string] }
+//   highlight  %{ node_ids: [string], nodes: [%{ node_id, status }] }
+//              `nodes` is optional — a payload without it still highlights,
+//              just without a status-specific marker.
 //   fit        %{}
 // ---------------------------------------------------------------------------
+
+// Token status → marker variant class, layered on the base marker. The server
+// sends the status as a plain string; anything unknown just gets the base.
+var ASH_BPMN_STATUS_CLASSES = {
+  active: 'ash-bpmn-highlight--active',
+  executing: 'ash-bpmn-highlight--executing',
+  waiting: 'ash-bpmn-highlight--waiting'
+};
 
 export const AshBpmnViewer = {
   mounted() {
@@ -926,7 +936,9 @@ export const AshBpmnViewer = {
     }
 
     var canvas = this._viewer.get('canvas');
-    this._highlightedIds = new Set();
+    // node id → the status-variant marker applied to it, or null for the
+    // plain one — so a clear removes exactly what the previous apply added.
+    this._highlightedIds = new Map();
 
     // The server pushes `highlight` from its first render, which can land
     // before importXML resolves — and markers cannot be applied to elements
@@ -962,24 +974,44 @@ export const AshBpmnViewer = {
       try {
         var elementRegistry = this._viewer.get('elementRegistry');
 
-        // Clear previous highlights
+        // Clear previous highlights — including any status variant that came
+        // with them. An empty payload lands here and wipes the markers, which
+        // is how a completed instance cleans up after itself.
         var _this = this;
-        this._highlightedIds.forEach(function (prevId) {
+        this._highlightedIds.forEach(function (statusClass, prevId) {
           var prev = elementRegistry.get(prevId);
           if (prev) {
             canvas.removeMarker(prev, 'ash-bpmn-highlight');
+            if (statusClass) {
+              canvas.removeMarker(prev, statusClass);
+            }
           }
         });
         this._highlightedIds.clear();
 
-        // Apply new highlights
+        // Apply new highlights. A node whose token status the server knows
+        // gets the status-specific marker layered on the base one.
+        var statusByNode = {};
+        var nodes = payload.nodes;
+        if (Array.isArray(nodes)) {
+          nodes.forEach(function (node) {
+            if (node && node.node_id) {
+              statusByNode[node.node_id] = node.status;
+            }
+          });
+        }
+
         var nodeIds = payload.node_ids;
         if (Array.isArray(nodeIds)) {
           nodeIds.forEach(function (nodeId) {
             var el = elementRegistry.get(nodeId);
             if (el) {
+              var statusClass = ASH_BPMN_STATUS_CLASSES[statusByNode[nodeId]] || null;
               canvas.addMarker(el, 'ash-bpmn-highlight');
-              _this._highlightedIds.add(nodeId);
+              if (statusClass) {
+                canvas.addMarker(el, statusClass);
+              }
+              _this._highlightedIds.set(nodeId, statusClass);
             }
           });
         }

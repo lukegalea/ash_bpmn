@@ -652,6 +652,41 @@ defmodule AshBpmn.WebTest do
       assert "Task_1" in node_ids
     end
 
+    test "an empty instance pushes an empty highlight, clearing the markers", %{definition: defn} do
+      # The push used to be gated on a non-empty list, so the final marker
+      # stayed on the canvas after the process completed. The hook clears
+      # before it applies, so an empty payload is exactly what a completed
+      # instance needs to clean up after itself.
+      instance =
+        Instance.create!(%{
+          definition_id: defn.id,
+          subject_type: "AshBpmn.Test.Subject",
+          subject_id: Ash.UUID.generate()
+        })
+
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/viewer/#{instance.id}")
+
+      assert_push_event(view, "highlight", %{node_ids: [], nodes: []})
+    end
+
+    test "the highlight payload carries each live token's status", %{instance: instance} do
+      Token.create!(%{instance_id: instance.id, node_id: "Start_1", status: :waiting})
+      Token.create!(%{instance_id: instance.id, node_id: "End_1", status: :consumed})
+
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/viewer/#{instance.id}")
+
+      assert_push_event(view, "highlight", %{node_ids: node_ids, nodes: nodes})
+
+      # A consumed token is not anywhere on the diagram anymore — it gets no
+      # marker and no status.
+      refute "End_1" in node_ids
+
+      statuses = Map.new(nodes, fn node -> {node.node_id, node.status} end)
+      assert statuses == %{"Task_1" => "active", "Start_1" => "waiting"}
+    end
+
     test "hands the diagram the definition XML, not an empty string", %{instance: instance} do
       # The gap the tests above left open. They assert the canvas *element* is
       # present, which it is even when the server found no definition and fell

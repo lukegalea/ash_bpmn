@@ -174,17 +174,28 @@ defmodule AshBpmn.Web.ViewerLive do
 
             xml = if(definition, do: definition.xml, else: "")
 
-            active_node_ids =
+            live_tokens =
               tokens
               # `:waiting` belongs here and is the case that matters most on screen: a
               # process parked on an approval is exactly what someone opens this view to
               # look at, and omitting it would blank the diagram for the commonest state.
               |> Enum.filter(&(&1.status in [:active, :executing, :waiting]))
-              |> Enum.map(& &1.node_id)
+              |> Enum.map(&%{node_id: &1.node_id, status: to_string(&1.status)})
 
+            # Pushed on every load while connected — including when the list is
+            # empty. The hook clears before it applies, so an empty payload is
+            # what wipes the markers the moment the last token is consumed;
+            # gating the push on a non-empty list used to leave the final
+            # marker stuck on the canvas forever. `node_ids` stays for any
+            # consumer that reads only it; `nodes` adds each token's status so
+            # the diagram can style a parked token differently from a
+            # mid-flight one.
             socket =
-              if connected?(socket) && active_node_ids != [] do
-                push_event(socket, "highlight", %{node_ids: active_node_ids})
+              if connected?(socket) do
+                push_event(socket, "highlight", %{
+                  node_ids: Enum.map(live_tokens, & &1.node_id),
+                  nodes: live_tokens
+                })
               else
                 socket
               end
