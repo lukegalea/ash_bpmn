@@ -455,6 +455,27 @@ defmodule AshBpmn.Web.DesignerLive do
 
         opts = AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
 
+        latest_published =
+          case definition_mod.latest_published(
+                 socket.assigns.definition_key,
+                 AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
+               ) do
+            {:ok, []} -> nil
+            {:ok, [pub | _]} -> pub
+            [] -> nil
+            [pub | _] -> pub
+          end
+
+        # Opening with no draft starts the new draft from the published
+        # version when one exists: editing continues from what is live,
+        # never from a blank canvas floating over a real process. The
+        # template is only for keys that have never been published.
+        bootstrap_xml =
+          case latest_published do
+            %{} = pub -> pub.xml
+            nil -> ash_bpmn_template_xml(socket.assigns.definition_key)
+          end
+
         # A draft is edited in place until published; find it by key+status.
         # `do_filter/2` (not the filter macro) because the resource module is
         # only known at runtime — the macro resolves bare fields statically.
@@ -472,23 +493,12 @@ defmodule AshBpmn.Web.DesignerLive do
               AshBpmn.Web.DesignerDraft.create_or_reread!(
                 definition_mod,
                 socket.assigns.definition_key,
-                ash_bpmn_template_xml(socket.assigns.definition_key),
+                bootstrap_xml,
                 opts
               )
 
             defn ->
               defn
-          end
-
-        latest_published =
-          case definition_mod.latest_published(
-                 socket.assigns.definition_key,
-                 AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
-               ) do
-            {:ok, []} -> nil
-            {:ok, [pub | _]} -> pub
-            [] -> nil
-            [pub | _] -> pub
           end
 
         socket
