@@ -45,7 +45,8 @@ defmodule AshBpmn.Web.ViewerLive do
            tokens: [],
            tasks: [],
            events: [],
-           definition: nil
+           definition: nil,
+           import_error: nil
          )}
       end
 
@@ -80,6 +81,15 @@ defmodule AshBpmn.Web.ViewerLive do
           end
 
         {:noreply, socket}
+      end
+
+      # bpmn-js could not display the pinned definition. The honest case is
+      # an instance running a version authored without diagram information;
+      # the event trail and token tables still tell its story, while the
+      # crash the default handler produced told none.
+      @impl true
+      def handle_event("import_error", %{"message" => message}, socket) do
+        {:noreply, assign(socket, :import_error, message)}
       end
 
       @impl true
@@ -235,6 +245,13 @@ defmodule AshBpmn.Web.ViewerLive do
       <div class="flex flex-1 overflow-hidden">
         <%!-- Canvas area --%>
         <div class="flex-1 flex flex-col overflow-hidden">
+          <%= if assigns[:import_error] do %>
+            <div class="mx-4 mt-4 px-4 py-3 rounded-lg border border-amber-300 bg-amber-50 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
+              This version has no diagram to display — the event trail and
+              token table still tell the instance's story.
+              <span class="block mt-1 text-xs opacity-70">{assigns.import_error}</span>
+            </div>
+          <% end %>
           <%!-- phx-update="ignore" for the same reason as the designer: the
                viewer refreshes its token and event tables on every poll, and
                each patch would otherwise destroy the rendered diagram. --%>
