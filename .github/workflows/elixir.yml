@@ -104,12 +104,22 @@ jobs:
       - uses: ./.github/actions/setup-elixir
         with:
           mix-env: dev
-      # The PLT is expensive to build and only changes with the dependency set.
+      # The PLT is expensive to build and changes with the dependency set AND
+      # the toolchain: the pins are minor-level (patch rolls freely), and a PLT
+      # restored across a patch roll aborts dialyzer with "Old PLT file". The
+      # key carries the resolved OTP (major + ERTS build) and Elixir versions,
+      # so a toolchain roll is a cache miss — never a bad hit; the restore-keys
+      # are scoped to the same toolchain for the same reason.
+      - name: Capture resolved toolchain versions for the PLT cache key
+        run: |
+          echo "PLT_KEY_OTP=$(erl -noshell -eval 'io:format("~s-~s", [erlang:system_info(otp_release), erlang:system_info(version)]), halt().')" >> "$GITHUB_ENV"
+          echo "PLT_KEY_ELIXIR=$(elixir --version | awk 'NR==2 {print $2}')" >> "$GITHUB_ENV"
       - uses: actions/cache@v6.1.0
         with:
           path: priv/plts
-          key: ${{ runner.os }}-plt-${{ hashFiles('mix.lock') }}
-          restore-keys: ${{ runner.os }}-plt-
+          key: ${{ runner.os }}-plt-${{ env.PLT_KEY_OTP }}-${{ env.PLT_KEY_ELIXIR }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-plt-${{ env.PLT_KEY_OTP }}-${{ env.PLT_KEY_ELIXIR }}-
       - run: mix dialyzer --format short
 
   docs:
