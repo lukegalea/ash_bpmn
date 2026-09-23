@@ -35,9 +35,12 @@ defmodule AshBpmn.DesignerCatalogueTest do
           }
         })
 
-      # The catalogue select, not free text, with the entry selected
-      assert html =~ ~s(<select id="config-decision-ref" name="decision_ref")
-      assert html =~ ~s(value="access_request.risk" selected)
+      # The catalogue combobox — a text input over a populated datalist, not
+      # free text — with the ref prefilled
+      assert has_element?(view, ~s(#config-decision-ref[list="config-decision-ref-options"]))
+      assert has_element?(view, "#config-decision-ref-options")
+      assert html =~ ~s(value="access_request.risk")
+      assert html =~ ~s(<option value="access_request.risk">)
       assert html =~ "Access request risk"
 
       # Status badge for the resolved entry
@@ -94,6 +97,10 @@ defmodule AshBpmn.DesignerCatalogueTest do
 
       assert html =~ "no.such.key"
       assert html =~ "is not in the decision catalogue"
+      # Warn-don't-block: the field takes the error treatment but keeps its
+      # value; Apply still carries it and the compiler rules at publish.
+      assert html =~ "ash-bpmn-field--invalid"
+      assert html =~ ~s(value="no.such.key")
     end
 
     test "round-trips the decision through the form path without erasing it" do
@@ -297,8 +304,10 @@ defmodule AshBpmn.DesignerCatalogueTest do
           }
         })
 
-      assert html =~ ~s(<select id="config-action" name="action")
-      assert html =~ ~s(value="record_risk" selected)
+      assert has_element?(view, ~s(#config-action[list="config-action-options"]))
+      assert has_element?(view, "#config-action-options")
+      assert html =~ ~s(value="record_risk")
+      assert html =~ ~s(<option value="record_risk">)
 
       # One row per declared argument: read-only hints + a FEEL from input
       assert html =~ "risk_tier"
@@ -312,7 +321,7 @@ defmodule AshBpmn.DesignerCatalogueTest do
       assert length(Regex.scan(~r/name="inputs_from\[\]"/, html)) == 2
     end
 
-    test "arg rows refresh when the action select changes" do
+    test "arg rows refresh when the action combobox changes" do
       {:ok, view, _html} = live_catalogue_designer()
 
       render_hook(view, "selection_changed", %{
@@ -326,7 +335,7 @@ defmodule AshBpmn.DesignerCatalogueTest do
 
       html =
         view
-        |> element("select[name='action']")
+        |> element("#config-action")
         |> render_change(%{"action" => "send_notice"})
 
       assert html =~ "note"
@@ -379,7 +388,7 @@ defmodule AshBpmn.DesignerCatalogueTest do
           }
         })
 
-      assert html =~ ~s(value="send_notice" selected)
+      assert html =~ ~s(value="send_notice")
       assert html =~ "note"
       assert html =~ ~s(value="routing.tier")
       assert html =~ ~s(value="reference")

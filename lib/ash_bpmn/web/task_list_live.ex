@@ -263,24 +263,24 @@ defmodule AshBpmn.Web.TaskListLive do
   @doc false
   def __render__(assigns) do
     ~H"""
-    <div id="ash-bpmn-tasklist" class="p-4 bg-white dark:bg-zinc-900">
-      <h2 class="text-lg font-semibold text-zinc-900 dark:text-zinc-100 mb-4">
+    <div id="ash-bpmn-tasklist" class="ash-bpmn-page">
+      <h2 class="ash-bpmn-heading ash-bpmn-heading--lg">
         My Tasks
       </h2>
 
       <%!-- Open tasks --%>
-      <div class="mb-6">
-        <h3 class="text-sm font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2">
+      <div class="ash-bpmn-section">
+        <h3 class="ash-bpmn-overline">
           Open ({length(assigns.open_tasks)})
         </h3>
         <%= for task <- assigns.open_tasks do %>
-          <div id={"task-#{task.id}"} class="mb-3 p-3 border border-zinc-200 dark:border-zinc-700 rounded-lg">
-            <div class="flex items-center justify-between">
-              <div>
-                <span class="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+          <div id={"task-#{task.id}"} class="ash-bpmn-card">
+            <div class="ash-bpmn-spread">
+              <div class="ash-bpmn-row">
+                <span class="ash-bpmn-card__title">
                   {task.name}
                 </span>
-                <span class="ml-2 text-xs text-zinc-500 dark:text-zinc-400">
+                <span class="ash-bpmn-subtle">
                   {task.node_id}
                 </span>
               </div>
@@ -296,32 +296,32 @@ defmodule AshBpmn.Web.TaskListLive do
           </div>
         <% end %>
         <%= if assigns.open_tasks == [] do %>
-          <p class="text-sm text-zinc-400 dark:text-zinc-500">No open tasks.</p>
+          <p class="ash-bpmn-subtle">No open tasks.</p>
         <% end %>
       </div>
 
       <%!-- Claimed tasks --%>
-      <div class="mb-6">
-        <h3 class="text-sm font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2">
+      <div class="ash-bpmn-section">
+        <h3 class="ash-bpmn-overline">
           Claimed ({length(assigns.claimed_tasks)})
         </h3>
         <%= for task <- assigns.claimed_tasks do %>
-          <div id={"task-#{task.id}"} class="mb-3 p-3 border border-zinc-200 dark:border-zinc-700 rounded-lg">
-            <div class="text-sm font-medium text-zinc-900 dark:text-zinc-100 mb-2">
+          <div id={"task-#{task.id}"} class="ash-bpmn-card">
+            <div class="ash-bpmn-card__title">
               {task.name}
-              <span class="ml-2 text-xs text-zinc-500 dark:text-zinc-400">
+              <span class="ash-bpmn-subtle">
                 {task.node_id}
               </span>
             </div>
 
             <%!-- Complete form --%>
-            <form phx-submit="complete" class="flex items-center gap-2 mb-2">
+            <form phx-submit="complete" class="ash-bpmn-form-row">
               <input type="hidden" name="task_id" value={task.id} />
               <input
                 type="text"
                 name="outcome"
                 placeholder="Outcome"
-                class="px-2 py-1 text-xs border border-zinc-300 dark:border-zinc-600 rounded-md bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 w-32"
+                class="ash-bpmn-input ash-bpmn-input--sm"
               />
               <input
                 type="text"
@@ -338,7 +338,7 @@ defmodule AshBpmn.Web.TaskListLive do
             </form>
 
             <%!-- Delegate form --%>
-            <form phx-submit="delegate" class="flex items-center gap-2">
+            <form phx-submit="delegate" class="ash-bpmn-form-row">
               <input type="hidden" name="task_id" value={task.id} />
               <input
                 type="text"
@@ -356,7 +356,7 @@ defmodule AshBpmn.Web.TaskListLive do
           </div>
         <% end %>
         <%= if assigns.claimed_tasks == [] do %>
-          <p class="text-sm text-zinc-400 dark:text-zinc-500">No claimed tasks.</p>
+          <p class="ash-bpmn-subtle">No claimed tasks.</p>
         <% end %>
       </div>
     </div>

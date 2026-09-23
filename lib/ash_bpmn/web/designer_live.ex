@@ -14,7 +14,24 @@ defmodule AshBpmn.Web.DesignerLive do
         use AshBpmn.Web.DesignerLive,
           domain: MyApp.Bpmn,
           process: "access_request",
-          actor: {MyAppWeb.Bpmn.Helpers, :current_actor, []}
+          actor: {MyAppWeb.Bpmn.Helpers, :current_actor, []},
+          actions: {MyAppWeb.Bpmn.Helpers, :action_catalogue, []},
+          decisions: {MyAppWeb.Bpmn.Helpers, :decision_catalogue, []}
+      end
+
+      defmodule MyAppWeb.Bpmn.Helpers do
+        # Feeds the service/send panel's action combobox: the Ash-constrained
+        # ref a diagram binds becomes a suggestion, not a hand-typed string.
+        def action_catalogue(_socket) do
+          AshBpmn.Catalogue.AshActions.entries([
+            {"appointment.check_in", MyApp.Clinical.Appointment, :check_in},
+            {"appointment.check_out", MyApp.Clinical.Appointment, :check_out}
+          ])
+        end
+
+        # Feeds the business-rule panel's decision combobox from your decision
+        # catalogue (ash_decisions, or wherever your DMN keys live).
+        def decision_catalogue(_socket), do: MyApp.Decisions.designer_catalogue()
       end
 
   ## Options
@@ -44,6 +61,20 @@ defmodule AshBpmn.Web.DesignerLive do
       with `module.function(args ++ [decision_key, socket])` and expected to
       answer with an href (or nil) for editing that decision, which becomes the
       business rule panel's "Edit decision ↗" link.
+
+  ## The catalogue-backed fields are comboboxes
+
+  When a catalogue is configured, its panel field — the service/send action
+  ref, the business-rule decision ref — renders as a **combobox**: a text input
+  over a native `<datalist>` of the entries, rather than a select. It is
+  searchable and keyboard-navigable, and still writable with a ref that does
+  not exist yet, because authoring runs ahead of the actions and decisions it
+  binds. The trade-off is deliberate: a value matching no entry is only
+  *warned* about (the field's error styling plus a note), never blocked — Apply
+  carries it, and publish-time verification is the gate. The options travel
+  with the panel markup, static for the catalogue's life: nothing is fetched
+  per keystroke. With no catalogue option the field stays the plain free-text
+  input it always was.
 
   The service/send panel additionally offers the `ash:call` binding beside the
   legacy action: a dropdown of the callables the *configured* domains expose
@@ -93,8 +124,9 @@ defmodule AshBpmn.Web.DesignerLive do
     process_key = Keyword.get(opts, :process)
     actor_mfa = Keyword.get(opts, :actor, nil)
     # The catalogues. Each is an optional {module, function, args} tuple called with
-    # `module.function(args ++ [socket])`; the panel renders selects from what comes
-    # back and falls back to free text when the option is absent or the call fails.
+    # `module.function(args ++ [socket])`; the panel renders comboboxes from what
+    # comes back and falls back to free text when the option is absent or the
+    # call fails.
     decisions_mfa = Keyword.get(opts, :decisions, nil)
     actions_mfa = Keyword.get(opts, :actions, nil)
     decision_editor_mfa = Keyword.get(opts, :decision_editor, nil)
@@ -739,14 +771,11 @@ defmodule AshBpmn.Web.DesignerLive do
       defp blank?(value) when is_binary(value), do: String.trim(value) == ""
       defp blank?(_), do: false
 
-      defp definition_status_class(:draft),
-        do: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
+      defp definition_status_class(:draft), do: "ash-bpmn-badge--warn"
 
-      defp definition_status_class(:published),
-        do: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+      defp definition_status_class(:published), do: "ash-bpmn-badge--ok"
 
-      defp definition_status_class(:retired),
-        do: "bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
+      defp definition_status_class(:retired), do: "ash-bpmn-badge--muted"
     end
   end
 
@@ -790,30 +819,27 @@ defmodule AshBpmn.Web.DesignerLive do
   @doc false
   def __render__(assigns) do
     ~H"""
-    <div id="ash-bpmn-designer-root" class="flex flex-col h-full">
+    <div id="ash-bpmn-designer-root" class="ash-bpmn-root">
       <%!-- Header bar --%>
-      <div class="flex items-center justify-between px-4 py-2 border-b border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900">
-        <div class="flex items-center gap-3">
-          <h1 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100 truncate max-w-48">
+      <div class="ash-bpmn-toolbar">
+        <div class="ash-bpmn-row">
+          <h1 class="ash-bpmn-heading">
             {assigns.definition && assigns.definition.name || assigns.definition_key}
           </h1>
-          <span class="text-xs text-zinc-500 dark:text-zinc-400">
+          <span class="ash-bpmn-subtle">
             {assigns.definition_key}
           </span>
           <%= if assigns.definition do %>
-            <span class="text-xs text-zinc-400 dark:text-zinc-500">
+            <span class="ash-bpmn-subtle">
               v{assigns.definition.version}
             </span>
-            <span class={[
-              "px-2 py-0.5 rounded-full text-xs font-medium",
-              definition_status_class(assigns.definition.status)
-            ]}>
+            <span class={["ash-bpmn-badge", definition_status_class(assigns.definition.status)]}>
               {to_string(assigns.definition.status)}
             </span>
           <% end %>
         </div>
 
-        <div class="flex items-center gap-2">
+        <div class="ash-bpmn-row">
           <button
             type="button"
             id="bpmn-fit-btn"
@@ -849,28 +875,28 @@ defmodule AshBpmn.Web.DesignerLive do
         </div>
       </div>
 
-      <div class="flex flex-1 overflow-hidden">
+      <div class="ash-bpmn-body">
         <%!-- Main canvas area --%>
-        <div class="flex-1 flex flex-col overflow-hidden">
+        <div class="ash-bpmn-canvas-col">
           <%!-- Errors surface: appears when the last save or publish produced
                 compile errors, clears the moment one succeeds. Paths that name
                 an element jump to it on the canvas. --%>
-          <div id="ash-bpmn-errors" class={["px-4", assigns.errors != [] && "pt-3"]}>
+          <div id="ash-bpmn-errors" class="ash-bpmn-errors-wrap">
             <%= if assigns.errors != [] do %>
-              <div class="mb-2 rounded-lg border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950 overflow-hidden">
-                <div class="flex items-baseline gap-2 px-3 py-2 border-b border-red-200 dark:border-red-800">
-                  <h2 id="bpmn-errors-count" class="text-sm font-semibold text-red-800 dark:text-red-200">
+              <div class="ash-bpmn-errors">
+                <div class="ash-bpmn-errors__head">
+                  <h2 id="bpmn-errors-count" class="ash-bpmn-errors__title">
                     {length(assigns.errors)} {plural_word(length(assigns.errors))}
                   </h2>
-                  <span class="text-xs text-red-600 dark:text-red-300">
+                  <span class="ash-bpmn-errors__hint">
                     Fix these, then save or publish again.
                   </span>
                 </div>
-                <ul class="divide-y divide-red-100 dark:divide-red-900" role="list">
+                <ul class="ash-bpmn-errors__list" role="list">
                   <li
                     :for={{error, idx} <- Enum.with_index(assigns.errors)}
                     id={"bpmn-error-#{idx}"}
-                    class="px-3 py-2 flex items-start gap-2"
+                    class="ash-bpmn-errors__row"
                   >
                     <%= if jumpable_path?(error["path"]) do %>
                       <button
@@ -884,11 +910,11 @@ defmodule AshBpmn.Web.DesignerLive do
                         {error["path"]}
                       </button>
                     <% else %>
-                      <span class="shrink-0 font-mono text-xs px-1.5 py-0.5 rounded bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">
+                      <span class="ash-bpmn-jump">
                         {error["path"] != "" && error["path"] || "process"}
                       </span>
                     <% end %>
-                    <span class="text-xs leading-5 text-red-700 dark:text-red-300">
+                    <span class="ash-bpmn-errors__text">
                       {error["message"]}
                     </span>
                   </li>
@@ -905,32 +931,32 @@ defmodule AshBpmn.Web.DesignerLive do
                `load_xml` push_event, never through the DOM. --%>
           <div
             id="ash-bpmn-designer"
-            class="flex-1 px-4 pb-4"
+            class="ash-bpmn-canvas-col"
             phx-hook="AshBpmnDesigner"
             phx-update="ignore"
             data-xml={assigns.xml}
           >
-            <div class="ash-bpmn-canvas h-[32rem] w-full border border-zinc-300 dark:border-zinc-700 rounded-lg overflow-hidden">
+            <div class="ash-bpmn-canvas ash-bpmn-canvas-frame">
             </div>
           </div>
 
           <%!-- Hidden forms for testability --%>
-          <form id="ash-bpmn-save-form" phx-submit="save_xml_form" class="hidden">
+          <form id="ash-bpmn-save-form" phx-submit="save_xml_form" hidden>
             <input type="hidden" name="xml" />
           </form>
-          <form id="ash-bpmn-publish-form" phx-submit="publish_form" class="hidden">
+          <form id="ash-bpmn-publish-form" phx-submit="publish_form" hidden>
             <input type="hidden" name="xml" />
           </form>
         </div>
 
         <%!-- Properties panel --%>
-        <div id="ash-bpmn-panel" class="w-72 border-l border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 overflow-y-auto">
+        <div id="ash-bpmn-panel" class="ash-bpmn-panel">
           <%= if assigns.selected do %>
-            <div class="p-4">
-              <h3 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-3">
+            <div class="ash-bpmn-panel__body">
+              <h3 class="ash-bpmn-heading">
                 {assigns.selected.name || assigns.selected.id}
               </h3>
-              <p class="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
+              <p class="ash-bpmn-panel__sub">
                 {assigns.selected.type} — {assigns.selected.id}
               </p>
               <%!-- phx-change keeps FEEL fields validated as they are typed;
@@ -939,8 +965,8 @@ defmodule AshBpmn.Web.DesignerLive do
                 <input type="hidden" name="element_id" value={assigns.selected.id} />
                 <input type="hidden" name="type" value={assigns.selected.type} />
 
-                <div class="mb-3">
-                  <label class="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1" for="config-name">
+                <div class="ash-bpmn-field-group">
+                  <label class="ash-bpmn-label" for="config-name">
                     Name
                   </label>
                   <input
@@ -948,7 +974,7 @@ defmodule AshBpmn.Web.DesignerLive do
                     type="text"
                     name="name"
                     value={assigns.selected.name}
-                    class="w-full px-2 py-1 text-sm border border-zinc-300 dark:border-zinc-600 rounded-md bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    class="ash-bpmn-input"
                   />
                 </div>
 
@@ -963,14 +989,14 @@ defmodule AshBpmn.Web.DesignerLive do
 
                 <button
                   type="submit"
-                  class="ash-bpmn-btn ash-bpmn-btn--primary w-full mt-2"
+                  class="ash-bpmn-btn ash-bpmn-btn--primary ash-bpmn-btn--block"
                 >
                   Apply
                 </button>
               </form>
             </div>
           <% else %>
-            <div class="p-4 text-sm text-zinc-400 dark:text-zinc-500">
+            <div class="ash-bpmn-panel__body ash-bpmn-subtle">
               Select a node to edit its properties.
             </div>
           <% end %>
@@ -980,21 +1006,15 @@ defmodule AshBpmn.Web.DesignerLive do
     """
   end
 
-  defp definition_status_class(:draft),
-    do: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
+  defp definition_status_class(:draft), do: "ash-bpmn-badge--warn"
 
-  defp definition_status_class(:published),
-    do: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+  defp definition_status_class(:published), do: "ash-bpmn-badge--ok"
 
-  defp definition_status_class(:retired),
-    do: "bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
+  defp definition_status_class(:retired), do: "ash-bpmn-badge--muted"
 
-  defp field_class do
-    "w-full px-2 py-1 text-xs border border-zinc-300 dark:border-zinc-600 rounded-md " <>
-      "bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100"
-  end
+  defp field_class, do: "ash-bpmn-input"
 
-  defp label_class, do: "block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1"
+  defp label_class, do: "ash-bpmn-label"
 
   @doc false
   # The panel is prefilled from the selection's live `config`, and every list
@@ -1022,9 +1042,9 @@ defmodule AshBpmn.Web.DesignerLive do
 
     ~H"""
     <%= if @flow_default_of do %>
-      <div class="mb-3 rounded-md border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 p-2.5">
-        <p class="text-xs leading-5 text-zinc-600 dark:text-zinc-300">
-          Default flow of <span class="font-mono">{@flow_default_of}</span>.
+      <div class="ash-bpmn-callout">
+        <p class="ash-bpmn-hint">
+          Default flow of <span class="ash-bpmn-mono">{@flow_default_of}</span>.
           The source gateway takes it when no condition matches, so it must not carry one.
         </p>
       </div>
@@ -1032,12 +1052,12 @@ defmodule AshBpmn.Web.DesignerLive do
             the flow should not have kept. --%>
       <input type="hidden" name="condition" value="" />
     <% else %>
-      <div class="mb-3">
-        <div class="flex items-baseline justify-between gap-2 mb-1">
+      <div class="ash-bpmn-field-group">
+        <div class="ash-bpmn-spread">
           <label class={label_class()} for="config-condition">
             Condition (FEEL)
           </label>
-          <span class="text-xs text-zinc-400 dark:text-zinc-500 whitespace-nowrap">
+          <span class="ash-bpmn-subtle">
             equality is =, not ==
           </span>
         </div>
@@ -1049,8 +1069,8 @@ defmodule AshBpmn.Web.DesignerLive do
           phx-debounce="300"
           class={[
             field_class(),
-            "font-mono leading-5 resize-y",
-            feel_invalid?(@feel, "condition") && "border-red-400 dark:border-red-500"
+            "ash-bpmn-field--mono",
+            feel_invalid?(@feel, "condition") && "ash-bpmn-field--invalid"
           ]}
           aria-invalid={if feel_invalid?(@feel, "condition"), do: "true"}
         >{@flow_condition}</textarea>
@@ -1071,7 +1091,7 @@ defmodule AshBpmn.Web.DesignerLive do
       |> assign(:gw_default, assigns.selected.config["default"] || "")
 
     ~H"""
-    <div class="mb-3">
+    <div class="ash-bpmn-field-group">
       <label class={label_class()} for="config-default-flow">
         Default flow
       </label>
@@ -1086,19 +1106,19 @@ defmodule AshBpmn.Web.DesignerLive do
           {flow_option_label(flow)}
         </option>
       </select>
-      <p class="mt-1.5 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+      <p class="ash-bpmn-hint">
         Taken when no condition matches. Every outgoing flow needs a condition, or exactly one
         must be the default — and the default must not also carry a condition.
       </p>
 
       <%= if @gw_outgoing != [] do %>
-        <ul class="mt-2 space-y-1" role="list">
-          <li :for={flow <- @gw_outgoing} class="flex items-center gap-2 text-xs">
-            <span class="truncate text-zinc-600 dark:text-zinc-300">
+        <ul class="ash-bpmn-rows" role="list">
+          <li :for={flow <- @gw_outgoing} class="ash-bpmn-row">
+            <span class="ash-bpmn-subtle ash-bpmn-truncate">
               {flow_label(flow)}
             </span>
             <% {badge_text, badge_class} = flow_badge(flow, @gw_default) %>
-            <span class={["shrink-0 px-1.5 rounded-full", badge_class]}>
+            <span class={["ash-bpmn-badge", badge_class]}>
               {badge_text}
             </span>
           </li>
@@ -1162,7 +1182,7 @@ defmodule AshBpmn.Web.DesignerLive do
       )
 
     ~H"""
-    <div class="mb-3">
+    <div class="ash-bpmn-field-group">
       <label class={label_class()} for="config-binding-mode">Binding</label>
       <select
         id="config-binding-mode"
@@ -1173,16 +1193,16 @@ defmodule AshBpmn.Web.DesignerLive do
         <option value="action" selected={@svc_mode != "call"}>Action (host invoker)</option>
         <option value="call" selected={@svc_mode == "call"}>Callable (ash:call)</option>
       </select>
-      <p class="mt-1.5 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+      <p class="ash-bpmn-hint">
         Exactly one binding per task — picking one clears the other.
       </p>
     </div>
 
     <%= if @svc_mode == "call" do %>
-      <div class="mb-3">
+      <div class="ash-bpmn-field-group">
         <label class={label_class()} for="config-call-ref">Callable</label>
         <%= if @svc_callables == [] do %>
-          <p id="config-call-empty" class="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+          <p id="config-call-empty" class="ash-bpmn-hint">
             No actions are exposed to diagrams — declare <code>callables</code> on a domain.
           </p>
           <%= if @svc_call_ref != "" do %>
@@ -1190,7 +1210,7 @@ defmodule AshBpmn.Web.DesignerLive do
                   silently erase a binding the panel was shown, and the publish
                   error is the honest way out. --%>
             <input type="hidden" name="call_ref" value={@svc_call_ref} />
-            <p class="mt-1 text-xs text-red-600 dark:text-red-400">
+            <p class="ash-bpmn-note ash-bpmn-note--danger">
               '{@svc_call_ref}' is not declared by any configured domain.
             </p>
           <% end %>
@@ -1199,7 +1219,7 @@ defmodule AshBpmn.Web.DesignerLive do
             id="config-call-ref"
             name="call_ref"
             phx-change="panel-changed"
-            class={select_class(@svc_entry != nil or @svc_call_ref == "")}
+            class={warn_class(@svc_entry != nil or @svc_call_ref == "")}
           >
             <option value="" selected={@svc_call_ref == ""}>— choose a callable —</option>
             <option :for={c <- @svc_callables} value={c.ref} selected={to_string(c.ref) == @svc_call_ref}>
@@ -1207,14 +1227,14 @@ defmodule AshBpmn.Web.DesignerLive do
             </option>
           </select>
           <%= if @svc_call_ref != "" and @svc_entry == nil do %>
-            <p class="mt-1 text-xs text-red-600 dark:text-red-400">
+            <p class="ash-bpmn-note ash-bpmn-note--danger">
               '{@svc_call_ref}' is not declared by any configured domain.
             </p>
           <% end %>
         <% end %>
       </div>
     <% else %>
-      <div class="mb-3">
+      <div class="ash-bpmn-field-group">
         <label class={label_class()} for="config-action">Action</label>
         <%= if @actions == [] do %>
           <input
@@ -1226,19 +1246,30 @@ defmodule AshBpmn.Web.DesignerLive do
             placeholder="my_app.do_something"
           />
         <% else %>
-          <select
+          <%!-- A combobox, not a select: the catalogue's refs as a datalist
+                under a text input — searchable, keyboard-navigable, and still
+                writable with a ref that does not exist yet, because authoring
+                runs ahead of the actions it binds (draft-first). The open
+                input's price is that a typo is only warned about — the red
+                treatment and the note below — and the compiler has the last
+                word at publish. Options ride the panel markup, static for the
+                catalogue's life: nothing is fetched per keystroke. --%>
+          <input
             id="config-action"
+            type="text"
             name="action"
+            list="config-action-options"
+            value={@svc_action}
             phx-change="panel-changed"
-            class={select_class(@svc_entry != nil or @svc_action == "")}
-          >
-            <option value="" selected={@svc_action == ""}>— choose an action —</option>
-            <option :for={a <- @actions} value={a.ref} selected={to_string(a.ref) == @svc_action}>
-              {a.label}
-            </option>
-          </select>
+            phx-debounce="300"
+            class={warn_class(@svc_entry != nil or @svc_action == "")}
+            placeholder="my_app.do_something"
+          />
+          <datalist id="config-action-options">
+            <option :for={a <- @actions} value={a.ref}>{a.label}</option>
+          </datalist>
           <%= if @svc_action != "" and @svc_entry == nil do %>
-            <p class="mt-1 text-xs text-red-600 dark:text-red-400">
+            <p class="ash-bpmn-note ash-bpmn-note--danger">
               '{@svc_action}' is not in the action catalogue.
             </p>
           <% end %>
@@ -1247,21 +1278,21 @@ defmodule AshBpmn.Web.DesignerLive do
     <% end %>
 
     <%= if @svc_entry != nil do %>
-      <div class="mb-3">
+      <div class="ash-bpmn-field-group">
         <label class={label_class()}>Arguments (FEEL)</label>
-        <div :for={{row, idx} <- Enum.with_index(@svc_arg_rows)} class="mb-2">
-          <div class="flex items-center gap-1 mb-1">
-            <span class="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+        <div :for={{row, idx} <- Enum.with_index(@svc_arg_rows)} class="ash-bpmn-rows">
+          <div class="ash-bpmn-row">
+            <span class="ash-bpmn-inline-label">
               {row["arg"].name}
             </span>
-            <span class="text-xs text-zinc-400 dark:text-zinc-500">{row["arg"].type}</span>
+            <span class="ash-bpmn-subtle">{row["arg"].type}</span>
             <%= if row["arg"].allow_nil? == false do %>
-              <span class="px-1 rounded bg-zinc-100 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 text-xs">
+              <span class="ash-bpmn-badge ash-bpmn-badge--muted">
                 required
               </span>
             <% end %>
             <%= if row["arg"][:description] do %>
-              <span class="text-xs text-zinc-400 dark:text-zinc-500" title={row["arg"][:description]}>
+              <span class="ash-bpmn-subtle" title={row["arg"][:description]}>
                 ⓘ
               </span>
             <% end %>
@@ -1273,7 +1304,7 @@ defmodule AshBpmn.Web.DesignerLive do
             phx-debounce="300"
             class={[
               field_class(),
-              feel_invalid?(@feel, "inputs:#{idx}") && "border-red-400 dark:border-red-500"
+              feel_invalid?(@feel, "inputs:#{idx}") && "ash-bpmn-field--invalid"
             ]}
             placeholder="FEEL, e.g. routing.risk_tier"
           />
@@ -1310,7 +1341,7 @@ defmodule AshBpmn.Web.DesignerLive do
       |> assign(:brt_editor_href, decision_editor_href(assigns.decision_editor_href, ref))
 
     ~H"""
-    <div class="mb-3">
+    <div class="ash-bpmn-field-group">
       <label class={label_class()} for="config-decision-ref">Decision</label>
       <%= if @decisions == [] do %>
         <input
@@ -1322,44 +1353,51 @@ defmodule AshBpmn.Web.DesignerLive do
           placeholder="my_app.decision_key"
         />
       <% else %>
-        <select
+        <%!-- The decision twin of the service task's action combobox: the
+              catalogue as datalist suggestions, manual entry kept for
+              decisions that do not exist yet, warned-not-blocked when the ref
+              matches nothing. --%>
+        <input
           id="config-decision-ref"
+          type="text"
           name="decision_ref"
+          list="config-decision-ref-options"
+          value={@brt_decision["ref"]}
           phx-change="panel-changed"
-          class={select_class(@brt_entry != nil or @brt_decision["ref"] == "")}
-        >
-          <option value="" selected={@brt_decision["ref"] == ""}>— choose a decision —</option>
-          <option :for={d <- @decisions} value={d.key} selected={to_string(d.key) == @brt_decision["ref"]}>
-            {d.name || d.key}
-          </option>
-        </select>
+          phx-debounce="300"
+          class={warn_class(@brt_entry != nil or @brt_decision["ref"] == "")}
+          placeholder="my_app.decision_key"
+        />
+        <datalist id="config-decision-ref-options">
+          <option :for={d <- @decisions} value={d.key}>{d.name || d.key}</option>
+        </datalist>
         <%= if @brt_decision["ref"] != "" and @brt_entry == nil do %>
-          <p class="mt-1 text-xs text-red-600 dark:text-red-400">
+          <p class="ash-bpmn-note ash-bpmn-note--danger">
             '{@brt_decision["ref"]}' is not in the decision catalogue.
           </p>
         <% end %>
       <% end %>
 
       <%= if @brt_entry != nil do %>
-        <div class="mt-1">
-          <span class={["px-1.5 py-0.5 rounded-full text-xs font-medium", decision_badge_class(@brt_entry)]}>
+        <div>
+          <span class={["ash-bpmn-badge", decision_badge_class(@brt_entry)]}>
             {decision_badge_text(@brt_entry)}
           </span>
         </div>
         <%= if drift?(@brt_decision, @brt_entry) do %>
-          <p class="mt-1 text-xs text-amber-600 dark:text-amber-400">
+          <p class="ash-bpmn-note ash-bpmn-note--warn">
             Pinned to v{@brt_decision["version"]}; latest published is v{@brt_entry.latest_published_version}.
           </p>
         <% end %>
       <% end %>
 
       <%= if @brt_editor_href do %>
-        <div class="mt-1">
+        <div>
           <a
             href={@brt_editor_href}
             target="_blank"
             rel="noopener"
-            class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+            class="ash-bpmn-link"
           >
             Edit decision ↗
           </a>
@@ -1367,7 +1405,7 @@ defmodule AshBpmn.Web.DesignerLive do
       <% end %>
     </div>
 
-    <div class="mb-3">
+    <div class="ash-bpmn-field-group">
       <label class={label_class()}>Binding</label>
       <select name="binding" phx-change="panel-changed" class={field_class()}>
         <option value="latest" selected={@brt_decision["binding"] != "pinned"}>latest</option>
@@ -1376,7 +1414,7 @@ defmodule AshBpmn.Web.DesignerLive do
     </div>
 
     <%= if @brt_decision["binding"] == "pinned" do %>
-      <div class="mb-3">
+      <div class="ash-bpmn-field-group">
         <label class={label_class()} for="config-decision-version">Version</label>
         <input
           id="config-decision-version"
@@ -1390,7 +1428,7 @@ defmodule AshBpmn.Web.DesignerLive do
     <% end %>
 
     <%= if @brt_entry != nil and length(@brt_entry.decisions) > 1 do %>
-      <div class="mb-3">
+      <div class="ash-bpmn-field-group">
         <label class={label_class()} for="config-decision-name">Decision name</label>
         <select id="config-decision-name" name="decision_name" class={field_class()}>
           <option
@@ -1404,9 +1442,9 @@ defmodule AshBpmn.Web.DesignerLive do
       </div>
     <% end %>
 
-    <div class="mb-3">
+    <div class="ash-bpmn-field-group">
       <label class={label_class()}>Inputs</label>
-      <div :for={{input, idx} <- Enum.with_index(@brt_inputs)} class="space-y-1 mb-2">
+      <div :for={{input, idx} <- Enum.with_index(@brt_inputs)} class="ash-bpmn-rows">
         <input
           type="text"
           name="inputs_name[]"
@@ -1421,8 +1459,8 @@ defmodule AshBpmn.Web.DesignerLive do
           phx-debounce="300"
           class={[
             field_class(),
-            "font-mono",
-            feel_invalid?(@feel, "inputs:#{idx}") && "border-red-400 dark:border-red-500"
+            "ash-bpmn-mono",
+            feel_invalid?(@feel, "inputs:#{idx}") && "ash-bpmn-field--invalid"
           ]}
           placeholder="FEEL from, e.g. subject.amount"
         />
@@ -1446,9 +1484,9 @@ defmodule AshBpmn.Web.DesignerLive do
       |> assign(:timers, rows(assigns.selected.config["timers"], %{"kind" => "", "hours" => nil}))
 
     ~H"""
-    <div class="mb-3">
+    <div class="ash-bpmn-field-group">
       <label class={label_class()}>Candidates</label>
-      <div :for={candidate <- @candidates} class="space-y-1 mb-2">
+      <div :for={candidate <- @candidates} class="ash-bpmn-rows">
         <input
           type="text"
           name="candidates_kind[]"
@@ -1466,36 +1504,40 @@ defmodule AshBpmn.Web.DesignerLive do
       </div>
     </div>
 
-    <div class="mb-3">
+    <div class="ash-bpmn-field-group">
       <label class={label_class()}>Outcomes</label>
-      <input
-        :for={outcome <- @outcomes}
-        type="text"
-        name="outcomes_name[]"
-        value={outcome}
-        class={[field_class(), "mb-1"]}
-        placeholder="approved"
-      />
+      <div class="ash-bpmn-rows">
+        <input
+          :for={outcome <- @outcomes}
+          type="text"
+          name="outcomes_name[]"
+          value={outcome}
+          class={field_class()}
+          placeholder="approved"
+        />
+      </div>
     </div>
 
-    <div class="mb-3">
+    <div class="ash-bpmn-field-group">
       <label class={label_class()}>Exclusions</label>
-      <input
-        :for={exclusion <- @exclusions}
-        type="text"
-        name="exclusions_who[]"
-        value={exclusion["who"]}
-        class={[field_class(), "mb-1"]}
-        placeholder="subject.created_by_id"
-      />
+      <div class="ash-bpmn-rows">
+        <input
+          :for={exclusion <- @exclusions}
+          type="text"
+          name="exclusions_who[]"
+          value={exclusion["who"]}
+          class={field_class()}
+          placeholder="subject.created_by_id"
+        />
+      </div>
     </div>
 
-    <div class="mb-3">
+    <div class="ash-bpmn-field-group">
       <label class={label_class()}>Timers</label>
       <%!-- Unit is part of the row, not assumed: a timer written as days="7"
             would otherwise render blank in an hours-only field and be saved
             back without its duration. --%>
-      <div :for={timer <- @timers} class="flex gap-1 mb-1">
+      <div :for={timer <- @timers} class="ash-bpmn-row">
         <input
           type="text"
           name="timers_kind[]"
@@ -1507,10 +1549,10 @@ defmodule AshBpmn.Web.DesignerLive do
           type="text"
           name="timers_value[]"
           value={timer_value(timer)}
-          class={[field_class(), "w-16"]}
+          class={[field_class(), "ash-bpmn-field--num"]}
           placeholder="24"
         />
-        <select name="timers_unit[]" class={[field_class(), "w-24"]}>
+        <select name="timers_unit[]" class={[field_class(), "ash-bpmn-field--unit"]}>
           <option
             :for={unit <- ~w(minutes hours days)}
             value={unit}
@@ -1526,7 +1568,7 @@ defmodule AshBpmn.Web.DesignerLive do
 
   def node_config(%{selected: %{type: "bpmn:EndEvent"}} = assigns) do
     ~H"""
-    <div class="mb-3">
+    <div class="ash-bpmn-field-group">
       <label class={label_class()} for="config-outcome">Outcome</label>
       <input
         id="config-outcome"
@@ -1542,7 +1584,7 @@ defmodule AshBpmn.Web.DesignerLive do
 
   def node_config(assigns) do
     ~H"""
-    <p class="text-xs text-zinc-400 dark:text-zinc-500">
+    <p class="ash-bpmn-subtle">
       No configurable properties for this element type.
     </p>
     """
@@ -1605,12 +1647,9 @@ defmodule AshBpmn.Web.DesignerLive do
 
   defp drift?(_, _), do: false
 
-  defp decision_badge_class(%{status: :published}) do
-    "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-  end
+  defp decision_badge_class(%{status: :published}), do: "ash-bpmn-badge--ok"
 
-  defp decision_badge_class(_),
-    do: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
+  defp decision_badge_class(_), do: "ash-bpmn-badge--warn"
 
   defp decision_badge_text(%{status: :published, latest_published_version: version})
        when version != nil,
@@ -1619,17 +1658,20 @@ defmodule AshBpmn.Web.DesignerLive do
   defp decision_badge_text(%{status: :published}), do: "published"
   defp decision_badge_text(_), do: "draft"
 
-  # Red border when a catalogue is present but the reference is not in it.
-  defp select_class(true), do: field_class()
-  defp select_class(false), do: field_class() <> " border-red-500 dark:border-red-500"
+  # The error treatment when a catalogue is present but the reference is not
+  # in it. Warn, don't block: the value stays in the field and Apply still
+  # carries it — draft-first authoring means a ref may legitimately not exist
+  # yet — and the compiler, not the panel, is what refuses a binding at publish.
+  defp warn_class(true), do: field_class()
+  defp warn_class(false), do: field_class() <> " ash-bpmn-field--invalid"
 
   attr(:promote, :list, required: true)
 
   defp promote_rows(assigns) do
     ~H"""
-    <div class="mb-3">
+    <div class="ash-bpmn-field-group">
       <label class={label_class()}>Promote</label>
-      <div :for={signal <- @promote} class="space-y-1 mb-2">
+      <div :for={signal <- @promote} class="ash-bpmn-rows">
         <input
           type="text"
           name="promote_name[]"
@@ -1663,11 +1705,11 @@ defmodule AshBpmn.Web.DesignerLive do
     ~H"""
     <%= case @state do %>
       <% {:error, message} -> %>
-        <p id={@id} role="alert" class="mt-1 text-xs leading-5 text-red-600 dark:text-red-400">
+        <p id={@id} role="alert" class="ash-bpmn-note ash-bpmn-note--danger">
           {message}
         </p>
       <% :ok -> %>
-        <p id={@id} class="mt-1 text-xs leading-5 text-emerald-600 dark:text-emerald-400">
+        <p id={@id} class="ash-bpmn-note ash-bpmn-note--ok">
           Valid FEEL
         </p>
       <% _ -> %>
@@ -2007,16 +2049,16 @@ defmodule AshBpmn.Web.DesignerLive do
   defp flow_badge(flow, default_id) do
     cond do
       flow["id"] == default_id and flow["condition"] ->
-        {"default + condition", "bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-200"}
+        {"default + condition", "ash-bpmn-badge--danger"}
 
       flow["id"] == default_id ->
-        {"default", "bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-200"}
+        {"default", "ash-bpmn-badge--info"}
 
       flow["condition"] ->
-        {"condition", "bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-200"}
+        {"condition", "ash-bpmn-badge--ok"}
 
       true ->
-        {"no condition", "bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-200"}
+        {"no condition", "ash-bpmn-badge--warn"}
     end
   end
 

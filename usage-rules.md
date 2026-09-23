@@ -86,7 +86,8 @@ gateway conditions, never in resolver specs, never in the invoker.
     add a second way to hand a callee its arguments.
 13. **The catalogue is the allowlist.** The designer's decision and action
     catalogues come from the host, as code (`AshBpmn.Catalogue.AshActions` is one
-    way to build them). They make authoring honest -- a select, not a guess --
+    way to build them). They make authoring honest -- a combobox of suggestions
+    over the field, not a hand-typed guess --
     but they are not the runtime source of truth: the XML is, and invoking is
     still the only contract. When the host's `ActionInvoker` exports
     `exists?(ref) :: boolean`, the compiler verifies every service/send action at

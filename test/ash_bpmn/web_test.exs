@@ -381,8 +381,8 @@ defmodule AshBpmn.WebTest do
       assert html =~ "Low — no condition"
       assert html =~ "High — has condition"
       # The badges: indigo for the chosen default, emerald for a conditioned flow
-      assert html =~ "bg-indigo-100"
-      assert html =~ "bg-emerald-100"
+      assert html =~ "ash-bpmn-badge--info"
+      assert html =~ "ash-bpmn-badge--ok"
       # The compiler's default-or-all-conditioned rule, gently
       assert html =~ "must not also carry a condition"
     end
@@ -556,6 +556,115 @@ defmodule AshBpmn.WebTest do
 
       assert has_element?(view, "#bpmn-error-0")
       assert render(view) =~ "not an argument of callable"
+    end
+  end
+
+  # ── Catalogue-backed comboboxes on the Ash-constrained fields ──────────
+
+  # The action ref of a service/send task and the decision ref of a business
+  # rule task are the two fields the compiler resolves against the host's Ash
+  # actions/decisions. With a catalogue configured they render as comboboxes —
+  # a text input over a datalist of the entries, never a bare free-text input;
+  # without one they stay exactly the free text they always were.
+  describe "designer: catalogue-backed fields are comboboxes" do
+    test "with an actions catalogue, the action field is a text input over a populated datalist" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/catalogue-designer")
+
+      html =
+        render_hook(view, "selection_changed", %{
+          "id" => "Record",
+          "type" => "bpmn:ServiceTask",
+          "name" => "Record",
+          "config" => %{"action" => "record_risk"}
+        })
+
+      # A combobox, not a select and not bare free text: the catalogue feeds a
+      # datalist, and the input keeps its current ref as its value.
+      assert has_element?(view, ~s(#config-action[list="config-action-options"]))
+      assert has_element?(view, "#config-action-options")
+      assert html =~ ~s(value="record_risk")
+      assert html =~ ~s(<option value="record_risk">)
+      assert html =~ ~s(<option value="send_notice">)
+    end
+
+    test "with a decisions catalogue, the decision field is a text input over a populated datalist" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/catalogue-designer")
+
+      html =
+        render_hook(view, "selection_changed", %{
+          "id" => "AssessRisk",
+          "type" => "bpmn:BusinessRuleTask",
+          "name" => "Assess risk",
+          "config" => %{"decision" => %{"ref" => "access_request.risk", "binding" => "latest"}}
+        })
+
+      assert has_element?(view, ~s(#config-decision-ref[list="config-decision-ref-options"]))
+      assert has_element?(view, "#config-decision-ref-options")
+      assert html =~ ~s(value="access_request.risk")
+      assert html =~ ~s(<option value="access_request.risk">)
+    end
+
+    test "warn-don't-block: a value matching no entry takes the error styling but still applies" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/catalogue-designer")
+
+      html =
+        render_hook(view, "selection_changed", %{
+          "id" => "Record",
+          "type" => "bpmn:ServiceTask",
+          "name" => "Record",
+          "config" => %{"action" => "not_yet.an_action"}
+        })
+
+      # The error treatment and the note — and nothing more. The value stays
+      # in the field: authoring runs ahead of the actions it binds.
+      assert html =~ "ash-bpmn-field--invalid"
+      assert html =~ "is not in the action catalogue"
+      assert html =~ ~s(value="not_yet.an_action")
+
+      view
+      |> element("#ash-bpmn-panel form")
+      |> render_submit(%{
+        "element_id" => "Record",
+        "type" => "bpmn:ServiceTask",
+        "name" => "Record",
+        "action" => "not_yet.an_action"
+      })
+
+      assert_push_event(view, "apply_config", %{config: %{"action" => "not_yet.an_action"}})
+    end
+
+    test "provider absent: plain free text — no datalist, no warn" do
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+
+      html =
+        render_hook(view, "selection_changed", %{
+          "id" => "Record",
+          "type" => "bpmn:ServiceTask",
+          "name" => "Record",
+          "config" => %{"action" => "appointment.check_in"}
+        })
+
+      assert has_element?(view, "input[name='action']")
+      assert html =~ ~s(value="appointment.check_in")
+      refute has_element?(view, "#config-action-options")
+      refute has_element?(view, "#config-action[list]")
+
+      html =
+        render_hook(view, "selection_changed", %{
+          "id" => "AssessRisk",
+          "type" => "bpmn:BusinessRuleTask",
+          "name" => "Assess risk",
+          "config" => %{"decision" => %{"ref" => "my.risk", "binding" => "latest"}}
+        })
+
+      assert has_element?(view, "input[name='decision_ref']")
+      assert html =~ ~s(value="my.risk")
+      refute has_element?(view, "#config-decision-ref-options")
+      refute has_element?(view, "#config-decision-ref[list]")
     end
   end
 

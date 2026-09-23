@@ -76,7 +76,17 @@ becomes an "Edit decision ↗" link that opens your DMN editor beside the
 designer. `AshBpmn.Catalogue.AshActions.entries/1` builds the action catalogue
 straight from a list of `{ref, resource, action}` triples; the allowlist is
 code, so an entry naming an action that does not exist raises at boot, not in
-front of a modeller. No option means today's behaviour: free-text inputs.
+front of a modeller.
+
+A catalogue turns its field into a **combobox** rather than a select: the
+entries render as a native `<datalist>` under a text input, so the field is
+searchable and keyboard-navigable, and still writable with a ref that does not
+exist yet — authoring runs ahead of the actions and decisions it binds. The
+open input is warn-not-block by design: a value matching no entry takes the
+error styling and a note, but Apply carries it anyway, and publish-time
+verification is the gate. The options travel with the panel markup, static for
+the catalogue's life — nothing is fetched per keystroke. No option means the
+old behaviour: plain free-text inputs.
 
 The canvas is the client's; the properties panel is the server's. When you select
 an element, the hook pushes `selection_changed` — carrying the element's current
@@ -100,8 +110,10 @@ promotions; the panel narrows to those:
 ## Business rule tasks in the panel
 
 A `businessRuleTask` gets the fullest panel, because it carries the most
-vocabulary. With a `decisions` catalogue configured, the decision reference is a
-select, the resolved entry shows a status badge (`draft`, or `published vN`), and
+vocabulary. With a `decisions` catalogue configured, the decision reference is
+a combobox — the catalogue as suggestions under a text input, still writable
+with a ref that does not exist yet — the resolved entry shows a status badge
+(`draft`, or `published vN`), and
 a `binding="pinned"` whose version is not the latest published one gets a drift
 note saying so — a pin that has quietly fallen behind is exactly the kind of
 thing a modeller should not have to discover in the XML. When the key lists more
