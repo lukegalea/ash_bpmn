@@ -231,11 +231,11 @@ defmodule AshBpmn.Web.ViewerLive do
   @doc false
   def __render__(assigns) do
     ~H"""
-    <div id="ash-bpmn-viewer-root" class="flex flex-col h-full">
+    <div id="ash-bpmn-viewer-root" class="ash-bpmn-root">
       <%!-- Header --%>
-      <div class="flex items-center justify-between px-4 py-2 border-b border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900">
-        <div class="flex items-center gap-3">
-          <h1 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+      <div class="ash-bpmn-toolbar">
+        <div class="ash-bpmn-row">
+          <h1 class="ash-bpmn-heading">
             <%= if assigns.instance do %>
               Instance {assigns.instance.status}
             <% else %>
@@ -243,24 +243,21 @@ defmodule AshBpmn.Web.ViewerLive do
             <% end %>
           </h1>
           <%= if assigns.instance do %>
-            <span class={[
-              "px-2 py-0.5 rounded-full text-xs font-medium",
-              instance_status_class(assigns.instance.status)
-            ]}>
+            <span class={["ash-bpmn-badge", instance_status_class(assigns.instance.status)]}>
               {to_string(assigns.instance.status)}
             </span>
           <% end %>
         </div>
       </div>
 
-      <div class="flex flex-1 overflow-hidden">
+      <div class="ash-bpmn-body">
         <%!-- Canvas area --%>
-        <div class="flex-1 flex flex-col overflow-hidden">
+        <div class="ash-bpmn-col">
           <%= if assigns[:import_error] do %>
-            <div class="mx-4 mt-4 px-4 py-3 rounded-lg border border-amber-300 bg-amber-50 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
+            <div class="ash-bpmn-callout ash-bpmn-callout--warn">
               This version has no diagram to display — the event trail and
               token table still tell the instance's story.
-              <span class="block mt-1 text-xs opacity-70">{assigns.import_error}</span>
+              <span class="ash-bpmn-callout__detail">{assigns.import_error}</span>
             </div>
           <% end %>
           <%!-- phx-update="ignore" for the same reason as the designer: the
@@ -268,73 +265,70 @@ defmodule AshBpmn.Web.ViewerLive do
                each patch would otherwise destroy the rendered diagram. --%>
           <div
             id="ash-bpmn-viewer"
-            class="flex-1 px-4 py-4"
+            class="ash-bpmn-canvas-pane"
             phx-hook="AshBpmnViewer"
             phx-update="ignore"
             data-xml={assigns.xml}
           >
-            <div class="ash-bpmn-canvas h-[32rem] w-full border border-zinc-300 dark:border-zinc-700 rounded-lg overflow-hidden">
+            <div class="ash-bpmn-canvas ash-bpmn-canvas-frame">
             </div>
           </div>
         </div>
 
         <%!-- Side panels --%>
-        <div class="w-72 border-l border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 overflow-y-auto">
+        <div class="ash-bpmn-panel">
           <%!-- Tokens --%>
-          <div class="border-b border-zinc-200 dark:border-zinc-700">
-            <h3 class="px-4 py-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
+          <div class="ash-bpmn-side-section">
+            <h3 class="ash-bpmn-side-title">
               Tokens
             </h3>
-            <div id="ash-bpmn-tokens" class="px-4 pb-2">
+            <div id="ash-bpmn-tokens" class="ash-bpmn-side-list">
               <%= for token <- assigns.tokens do %>
-                <div class="flex items-center justify-between py-1 text-xs">
-                  <span class="text-zinc-700 dark:text-zinc-300">{token.node_id}</span>
-                  <span class={[
-                    "px-1.5 py-0.5 rounded text-xs",
-                    token_status_class(token.status)
-                  ]}>
+                <div class="ash-bpmn-side-row ash-bpmn-side-row--split">
+                  <span class="ash-bpmn-inline-label">{token.node_id}</span>
+                  <span class={["ash-bpmn-badge", token_status_class(token.status)]}>
                     {to_string(token.status)}
                   </span>
                 </div>
               <% end %>
               <%= if assigns.tokens == [] do %>
-                <p class="text-xs text-zinc-400 dark:text-zinc-500">No tokens</p>
+                <p class="ash-bpmn-subtle">No tokens</p>
               <% end %>
             </div>
           </div>
 
           <%!-- Tasks --%>
-          <div class="border-b border-zinc-200 dark:border-zinc-700">
-            <h3 class="px-4 py-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
+          <div class="ash-bpmn-side-section">
+            <h3 class="ash-bpmn-side-title">
               Tasks
             </h3>
-            <div id="ash-bpmn-tasks" class="px-4 pb-2">
+            <div id="ash-bpmn-tasks" class="ash-bpmn-side-list">
               <%= for task <- assigns.tasks do %>
-                <div class="py-1 text-xs">
-                  <span class="text-zinc-700 dark:text-zinc-300">{task.name}</span>
-                  <span class="ml-2 text-zinc-400 dark:text-zinc-500">{to_string(task.status)}</span>
+                <div class="ash-bpmn-side-row">
+                  <span class="ash-bpmn-inline-label">{task.name}</span>
+                  <span class="ash-bpmn-subtle">{to_string(task.status)}</span>
                 </div>
               <% end %>
               <%= if assigns.tasks == [] do %>
-                <p class="text-xs text-zinc-400 dark:text-zinc-500">No tasks</p>
+                <p class="ash-bpmn-subtle">No tasks</p>
               <% end %>
             </div>
           </div>
 
           <%!-- Events --%>
           <div>
-            <h3 class="px-4 py-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">
+            <h3 class="ash-bpmn-side-title">
               Events
             </h3>
-            <div id="ash-bpmn-events" class="px-4 pb-2">
+            <div id="ash-bpmn-events" class="ash-bpmn-side-list">
               <%= for event <- Enum.take(assigns.events, 20) do %>
-                <div class="py-1 text-xs">
-                  <span class="text-zinc-700 dark:text-zinc-300">{to_string(event.kind)}</span>
-                  <span class="ml-2 text-zinc-400 dark:text-zinc-500">{event.node_id}</span>
+                <div class="ash-bpmn-side-row">
+                  <span class="ash-bpmn-inline-label">{to_string(event.kind)}</span>
+                  <span class="ash-bpmn-subtle">{event.node_id}</span>
                 </div>
               <% end %>
               <%= if assigns.events == [] do %>
-                <p class="text-xs text-zinc-400 dark:text-zinc-500">No events</p>
+                <p class="ash-bpmn-subtle">No events</p>
               <% end %>
             </div>
           </div>
@@ -344,34 +338,25 @@ defmodule AshBpmn.Web.ViewerLive do
     """
   end
 
-  defp instance_status_class(:running),
-    do: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
+  defp instance_status_class(:running), do: "ash-bpmn-badge--info"
 
-  defp instance_status_class(:completed),
-    do: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+  defp instance_status_class(:completed), do: "ash-bpmn-badge--ok"
 
-  defp instance_status_class(:failed),
-    do: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
+  defp instance_status_class(:failed), do: "ash-bpmn-badge--danger"
 
   # Without this clause an errored instance raises FunctionClauseError the moment an operator
   # opens it -- and the compiler cannot warn, because the clauses match on atoms.
-  defp instance_status_class(:errored),
-    do: "bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300"
+  defp instance_status_class(:errored), do: "ash-bpmn-badge--warn"
 
-  defp instance_status_class(:cancelled),
-    do: "bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
+  defp instance_status_class(:cancelled), do: "ash-bpmn-badge--muted"
 
-  defp token_status_class(:active),
-    do: "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300"
+  defp token_status_class(:active), do: "ash-bpmn-badge--ok"
 
-  defp token_status_class(:executing),
-    do: "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300"
+  defp token_status_class(:executing), do: "ash-bpmn-badge--info"
 
-  defp token_status_class(:waiting),
-    do: "bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300"
+  defp token_status_class(:waiting), do: "ash-bpmn-badge--warn"
 
-  defp token_status_class(:consumed),
-    do: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+  defp token_status_class(:consumed), do: "ash-bpmn-badge--muted"
 
-  defp token_status_class(:dead), do: "bg-red-100 text-red-600 dark:bg-red-900 dark:text-red-400"
+  defp token_status_class(:dead), do: "ash-bpmn-badge--danger"
 end

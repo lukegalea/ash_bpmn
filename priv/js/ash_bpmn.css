@@ -138,6 +138,9 @@ the element's <g>, so the rules target its shape children.
   --ash-bpmn-warn-bg: #fef9c3;
   --ash-bpmn-warn-fg: #854d0e;
   --ash-bpmn-warn-text: #d97706;
+  --ash-bpmn-warn-line: #fcd34d;
+  --ash-bpmn-warn-bg-soft: #fffbeb;
+  --ash-bpmn-warn-strong: #92400e;
   --ash-bpmn-info-bg: #e0e7ff;
   --ash-bpmn-info-fg: #4338ca;
   --ash-bpmn-danger-bg: #fee2e2;
@@ -163,6 +166,9 @@ the element's <g>, so the rules target its shape children.
     --ash-bpmn-warn-bg: #713f12;
     --ash-bpmn-warn-fg: #fef08a;
     --ash-bpmn-warn-text: #fbbf24;
+    --ash-bpmn-warn-line: #b45309;
+    --ash-bpmn-warn-bg-soft: #451a03;
+    --ash-bpmn-warn-strong: #fde68a;
     --ash-bpmn-info-bg: #3730a3;
     --ash-bpmn-info-fg: #e0e7ff;
     --ash-bpmn-danger-bg: #7f1d1d;
@@ -284,6 +290,16 @@ the element's <g>, so the rules target its shape children.
   overflow: hidden;
 }
 
+/* A flex column that fills the body — the outer canvas columns. */
+.ash-bpmn-col {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* The same column carrying the canvas itself, with its breathing room. */
 .ash-bpmn-canvas-col {
   display: flex;
   flex-direction: column;
@@ -291,6 +307,13 @@ the element's <g>, so the rules target its shape children.
   min-width: 0;
   overflow: hidden;
   padding: 0 1rem 1rem;
+}
+
+/* The viewer's canvas holder: a padded block that grows, not a column. */
+.ash-bpmn-canvas-pane {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 1rem;
 }
 
 .ash-bpmn-toolbar {
@@ -416,6 +439,56 @@ the element's <g>, so the rules target its shape children.
   border: 1px solid var(--ash-bpmn-hairline);
   border-radius: 0.375rem;
   background: var(--ash-bpmn-muted-surface);
+}
+
+/* The viewer's "no diagram for this version" callout. */
+.ash-bpmn-callout--warn {
+  margin: 1rem 1rem 0;
+  padding: 0.75rem 1rem;
+  border-color: var(--ash-bpmn-warn-line);
+  background: var(--ash-bpmn-warn-bg-soft);
+  color: var(--ash-bpmn-warn-strong);
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+.ash-bpmn-callout__detail {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
+/* The viewer's token/task/event side panels. */
+.ash-bpmn-side-section {
+  border-bottom: 1px solid var(--ash-bpmn-hairline);
+}
+
+.ash-bpmn-side-title {
+  padding: 0.5rem 1rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ash-bpmn-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0;
+}
+
+.ash-bpmn-side-list {
+  padding: 0 1rem 0.5rem;
+}
+
+.ash-bpmn-side-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  font-size: 0.75rem;
+  min-width: 0;
+}
+
+.ash-bpmn-side-row--split {
+  justify-content: space-between;
 }
 
 /* Forms: label, field group, row lists. */

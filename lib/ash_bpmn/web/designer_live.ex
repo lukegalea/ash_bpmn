@@ -877,7 +877,7 @@ defmodule AshBpmn.Web.DesignerLive do
 
       <div class="ash-bpmn-body">
         <%!-- Main canvas area --%>
-        <div class="ash-bpmn-canvas-col">
+        <div class="ash-bpmn-col">
           <%!-- Errors surface: appears when the last save or publish produced
                 compile errors, clears the moment one succeeds. Paths that name
                 an element jump to it on the canvas. --%>
