@@ -109,3 +109,102 @@ the element's <g>, so the rules target its shape children.
     fill: #fee2e2 !important;
   }
 }
+
+/*
+ * LiveView chrome — toolbar buttons, task forms, error jumps.
+ *
+ * The designer/task LiveViews ride this vocabulary instead of Tailwind
+ * classes: framework markup is outside any host's Tailwind content scan,
+ * so utility classes compile to nothing there (the "bare buttons" bug).
+ * These are token-driven: hosts that define the --a2ui-* vocabulary (the
+ * ash_a2ui web components) theme the chrome without coordination, and the
+ * fallbacks keep the framework honest standalone — 2px border, hard
+ * shadow, lift on hover, press on click.
+ */
+
+.ash-bpmn-btn,
+.ash-bpmn-btn--primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font: inherit;
+  font-size: var(--a2ui-font-size-s, 0.75rem);
+  font-weight: 600;
+  line-height: 1.25;
+  padding: var(--a2ui-button-padding, 0.3rem 0.8rem);
+  cursor: pointer;
+  background: var(--a2ui-button-background, var(--a2ui-color-surface, #fff));
+  color: var(--a2ui-color-on-surface, inherit);
+  border: var(--a2ui-border-width, 2px) solid
+    var(--a2ui-button-border, var(--a2ui-color-border, #141414));
+  border-radius: var(--a2ui-border-radius, 0.375rem);
+  box-shadow: 2px 2px 0 0 var(--a2ui-color-border, #141414);
+  transition: transform 80ms ease, box-shadow 80ms ease;
+}
+
+.ash-bpmn-btn:hover,
+.ash-bpmn-btn--primary:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 0 var(--a2ui-color-border, #141414);
+}
+
+.ash-bpmn-btn:active,
+.ash-bpmn-btn--primary:active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 0 var(--a2ui-color-border, #141414);
+}
+
+.ash-bpmn-btn--primary {
+  background: var(--a2ui-color-primary, #2563eb);
+  color: var(--a2ui-color-on-primary, #fff);
+}
+
+.ash-bpmn-input {
+  font: inherit;
+  font-size: var(--a2ui-font-size-s, 0.75rem);
+  padding: 0.3rem 0.5rem;
+  flex: 1;
+  min-width: 0;
+  background: var(--a2ui-color-input, #fff);
+  color: var(--a2ui-color-on-input, inherit);
+  border: var(--a2ui-border-width, 2px) solid var(--a2ui-color-border, #141414);
+  border-radius: var(--a2ui-border-radius, 0.375rem);
+}
+
+/* Compile-error jump chips: mono, red-toned, same press vocabulary. */
+.ash-bpmn-jump {
+  font: inherit;
+  font-family: ui-monospace, monospace;
+  font-size: var(--a2ui-font-size-s, 0.75rem);
+  padding: 0.1rem 0.4rem;
+  cursor: pointer;
+  background: var(--a2ui-color-surface, #fee2e2);
+  color: #991b1b;
+  border: var(--a2ui-border-width, 2px) solid var(--a2ui-color-border, #141414);
+  border-radius: var(--a2ui-border-radius, 0.375rem);
+  box-shadow: 2px 2px 0 0 var(--a2ui-color-border, #141414);
+  transition: transform 80ms ease, box-shadow 80ms ease;
+}
+
+.ash-bpmn-jump:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 0 var(--a2ui-color-border, #141414);
+}
+
+.ash-bpmn-jump:active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 0 var(--a2ui-color-border, #141414);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ash-bpmn-btn,
+  .ash-bpmn-btn--primary,
+  .ash-bpmn-jump {
+    transition: none !important;
+  }
+  .ash-bpmn-btn:hover,
+  .ash-bpmn-btn--primary:hover,
+  .ash-bpmn-jump:hover {
+    transform: none;
+  }
+}

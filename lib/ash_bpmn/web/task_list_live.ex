@@ -288,7 +288,7 @@ defmodule AshBpmn.Web.TaskListLive do
                 type="button"
                 phx-click="claim"
                 phx-value-id={task.id}
-                class="px-3 py-1 text-xs font-medium text-white bg-emerald-600 rounded-md hover:bg-emerald-700 transition-colors"
+                class="ash-bpmn-btn ash-bpmn-btn--primary"
               >
                 Claim
               </button>
@@ -327,11 +327,11 @@ defmodule AshBpmn.Web.TaskListLive do
                 type="text"
                 name="comment"
                 placeholder="Comment"
-                class="px-2 py-1 text-xs border border-zinc-300 dark:border-zinc-600 rounded-md bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 flex-1"
+                class="ash-bpmn-input"
               />
               <button
                 type="submit"
-                class="px-3 py-1 text-xs font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700 transition-colors"
+                class="ash-bpmn-btn ash-bpmn-btn--primary"
               >
                 Complete
               </button>
@@ -344,11 +344,11 @@ defmodule AshBpmn.Web.TaskListLive do
                 type="text"
                 name="principal_id"
                 placeholder="Delegate to principal ID"
-                class="px-2 py-1 text-xs border border-zinc-300 dark:border-zinc-600 rounded-md bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 flex-1"
+                class="ash-bpmn-input"
               />
               <button
                 type="submit"
-                class="px-3 py-1 text-xs font-medium text-zinc-700 dark:text-zinc-300 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 rounded-md hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors"
+                class="ash-bpmn-btn"
               >
                 Delegate
               </button>

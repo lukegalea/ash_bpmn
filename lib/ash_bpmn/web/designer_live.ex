@@ -818,7 +818,7 @@ defmodule AshBpmn.Web.DesignerLive do
             type="button"
             id="bpmn-fit-btn"
             phx-click="fit"
-            class="px-3 py-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 rounded-md hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors"
+            class="ash-bpmn-btn"
           >
             Fit
           </button>
@@ -826,7 +826,7 @@ defmodule AshBpmn.Web.DesignerLive do
             type="button"
             id="bpmn-revert-btn"
             phx-click="revert"
-            class="px-3 py-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 rounded-md hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors"
+            class="ash-bpmn-btn"
           >
             Revert
           </button>
@@ -834,7 +834,7 @@ defmodule AshBpmn.Web.DesignerLive do
             type="button"
             id="bpmn-publish-btn"
             phx-click="publish"
-            class="px-3 py-1.5 text-xs font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700 transition-colors"
+            class="ash-bpmn-btn ash-bpmn-btn--primary"
           >
             Publish
           </button>
@@ -842,7 +842,7 @@ defmodule AshBpmn.Web.DesignerLive do
             type="button"
             id="bpmn-save-btn"
             phx-click="collect-xml"
-            class="px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 rounded-md hover:bg-emerald-700 transition-colors"
+            class="ash-bpmn-btn ash-bpmn-btn--primary"
           >
             Save
           </button>
@@ -879,7 +879,7 @@ defmodule AshBpmn.Web.DesignerLive do
                         phx-click="focus-error"
                         phx-value-path={error["path"]}
                         title="Show this element in the diagram"
-                        class="shrink-0 font-mono text-xs px-1.5 py-0.5 rounded bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200 hover:bg-red-200 dark:hover:bg-red-800 focus:outline-none focus-visible:ring-1 focus-visible:ring-red-500 transition-colors"
+                        class="ash-bpmn-jump"
                       >
                         {error["path"]}
                       </button>
@@ -963,7 +963,7 @@ defmodule AshBpmn.Web.DesignerLive do
 
                 <button
                   type="submit"
-                  class="w-full px-3 py-1.5 text-xs font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700 transition-colors mt-2"
+                  class="ash-bpmn-btn ash-bpmn-btn--primary w-full mt-2"
                 >
                   Apply
                 </button>
