@@ -13,6 +13,7 @@ defmodule AshBpmn do
   require Ash.Expr
 
   alias AshBpmn.Config
+  alias AshBpmn.FlightView
   alias AshBpmn.Runtime.{AdvanceWorker, DomainResolver, Oban, Routing}
   alias AshBpmn.Scope
 
@@ -127,6 +128,8 @@ defmodule AshBpmn do
             },
             Scope.engine(scope)
           )
+
+        FlightView.token_moved(instance, token)
 
         # Record instance_started event
         resources.process_event.create!(
@@ -567,7 +570,8 @@ defmodule AshBpmn do
       |> Ash.read!(Scope.engine(scope))
 
     Enum.each(live_tokens, fn token ->
-      resources.token.kill!(token, Scope.engine(scope))
+      killed = resources.token.kill!(token, Scope.engine(scope))
+      FlightView.token_moved(instance, killed)
     end)
 
     open_tasks =
@@ -766,6 +770,7 @@ defmodule AshBpmn do
 
     Enum.each(dead_tokens, fn token ->
       reactivated = resources.token.reactivate!(token, Scope.engine(scope))
+      FlightView.token_moved(instance, reactivated)
 
       Oban.insert(
         AdvanceWorker,
@@ -854,6 +859,8 @@ defmodule AshBpmn do
         |> Ash.Query.for_read(:read)
         |> Ash.Query.filter(id == ^task.instance_id)
         |> Ash.read_one!(Scope.engine(scope))
+
+      FlightView.token_moved(instance, token)
 
       definition =
         AshBpmn.DefinitionLoader.load!(
@@ -953,7 +960,8 @@ defmodule AshBpmn do
       if join_info do
         handle_join(resources, instance, token, graph, next_node_id, join_info, outcome, scope)
       else
-        consume_token!(resources, token, scope)
+        consumed = consume_token!(resources, token, scope)
+        FlightView.token_moved(instance, consumed)
 
         new_token =
           resources.token.create!(
@@ -964,6 +972,8 @@ defmodule AshBpmn do
             },
             Scope.engine(scope)
           )
+
+        FlightView.token_moved(instance, new_token)
 
         Oban.insert(
           AshBpmn.Runtime.AdvanceWorker,
@@ -979,7 +989,8 @@ defmodule AshBpmn do
   end
 
   defp handle_join(resources, instance, token, graph, join_node_id, join_info, _outcome, scope) do
-    consume_token!(resources, token, scope)
+    consumed = consume_token!(resources, token, scope)
+    FlightView.token_moved(instance, consumed)
 
     # Count how many tokens have been consumed at this join node
     waits_for = join_info["waits_for"] || []
@@ -1043,6 +1054,8 @@ defmodule AshBpmn do
             Scope.engine(scope)
           )
 
+        FlightView.token_moved(instance, new_token)
+
         Oban.insert(
           AshBpmn.Runtime.AdvanceWorker,
           Scope.to_job_args(scope, %{
@@ -1092,6 +1105,5 @@ defmodule AshBpmn do
   # completion paths disagreed about whether consuming a token was an auditable event.
   defp consume_token!(resources, token, scope) do
     resources.token.consume!(token, Scope.engine(scope))
-    :ok
   end
 end

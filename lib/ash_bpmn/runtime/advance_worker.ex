@@ -20,6 +20,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   require Ash.Query
 
   alias AshBpmn.Config
+  alias AshBpmn.FlightView
   alias AshBpmn.Runtime.{DomainResolver, Interpreter}
   alias AshBpmn.Scope
 
@@ -64,6 +65,10 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       # 2. Claim token
       case claim_token(resources, resources.token, token, scope) do
         {:ok, claimed_token} ->
+          # The claim is movement too — a token visibly "in progress" between
+          # arriving at a node and finishing there.
+          FlightView.token_moved(instance, claimed_token)
+
           # Check max attempts before proceeding
           max = Config.max_attempts()
 
@@ -146,7 +151,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   defp handle_parallel_join(resources, graph, instance, token, join_node_id, join_info, scope) do
     # The arriving branch's token dies at the join; a single fresh token is
     # minted on the far side once every branch has arrived.
-    resources.token.kill!(token, Scope.engine(scope))
+    killed = resources.token.kill!(token, Scope.engine(scope))
+    FlightView.token_moved(instance, killed)
 
     # Record node_entered event
     resources.process_event.create!(
@@ -227,6 +233,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
             Scope.engine(scope)
           )
           |> resources.token.claim!(Scope.engine(scope))
+
+        FlightView.token_moved(instance, new_token)
 
         ctx = build_context(instance, new_token, scope)
 
@@ -324,6 +332,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         {:tokens, token_attrs_list} ->
           Enum.map(token_attrs_list, fn attrs ->
             token = resources.token.create!(attrs, Scope.engine(scope))
+            FlightView.token_moved(ctx[:instance], token)
             {attrs[:node_id], token.id}
           end)
 
@@ -349,13 +358,15 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     # Phase 2: Apply remaining effects
     Enum.each(effects, fn
       {:consume_token, true} ->
-        resources.token.consume!(ctx[:token], Scope.engine(scope))
+        consumed = resources.token.consume!(ctx[:token], Scope.engine(scope))
+        FlightView.token_moved(ctx[:instance], consumed)
 
       {:park_token, attrs} when is_map(attrs) ->
         # Was a no-op, which left the token `:executing` -- indistinguishable from a token
         # whose job is running or lost, and therefore invisible to any recovery that tells
         # those apart.
-        resources.token.park!(ctx[:token], attrs, Scope.engine(scope))
+        parked = resources.token.park!(ctx[:token], attrs, Scope.engine(scope))
+        FlightView.token_moved(ctx[:instance], parked)
 
       {:tokens, _token_attrs_list} ->
         # Already handled in phase 1
@@ -447,6 +458,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
           end)
 
         Enum.each(tokens, fn {attrs, token} ->
+          FlightView.token_moved(ctx[:instance], token)
+
           AshBpmn.Runtime.Oban.insert(
             AshBpmn.Runtime.AdvanceWorker,
             Scope.to_job_args(scope, %{
@@ -652,6 +665,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         |> Ash.Query.filter(id == ^token.instance_id)
         |> Ash.read_one!(Scope.engine(parent_scope))
 
+      FlightView.token_moved(parent, token)
+
       resources.process_event.create!(
         %{
           instance_id: parent.id,
@@ -683,7 +698,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
     case AshBpmn.Runtime.Routing.outgoing(graph, token.node_id) do
       [flow | _] ->
-        resources.token.consume!(token, Scope.engine(scope))
+        consumed = resources.token.consume!(token, Scope.engine(scope))
+        FlightView.token_moved(parent, consumed)
 
         new_token =
           resources.token.create!(
@@ -695,6 +711,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
             },
             Scope.engine(scope)
           )
+
+        FlightView.token_moved(parent, new_token)
 
         AshBpmn.Runtime.Oban.insert(
           AshBpmn.Runtime.AdvanceWorker,
@@ -834,8 +852,9 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     |> Ash.read!(Scope.engine(scope))
     |> Enum.reject(&(&1.id == current_id))
     |> Enum.map(fn token ->
-      resources.token.kill!(token, Scope.engine(scope))
-      token
+      killed = resources.token.kill!(token, Scope.engine(scope))
+      FlightView.token_moved(ctx[:instance], killed)
+      killed
     end)
   end
 

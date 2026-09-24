@@ -205,6 +205,26 @@ defmodule AshBpmn.Config do
     Application.get_env(:ash_bpmn, :oban_testing)
   end
 
+  @doc """
+  The `Phoenix.PubSub` server token movement is broadcast on, or `nil`.
+
+  `AshBpmn.FlightView` broadcasts on this server every time a token changes
+  state, which is what the live process flight view — and any per-instance side
+  panel — subscribes to. `nil` (the default) is the documented no-PubSub
+  configuration: broadcasts become no-ops and hosts poll
+  `AshBpmn.FlightView.token_positions/2` instead, which is exactly what the
+  built-in viewer LiveView already does. A configured server that is not
+  *running* is treated the same way: a viewer that misses an update can
+  re-query, so an unstarted PubSub is a reason to skip, never a crash inside an
+  engine write.
+
+      config :ash_bpmn, pubsub_server: MyApp.PubSub
+  """
+  @spec pubsub_server() :: module() | nil
+  def pubsub_server do
+    Application.get_env(:ash_bpmn, :pubsub_server)
+  end
+
   # ── Triggers extension ────────────────────────────────────────────────────
 
   @doc """

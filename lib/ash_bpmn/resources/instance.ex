@@ -242,6 +242,10 @@ defmodule AshBpmn.Resources.Instance do
             description "Restrict to instances of this process key."
           end
 
+          argument :definition_id, :uuid do
+            description "Restrict to instances pinned to this definition."
+          end
+
           argument :instance_ids, {:array, :uuid} do
             description "Restrict to these instances."
           end
@@ -350,6 +354,7 @@ defmodule AshBpmn.Resources.Instance.FilterInFlight do
     query
     |> Ash.Query.filter(status in ^(Ash.Query.get_argument(query, :statuses) || []))
     |> filter_key(Ash.Query.get_argument(query, :definition_key))
+    |> filter_definition_id(Ash.Query.get_argument(query, :definition_id))
     |> filter_ids(Ash.Query.get_argument(query, :instance_ids))
     |> filter_parent_tokens(Ash.Query.get_argument(query, :parent_token_ids))
     |> AshBpmn.Scope.engine_load(:definition)
@@ -358,6 +363,10 @@ defmodule AshBpmn.Resources.Instance.FilterInFlight do
 
   defp filter_key(query, nil), do: query
   defp filter_key(query, key), do: Ash.Query.filter(query, definition.key == ^key)
+
+  defp filter_definition_id(query, nil), do: query
+
+  defp filter_definition_id(query, id), do: Ash.Query.filter(query, definition_id == ^id)
 
   defp filter_ids(query, nil), do: query
   defp filter_ids(query, ids) when is_list(ids), do: Ash.Query.filter(query, id in ^ids)

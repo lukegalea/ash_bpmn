@@ -127,6 +127,7 @@ defmodule AshBpmn.MixProject do
         "documentation/topics/running-processes.md",
         "documentation/topics/assignment-and-maker-checker.md",
         "documentation/topics/authorization-and-tenancy.md",
+        "documentation/topics/flight-view.md",
         "documentation/topics/what-it-refuses.md",
         "CHANGELOG.md"
       ],

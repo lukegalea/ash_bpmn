@@ -228,6 +228,8 @@ node dev/screenshots/capture.mjs
 - [Authorization and tenancy](documentation/topics/authorization-and-tenancy.md)
   — the engine's own authority as one named policy, the tenant through jobs, and
   sitting a work item on your base resource.
+- [The flight view](documentation/topics/flight-view.md) — the live process
+  view: mermaid from a definition, token positions, movement on PubSub.
 - [What it refuses](documentation/topics/what-it-refuses.md) — the compile-time
   rejections, and the features deliberately absent.
 

@@ -23,6 +23,12 @@ config :ash_bpmn,
   queue: :bpmn,
   max_attempts: 5
 
+# Flight-view broadcasts. The tests that subscribe start this PubSub themselves
+# (web_conn_case, and the flight view tests); every other test runs with no
+# PubSub process alive, which is the path `AshBpmn.FlightView.token_moved/2`
+# skips on — the suite exercises the no-PubSub configuration on every run.
+config :ash_bpmn, pubsub_server: AshBpmn.Web.TestPubSub
+
 # Order matters. `AshBpmn.Runtime.DomainResolver.resolve!/1` falls back to the
 # first domain here that has all six resource kinds when a caller does not name
 # one, so the tenant-scoped domain goes last: it is reached by name, from the

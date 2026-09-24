@@ -16,6 +16,21 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Features:
 
+- **The live process flight view.** `AshBpmn.FlightView` gives hosts the three
+  pieces a live process view is built from: `mermaid/2` renders a published
+  definition as a mermaid flowchart whose node ids are the definition's own
+  element ids (so overlays positioned by mermaid node id land on the element
+  the token is standing on); `token_positions/2` reports one entry per live
+  token across a definition's instances, carrying the node id, the token
+  status, and the instance's subject passthrough (`subject_type`/`subject_id`
+  — join keys the host resolves into records itself); and the subscription
+  contract broadcasts every token transition — create, claim, park, wake,
+  consume, kill, reactivate — on `bpmn:tokens:definition:<id>` and
+  `bpmn:tokens:instance:<id>` PubSub topics after the write commits. Set
+  `config :ash_bpmn, pubsub_server: MyApp.PubSub`; with none configured the
+  broadcasts are no-ops and the documented fallback is polling the query, which
+  is what the built-in viewer LiveView already does. See
+  [the flight view](documentation/topics/flight-view.md).
 - **Authorization and tenancy are wired, not merely declared.** The engine's own
   writes carry `AshBpmn.Scope.engine/2` — actor, tenant, and a private context
   flag — instead of `authorize?: false` at ninety call sites, and every generated

@@ -17,6 +17,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
   require Ash.Query
 
   alias AshBpmn.Config
+  alias AshBpmn.FlightView
   alias AshBpmn.Runtime.DomainResolver
   alias AshBpmn.Runtime.Routing
   alias AshBpmn.Scope
@@ -179,6 +180,8 @@ defmodule AshBpmn.Runtime.TimerWorker do
               |> Ash.Query.filter(id == ^task.instance_id)
               |> Ash.read_one!(Scope.engine(scope))
 
+            FlightView.token_moved(instance, token)
+
             definition =
               AshBpmn.DefinitionLoader.load!(
                 resources.definition,
@@ -218,7 +221,8 @@ defmodule AshBpmn.Runtime.TimerWorker do
                 next_node_id = first_flow["to"]
 
                 # Consume the executing token and create a new one
-                resources.token.consume!(token, Scope.engine(scope))
+                consumed = resources.token.consume!(token, Scope.engine(scope))
+                FlightView.token_moved(instance, consumed)
 
                 new_token =
                   resources.token.create!(
@@ -229,6 +233,8 @@ defmodule AshBpmn.Runtime.TimerWorker do
                     },
                     Scope.engine(scope)
                   )
+
+                FlightView.token_moved(instance, new_token)
 
                 # Enqueue advance for the new token
                 AshBpmn.Runtime.Oban.insert(

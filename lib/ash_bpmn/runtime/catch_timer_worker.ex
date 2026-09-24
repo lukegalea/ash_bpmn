@@ -26,6 +26,7 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
   require Ash.Query
 
   alias AshBpmn.Config
+  alias AshBpmn.FlightView
   alias AshBpmn.Runtime.DomainResolver
   alias AshBpmn.Runtime.Routing
   alias AshBpmn.Scope
@@ -65,6 +66,8 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(id == ^token.instance_id)
       |> Ash.read_one!(Scope.engine(scope))
+
+    FlightView.token_moved(instance, token)
 
     definition =
       AshBpmn.DefinitionLoader.load!(
@@ -108,7 +111,8 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
     # outgoing flows is an implicit gateway, and the compiler's business, not this worker's.
     case Routing.outgoing(graph, node_id) do
       [flow | _] ->
-        resources.token.consume!(token, Scope.engine(scope))
+        consumed = resources.token.consume!(token, Scope.engine(scope))
+        FlightView.token_moved(instance, consumed)
 
         new_token =
           resources.token.create!(
@@ -120,6 +124,8 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
             },
             Scope.engine(scope)
           )
+
+        FlightView.token_moved(instance, new_token)
 
         AshBpmn.Runtime.Oban.insert(
           AshBpmn.Runtime.AdvanceWorker,

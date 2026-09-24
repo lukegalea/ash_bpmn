@@ -32,6 +32,7 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
   require Ash.Query
 
   alias AshBpmn.Config
+  alias AshBpmn.FlightView
   alias AshBpmn.Runtime.DomainResolver
   alias AshBpmn.Scope
 
@@ -103,6 +104,8 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
         Scope.engine(scope)
       )
 
+    FlightView.token_moved(load_instance(resources, token.instance_id, scope), new_token)
+
     AshBpmn.Runtime.Oban.insert(
       AshBpmn.Runtime.AdvanceWorker,
       Scope.to_job_args(scope, %{
@@ -120,6 +123,7 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
 
     with :ok <- cancel_task(resources, task, scope),
          {:ok, token} <- resources.token.claim_waiting(token, Scope.engine(scope)) do
+      FlightView.token_moved(load_instance(resources, token.instance_id, scope), token)
       route(resources, token, task, args, scope)
     else
       # Both losses are ordinary. `:lost_to_completion` means somebody decided the task
@@ -175,7 +179,7 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
       Scope.engine(scope)
     )
 
-    resources.token.consume!(token, Scope.engine(scope))
+    consumed = resources.token.consume!(token, Scope.engine(scope))
 
     new_token =
       resources.token.create!(
@@ -188,6 +192,10 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
         Scope.engine(scope)
       )
 
+    instance = load_instance(resources, token.instance_id, scope)
+    FlightView.token_moved(instance, consumed)
+    FlightView.token_moved(instance, new_token)
+
     AshBpmn.Runtime.Oban.insert(
       AshBpmn.Runtime.AdvanceWorker,
       Scope.to_job_args(scope, %{
@@ -198,6 +206,16 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
     )
 
     {:ok, :interrupted}
+  end
+
+  # The interrupt path works from the token, which carries only `instance_id` — but the
+  # broadcast payload names the definition and the subject, so the instance is read once per
+  # site that needs it. These are deadline paths, not hot paths.
+  defp load_instance(resources, instance_id, scope) do
+    resources.instance
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(id == ^instance_id)
+    |> Ash.read_one!(Scope.engine(scope))
   end
 
   defp record(_resources, token, node_id, kind, data) do

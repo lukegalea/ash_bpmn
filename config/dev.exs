@@ -24,7 +24,10 @@ config :ash_bpmn,
   action_invoker: AshBpmnDev.Invoker,
   ash_domains: [AshBpmnDev.Bpmn],
   queue: :bpmn,
-  max_attempts: 5
+  max_attempts: 5,
+  # Token movement broadcasts on the demo's PubSub, so a flight view LiveView
+  # subscribes and moves its markers in real time.
+  pubsub_server: AshBpmnDev.PubSub
 
 # The demo has no Oban instance, so the runtime shim runs advance jobs inline
 # and parks timers in ETS. Real hosts run real Oban; this keeps `mix
