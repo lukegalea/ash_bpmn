@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   id="Definitions_ash_call_dotted"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_ash_call_dotted" name="ash:call dotted promote" isExecutable="true">
+
+    <bpmn2:startEvent id="Start">
+      <bpmn2:outgoing>F_start</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <!-- The outputs are nested; the promote names are dotted paths into them.
+         The `shadow` signal points at a path that does not exist and is not
+         required, so it promotes nothing and disturbs nothing. -->
+    <bpmn2:serviceTask id="AssessNested" name="Assess via nested result">
+      <bpmn2:extensionElements>
+        <ash:call ref="AshBpmn.Test.RuntimeCallablesDomain.assess_nested"/>
+        <ash:promote>
+          <ash:signal name="probability" from="urgent.probability"/>
+          <ash:signal name="verdict" from="urgent.verdict"/>
+          <ash:signal name="shadow" from="urgent.missing"/>
+        </ash:promote>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_start</bpmn2:incoming>
+      <bpmn2:outgoing>F_assessed</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="EndReviewed">
+      <bpmn2:extensionElements><ash:taskConfig outcome="reviewed"/></bpmn2:extensionElements>
+      <bpmn2:incoming>F_assessed</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F_start" sourceRef="Start" targetRef="AssessNested"/>
+    <bpmn2:sequenceFlow id="F_assessed" sourceRef="AssessNested" targetRef="EndReviewed"/>
+  </bpmn2:process>
+</bpmn2:definitions>

@@ -65,6 +65,15 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Fixes:
 
+- A service task or decision whose callee returns a struct no longer crashes
+  promotion with `Protocol.UndefinedError`. Results are normalised to plain maps
+  before promotion — recursively, leaving `Decimal`/`Date`/`DateTime` alone — and
+  `ash:promote` names may be dotted paths (`from="urgent.probability"`), resolved
+  through string and then atom keys at each level. Promoting a non-scalar now
+  fails with an error naming the node, the path and the value's type, rather than
+  raising. The gate is one module, `AshBpmn.Runtime.Promotion`, shared by every
+  node kind that promotes; its atom-key fallback also no longer reports an
+  output of `false` or `nil` as absent.
 - `AshBpmn.Runtime.DomainResolver.resolve!/1` takes the domain a job names.
   Workers used to search the configured domains and take the first with all six
   resource kinds, which in an application with two BPMN domains advanced the

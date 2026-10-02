@@ -56,12 +56,27 @@ end
 # `:ash_domains` config, which is what makes its refs resolvable to the compiler
 # and the engine.
 
+defmodule AshBpmn.Test.Assessment do
+  @moduledoc """
+  A struct-shaped callable result, for the promotion tests: a callee that hands
+  back a struct, not a map, is the exact shape promotion used to crash on.
+  """
+
+  defstruct [:tier, :score]
+end
+
 defmodule AshBpmn.Test.CallablesRuntimeResource do
   @moduledoc """
   Generic callables for the ash:call engine tests. No data layer, no tables.
 
   * `assess_tier` — returns `{"tier" => "high" | "low"}` from an `amount` argument,
     so a diagram can promote the output onto the token and route on it.
+  * `assess_struct` — returns an `%AshBpmn.Test.Assessment{}` struct, for the
+    struct-result promotion tests.
+  * `assess_nested` — returns nested outputs (an atom key over string keys, with
+    `Decimal` leaves), for the dotted-path promotion tests.
+  * `assess_deep` — returns nested outputs where the interesting path holds a
+    list, for the non-scalar refusal tests.
   * `record_inputs` — records the arguments it received, and the context it was
     called under, into `AshBpmn.Test.CallablesRecorder`.
   * `always_fails` — returns an error tuple, for the failure path.
@@ -80,6 +95,24 @@ defmodule AshBpmn.Test.CallablesRuntimeResource do
           if Decimal.compare(amount, Decimal.new(1000)) == :gt, do: "high", else: "low"
 
         {:ok, %{"tier" => tier}}
+      end
+    end
+
+    action :assess_struct, :map do
+      run fn _input, _context ->
+        {:ok, %AshBpmn.Test.Assessment{tier: "high", score: 9}}
+      end
+    end
+
+    action :assess_nested, :map do
+      run fn _input, _context ->
+        {:ok, %{urgent: %{"probability" => Decimal.new("0.93"), "verdict" => "escalate"}}}
+      end
+    end
+
+    action :assess_deep, :map do
+      run fn _input, _context ->
+        {:ok, %{"report" => %{"findings" => [1, 2, 3], "verdict" => "complex"}}}
       end
     end
 
@@ -182,6 +215,9 @@ defmodule AshBpmn.Test.RuntimeCallablesDomain do
       description "Assesses the risk tier from the amount"
     end
 
+    callable(:assess_struct, AshBpmn.Test.CallablesRuntimeResource, :assess_struct)
+    callable(:assess_nested, AshBpmn.Test.CallablesRuntimeResource, :assess_nested)
+    callable(:assess_deep, AshBpmn.Test.CallablesRuntimeResource, :assess_deep)
     callable(:record_inputs, AshBpmn.Test.CallablesRuntimeResource, :record_inputs)
     callable(:always_fails, AshBpmn.Test.CallablesRuntimeResource, :always_fails)
     callable(:enroll, AshBpmn.Test.CallablesEnrollee, :enroll)

@@ -1572,7 +1572,10 @@ defmodule AshBpmn.Compiler.Graph do
              # name, which is the common case; `from` exists because the name a decision gives
              # an output and the name a process wants to route on are different vocabularies
              # owned by different people, and forcing them to coincide makes one of them
-             # rename to suit the other.
+             # rename to suit the other. Either may be a dotted path
+             # ("urgent.probability"), resolved one segment at a time into nested
+             # outputs, through string and then atom keys at each level; the
+             # runtime gate (`AshBpmn.Runtime.Promotion`) does the walking.
              "from" => (Xml.element_attr(signal, "from") || name) |> String.trim(),
              "required" => Xml.element_attr(signal, "required") in ["true", "1"]
            }

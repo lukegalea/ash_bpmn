@@ -30,6 +30,7 @@ defmodule AshBpmn.Runtime.Interpreter do
   on every run will do both twice on redelivery; make it idempotent in the action.
   """
 
+  alias AshBpmn.Runtime.Promotion
   alias AshBpmn.Runtime.Routing
 
   @doc """
@@ -246,7 +247,8 @@ defmodule AshBpmn.Runtime.Interpreter do
          {:ok, raw} <-
            invoke_decision(resolver, ref, inputs, ctx, node_id, decision["name"]),
          {:ok, result} <- AshBpmn.DecisionResolver.normalize_result(raw),
-         {:ok, routing} <- promoted_signals(node["promote"] || [], result.outputs, node_id) do
+         {:ok, routing} <-
+           Promotion.promote(node["promote"] || [], result.outputs, node_id) do
       outgoing = find_outgoing_flows(graph, node_id)
 
       # Merged over what this token already carried, so a chain of decision nodes accumulates
@@ -324,68 +326,9 @@ defmodule AshBpmn.Runtime.Interpreter do
   # A token carries routing, not business data, and this is where that stops being a
   # convention and becomes a check. Only declared signals are promoted; each must be a scalar;
   # names and values are length-bounded. A decision that hands back a nested map does not get
-  # to put it on the token.
-  @max_signal_name_bytes 64
-  @max_signal_value_bytes 256
-
-  defp promoted_signals(promote, outputs, node_id) do
-    Enum.reduce_while(promote, {:ok, %{}}, fn signal, {:ok, acc} ->
-      name = signal["name"]
-      # Look the signal up by string key, and fall back to scanning for an equivalent atom key
-      # rather than calling `String.to_atom/1` on it. The name comes out of tenant-authored
-      # BPMN XML, and creating an uncollectable atom from that is the exact defect the old
-      # expression language shipped with.
-      value = fetch_output(outputs, signal["from"] || name)
-
-      cond do
-        value == :__absent__ and signal["required"] ->
-          {:halt, {:error, "node #{node_id}: decision did not return required signal '#{name}'"}}
-
-        value == :__absent__ ->
-          {:cont, {:ok, acc}}
-
-        not scalar?(value) ->
-          {:halt,
-           {:error,
-            "node #{node_id}: signal '#{name}' is #{inspect(value, limit: 3)}, which is not a scalar; " <>
-              "a token carries routing, not business data"}}
-
-        byte_size(name) > @max_signal_name_bytes ->
-          {:halt, {:error, "node #{node_id}: signal name '#{name}' is too long"}}
-
-        byte_size(to_string_value(value)) > @max_signal_value_bytes ->
-          {:halt, {:error, "node #{node_id}: signal '#{name}' has an over-long value"}}
-
-        true ->
-          {:cont, {:ok, Map.put(acc, name, to_string_value(value))}}
-      end
-    end)
-  end
-
-  defp fetch_output(outputs, name) do
-    case Map.fetch(outputs, name) do
-      {:ok, value} ->
-        value
-
-      :error ->
-        Enum.find_value(outputs, :__absent__, fn {key, value} ->
-          if is_atom(key) and Atom.to_string(key) == name, do: value
-        end)
-    end
-  end
-
-  defp scalar?(value),
-    do:
-      is_binary(value) or is_number(value) or is_boolean(value) or is_nil(value) or
-        is_struct(value, Decimal) or is_atom(value)
-
-  # Stored as strings so the token's jsonb round-trips to exactly what FEEL will compare
-  # against, rather than to whatever the JSON encoder chose.
-  defp to_string_value(nil), do: ""
-  defp to_string_value(value) when is_boolean(value), do: to_string(value)
-  defp to_string_value(%Decimal{} = value), do: Decimal.to_string(value, :normal)
-  defp to_string_value(value) when is_binary(value), do: value
-  defp to_string_value(value), do: to_string(value)
+  # to put it on the token. The gate itself — struct normalisation, dotted-path lookup, the
+  # scalar check and its error — is `AshBpmn.Runtime.Promotion`, shared by every node kind
+  # that promotes.
 
   defp current_routing(ctx) do
     cond do
@@ -438,10 +381,11 @@ defmodule AshBpmn.Runtime.Interpreter do
          {:ok, result} <- invoke_callable(callable, inputs, ctx) do
       # A map result is the callee's outputs; only declared, scalar signals may be
       # promoted onto the token, under exactly the gating a decision result goes
-      # through. Any other result promotes nothing.
+      # through. A struct result is a map too, and the gate normalises it to a
+      # plain map before looking anything up. Any other result promotes nothing.
       outputs = if is_map(result), do: result, else: %{}
 
-      case promoted_signals(node["promote"] || [], outputs, node_id) do
+      case Promotion.promote(node["promote"] || [], outputs, node_id) do
         {:ok, routing} ->
           ctx = Map.put(ctx, :routing_override, Map.merge(current_routing(ctx), routing))
           {:ok, service_task_effects(graph, node_id, ref, inputs, routing, ctx)}
@@ -577,9 +521,11 @@ defmodule AshBpmn.Runtime.Interpreter do
 
         # A map result is the action's outputs; only declared, scalar signals may be
         # promoted onto the token, under exactly the gating a decision result goes
-        # through. `:ok`, or `{:ok, thing}` where thing is not a map, promotes nothing.
+        # through. A struct result is a map too, and the gate normalises it to a
+        # plain map before looking anything up. `:ok`, or `{:ok, thing}` where thing
+        # is not a map, promotes nothing.
         {:ok, result} when is_map(result) ->
-          case promoted_signals(node["promote"] || [], result, node_id) do
+          case Promotion.promote(node["promote"] || [], result, node_id) do
             {:ok, routing} ->
               ctx = Map.put(ctx, :routing_override, Map.merge(current_routing(ctx), routing))
               {:ok, service_task_effects(graph, node_id, action, inputs, routing, ctx)}

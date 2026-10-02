@@ -233,10 +233,17 @@ The compiler rejects, each with the offending element's id in the error:
   every non-process caller bypasses.
 - **Promoting anything but declared scalars.** Only signals named in `ash:promote`
   reach the token, each must be a scalar, and names and values are length-bounded.
-  A decision's full output goes to the host's own record and to a
-  `:decision_evaluated` event. This is what keeps "tokens carry routing, not
-  business data" a checkable property rather than a request — a free-form map on
-  the token is precisely how that rule erodes.
+  A `from` may be a dotted path into nested outputs
+  (`from="urgent.probability"`), resolved through string and then atom keys at
+  each level, and a callee that returns a struct has it normalised to a plain
+  map first — recursively, leaving value structs that mean something whole
+  (`Decimal`, `Date`, `DateTime`) as they are. A non-scalar is refused with an
+  error naming the node, the path and the value's type. A decision's full output
+  goes to the host's own record and to a `:decision_evaluated` event. This is
+  what keeps "tokens carry routing, not business data" a checkable property
+  rather than a request — a free-form map on the token is precisely how that
+  rule erodes. The gate itself is `AshBpmn.Runtime.Promotion`, one module shared
+  by every node kind that promotes.
 - **`binding="pinned"` without a version.** It reads as "this will not move under
   me" and would behave as "latest". Refusing it is cheaper than explaining it after
   an incident.

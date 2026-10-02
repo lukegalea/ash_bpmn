@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   id="Definitions_ash_call_struct"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_ash_call_struct" name="ash:call struct result" isExecutable="true">
+
+    <bpmn2:startEvent id="Start">
+      <bpmn2:outgoing>F_start</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <!-- The callable hands back a struct, not a map. Promotion must see through
+         it to the tier, or the token has nowhere to route from. -->
+    <bpmn2:serviceTask id="AssessStruct" name="Assess via struct result">
+      <bpmn2:extensionElements>
+        <ash:call ref="AshBpmn.Test.RuntimeCallablesDomain.assess_struct"/>
+        <ash:promote>
+          <ash:signal name="tier" from="tier" required="true"/>
+        </ash:promote>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_start</bpmn2:incoming>
+      <bpmn2:outgoing>F_assessed</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:exclusiveGateway id="Route" default="F_low">
+      <bpmn2:incoming>F_assessed</bpmn2:incoming>
+      <bpmn2:outgoing>F_high</bpmn2:outgoing>
+      <bpmn2:outgoing>F_low</bpmn2:outgoing>
+    </bpmn2:exclusiveGateway>
+
+    <bpmn2:endEvent id="EndHigh">
+      <bpmn2:extensionElements><ash:taskConfig outcome="escalated"/></bpmn2:extensionElements>
+      <bpmn2:incoming>F_high</bpmn2:incoming>
+    </bpmn2:endEvent>
+    <bpmn2:endEvent id="EndLow">
+      <bpmn2:extensionElements><ash:taskConfig outcome="approved"/></bpmn2:extensionElements>
+      <bpmn2:incoming>F_low</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F_start" sourceRef="Start" targetRef="AssessStruct"/>
+    <bpmn2:sequenceFlow id="F_assessed" sourceRef="AssessStruct" targetRef="Route"/>
+    <bpmn2:sequenceFlow id="F_high" sourceRef="Route" targetRef="EndHigh">
+      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression"
+        language="feel">routing.tier = "high"</bpmn2:conditionExpression>
+    </bpmn2:sequenceFlow>
+    <bpmn2:sequenceFlow id="F_low" sourceRef="Route" targetRef="EndLow"/>
+  </bpmn2:process>
+</bpmn2:definitions>

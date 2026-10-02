@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   id="Definitions_ash_call_nonscalar"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_ash_call_nonscalar" name="ash:call non-scalar promote" isExecutable="true">
+
+    <bpmn2:startEvent id="Start">
+      <bpmn2:outgoing>F_start</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <!-- The path exists but holds a list. A token carries routing, not business
+         data: the refusal names the node, the path and the value's type. -->
+    <bpmn2:serviceTask id="AssessDeep" name="Assess via deep result">
+      <bpmn2:extensionElements>
+        <ash:call ref="AshBpmn.Test.RuntimeCallablesDomain.assess_deep"/>
+        <ash:promote>
+          <ash:signal name="findings" from="report.findings"/>
+        </ash:promote>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_start</bpmn2:incoming>
+      <bpmn2:outgoing>F_assessed</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="EndReviewed">
+      <bpmn2:extensionElements><ash:taskConfig outcome="reviewed"/></bpmn2:extensionElements>
+      <bpmn2:incoming>F_assessed</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F_start" sourceRef="Start" targetRef="AssessDeep"/>
+    <bpmn2:sequenceFlow id="F_assessed" sourceRef="AssessDeep" targetRef="EndReviewed"/>
+  </bpmn2:process>
+</bpmn2:definitions>
