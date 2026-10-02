@@ -261,6 +261,8 @@ against Postgres 16. Changes to the LiveViews or the designer hook should be
 checked in the `dev/` app — the test suite exercises the LiveView contracts, but
 only a browser exercises bpmn-js — and the affected screenshots regenerated.
 
+Agents: read [AGENTS.md](AGENTS.md) before you change this repository. It links the agent constitution (`AGENT_PRINCIPLES.md`).
+
 ## License
 
 MIT. The embedded designer is [bpmn-js], which carries the bpmn.io licence: keep
