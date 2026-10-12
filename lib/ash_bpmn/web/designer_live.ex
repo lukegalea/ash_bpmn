@@ -136,6 +136,9 @@ defmodule AshBpmn.Web.DesignerLive do
   Form-driven (testable without JS):
     * `save_xml_form` — hidden form submit carrying XML
     * `publish_form` — hidden form submit that saves then publishes
+
+  Discard (`discard`, the "Discard draft" button) deletes the stored draft through the
+  definition's `:discard` action and falls back to what the key shows without one.
   """
 
   # `use`, not `import`: the properties panel declares attrs on its function
@@ -354,6 +357,11 @@ defmodule AshBpmn.Web.DesignerLive do
         |> assign(:dirty, false)
         |> put_flash(:info, "Draft created from the baseline. Publish it to switch over.")
         |> push_event("load_xml", %{xml: socket.assigns.xml})
+      end
+
+      @impl true
+      def handle_event("discard", _params, socket) do
+        {:noreply, ash_bpmn_discard(socket)}
       end
 
       @impl true
@@ -629,6 +637,35 @@ defmodule AshBpmn.Web.DesignerLive do
             |> put_flash(:error, Exception.message(error))
         end
       end
+
+      # Abandons the draft and falls back to whatever the key shows without one: the scope's
+      # published definition, the baseline, or the template. Same authority as a save -- the
+      # same actor, through the same scope -- and the action itself refuses anything that is
+      # not a draft.
+      defp ash_bpmn_discard(%{assigns: %{definition: %{status: :draft} = draft}} = socket) do
+        {:ok, %{definition: definition_mod}} =
+          AshBpmn.Resources.for_domain(@ash_bpmn_designer_domain)
+
+        opts = AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
+
+        case definition_mod.discard(draft, opts) do
+          {:error, error} ->
+            put_flash(socket, :error, Exception.message(error))
+
+          _discarded ->
+            socket = load_definition(socket)
+
+            socket
+            |> assign(:dirty, false)
+            |> assign(:selected, nil)
+            |> put_flash(:info, "Draft discarded.")
+            |> push_event("load_xml", %{xml: socket.assigns.xml})
+            |> push_event("highlight", %{node_ids: []})
+        end
+      end
+
+      defp ash_bpmn_discard(socket),
+        do: put_flash(socket, :error, "There is no draft to discard.")
 
       # Nothing to publish: a read-only baseline, or a save that did not produce a draft
       # (its flash already says why).
@@ -1085,6 +1122,18 @@ defmodule AshBpmn.Web.DesignerLive do
               Customize
             </button>
           <% else %>
+            <%!-- Only a stored draft can be discarded; a published definition is the record
+                  of what ran and is retired, never deleted. --%>
+            <button
+              :if={assigns.origin == :draft and assigns.definition.status == :draft}
+              type="button"
+              id="bpmn-discard-btn"
+              phx-click="discard"
+              data-confirm="Discard this draft? Unpublished changes are lost."
+              class="ash-bpmn-btn"
+            >
+              Discard draft
+            </button>
             <button
               type="button"
               id="bpmn-revert-btn"

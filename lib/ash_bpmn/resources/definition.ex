@@ -28,6 +28,8 @@ defmodule AshBpmn.Resources.Definition do
     * `publish!/1` — draft → published (errors must be `[]`).
     * `retire!/1` — published → retired.
     * `save_xml!/2` — update XML on a draft definition.
+    * `discard!/1` — delete a draft. Refuses anything that is not a draft, at the
+      database as well as in validation.
     * `by_key_version/2` — fetch by identity (returns single or `nil`).
     * `latest_published/1` — returns list (callers take `hd/1`).
 
@@ -188,6 +190,22 @@ defmodule AshBpmn.Resources.Definition do
           validate AshBpmn.Resources.Definition.StatusIsPublished
           change set_attribute(:status, :retired)
         end
+
+        # Abandoning a draft. A published or retired row is never removed: instances pin
+        # it for life and it is the record of what ran. Three layers, each for a reason:
+        # the validation gives the readable error for a struct that says it is not a
+        # draft; `StillDraft` re-reads the row under a lock inside the transaction, so a
+        # struct that was a draft when loaded and has been published since is refused
+        # *before* anything runs (an event-logging wrapper around the destroy would
+        # otherwise record a discard that deleted nothing); and the filter keeps the
+        # DELETE itself from ever matching a non-draft row.
+        destroy :discard do
+          require_atomic? false
+
+          validate AshBpmn.Resources.Definition.StatusIsDraft
+          change AshBpmn.Resources.Definition.StillDraft
+          change filter(status: :draft)
+        end
       end
 
       code_interface do
@@ -195,6 +213,7 @@ defmodule AshBpmn.Resources.Definition do
         define :publish, action: :publish
         define :retire, action: :retire
         define :save_xml, action: :save_xml, args: [:xml]
+        define :discard, action: :discard
         define :by_key_version, action: :read, get_by: [:key, :version], get?: true
         define :latest_published, action: :latest_published, args: [:key]
       end
@@ -367,6 +386,49 @@ defmodule AshBpmn.Resources.Definition.StatusIsDraft do
       :ok
     else
       {:error, field: :status, message: "can only perform this action on a draft definition"}
+    end
+  end
+end
+
+defmodule AshBpmn.Resources.Definition.StillDraft do
+  @moduledoc false
+
+  # Re-reads the row being discarded, locked, inside the action's transaction, and refuses
+  # unless it is still a draft. See the note on the `:discard` action.
+
+  use Ash.Resource.Change
+
+  require Ash.Query
+
+  @impl true
+  def change(changeset, _opts, _context) do
+    Ash.Changeset.before_action(changeset, &still_draft/1)
+  end
+
+  defp still_draft(changeset) do
+    id = changeset.data.id
+    opts = AshBpmn.Scope.engine(AshBpmn.Scope.from_changeset(changeset))
+
+    changeset.resource
+    |> Ash.Query.for_read(:read, %{}, opts)
+    |> Ash.Query.filter(id == ^id)
+    |> Ash.Query.lock(:for_update)
+    |> Ash.read_one(opts)
+    |> case do
+      {:ok, %{status: :draft}} ->
+        changeset
+
+      {:ok, nil} ->
+        Ash.Changeset.add_error(changeset, field: :status, message: "the draft no longer exists")
+
+      {:ok, _not_a_draft} ->
+        Ash.Changeset.add_error(changeset,
+          field: :status,
+          message: "can only perform this action on a draft definition"
+        )
+
+      {:error, error} ->
+        Ash.Changeset.add_error(changeset, error)
     end
   end
 end
