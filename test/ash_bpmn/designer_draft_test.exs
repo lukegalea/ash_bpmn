@@ -5,8 +5,8 @@ defmodule AshBpmn.DesignerDraftTest do
   @moduledoc """
   Losing the race to create the designer's draft.
 
-  Opening the designer on a key with no draft creates one, and that was a read followed by a
-  create. Two people opening the same new process at the same moment both read nil and both
+  The first save on a key with no draft creates one, and that is a read followed by a
+  create. Two people saving the same new process at the same moment both read nil and both
   insert; the partial unique index on `(key, status) WHERE status = 'draft'` rejects the
   second, and the loser got a crashed LiveView on a page that had done nothing wrong.
   """

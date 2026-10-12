@@ -83,6 +83,26 @@ defmodule AshBpmn.Web.FailingCatalogueDesignerWrapper do
     decision_editor: {AshBpmn.Test.FailingCatalogues, :decision_editor, []}
 end
 
+defmodule AshBpmn.Web.BaselineDesignerWrapper do
+  @moduledoc false
+
+  use AshBpmn.Web.DesignerLive,
+    domain: AshBpmn.Test.Domain,
+    process: "web_test",
+    baseline: {AshBpmn.Test.Baselines, :baseline, []},
+    customize: {AshBpmn.Test.Baselines, :customize, []}
+end
+
+defmodule AshBpmn.Web.RefusingBaselineDesignerWrapper do
+  @moduledoc false
+
+  use AshBpmn.Web.DesignerLive,
+    domain: AshBpmn.Test.Domain,
+    process: "web_test",
+    baseline: {AshBpmn.Test.Baselines, :baseline, []},
+    customize: {AshBpmn.Test.Baselines, :refuse, []}
+end
+
 defmodule AshBpmn.Web.ViewerWrapper do
   @moduledoc false
 
@@ -134,6 +154,12 @@ defmodule AshBpmn.Web.TestRouter do
 
     live("/failing-catalogue-designer", FailingCatalogueDesignerWrapper, :index,
       as: :failing_catalogue_designer
+    )
+
+    live("/baseline-designer", BaselineDesignerWrapper, :index, as: :baseline_designer)
+
+    live("/refusing-baseline-designer", RefusingBaselineDesignerWrapper, :index,
+      as: :refusing_baseline_designer
     )
 
     live("/viewer/:id", ViewerWrapper, :show, as: :viewer)

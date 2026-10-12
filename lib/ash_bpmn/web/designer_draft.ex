@@ -5,11 +5,11 @@ defmodule AshBpmn.Web.DesignerDraft do
   @moduledoc """
   Creating the designer's working draft without losing a race for it.
 
-  Opening the designer on a key that has no draft yet creates one. That was a read followed by
-  a create, which is not atomic: two people opening the same new process at the same moment
-  both read `nil`, both insert, and the second hits the partial unique index on
-  `(key, status) WHERE status = 'draft'`. The loser saw a crashed LiveView on a page that had
-  done nothing wrong.
+  The first save on a key that has no draft yet creates one. That is a read followed by a
+  create, which is not atomic: two people saving the same new process at the same moment both
+  read `nil`, both insert, and the second hits the partial unique index on
+  `(key, status) WHERE status = 'draft'`. The loser would see a crashed LiveView on a page that
+  had done nothing wrong.
 
   Losing that race is not an error, because the thing the loser wanted now exists. So a
   conflict is resolved by reading again and using the winner's draft, which is also what makes

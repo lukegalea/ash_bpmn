@@ -225,6 +225,159 @@ defmodule AshBpmn.WebTest do
     end
   end
 
+  # ── Opening writes nothing ─────────────────────────────────────────────
+
+  defp stored(key \\ "web_test") do
+    Definition
+    |> Ash.Query.for_read(:read, %{}, authorize?: false)
+    |> Ash.Query.do_filter(key: key)
+    |> Ash.read!(authorize?: false)
+  end
+
+  # The test layout renders flash outside the LiveView, so read it off the socket.
+  defp flash(view), do: :sys.get_state(view.pid).socket.assigns.flash
+
+  describe "designer: opening writes nothing" do
+    test "a key with nothing stored shows the starter, with a diagram, and stores no row" do
+      {:ok, view, _html} = live(build_test_conn(), "/designer")
+
+      assert stored() == []
+      assert has_element?(view, "#bpmn-origin", "nothing is stored until you save")
+      assert has_element?(view, "#ash-bpmn-designer[data-xml*='bpmndi:BPMNDiagram']")
+      assert has_element?(view, "#bpmn-save-btn")
+    end
+
+    test "the first save creates the draft, from the XML being saved" do
+      {:ok, view, _html} = live(build_test_conn(), "/designer")
+
+      view |> element("#ash-bpmn-save-form") |> render_submit(%{"xml" => @valid_xml})
+
+      assert [%{status: :draft} = draft] = stored()
+      # (Ash's string type trims, so compare what it keeps.)
+      assert draft.xml == String.trim(@valid_xml)
+
+      # And the next save edits that draft rather than racing to create another.
+      view |> element("#ash-bpmn-save-form") |> render_submit(%{"xml" => @error_xml})
+      assert [%{status: :draft} = draft] = stored()
+      assert draft.xml == String.trim(@error_xml)
+    end
+
+    test "a key with a published definition shows it and stores nothing until a save" do
+      published =
+        Definition.create!(%{key: "web_test", name: "Web test", xml: @valid_xml},
+          authorize?: false
+        )
+        |> Definition.publish!(authorize?: false)
+
+      {:ok, view, _html} = live(build_test_conn(), "/designer")
+
+      assert [%{id: id}] = stored()
+      assert id == published.id
+      assert has_element?(view, "#bpmn-origin", "published v#{published.version}")
+
+      view |> element("#ash-bpmn-save-form") |> render_submit(%{"xml" => @valid_xml})
+
+      assert [:draft, :published] = stored() |> Enum.map(& &1.status) |> Enum.sort()
+    end
+
+    test "revert reloads without creating anything" do
+      {:ok, view, _html} = live(build_test_conn(), "/designer")
+
+      render_click(view, "revert", %{})
+
+      assert stored() == []
+    end
+  end
+
+  describe "designer: a baseline is shown read-only" do
+    test "opening a key with only a baseline shows the baseline and stores no row" do
+      {:ok, view, _html} = live(build_test_conn(), "/baseline-designer")
+
+      assert stored() == []
+      assert has_element?(view, "#bpmn-origin", "baseline v3")
+      assert has_element?(view, "#bpmn-baseline-note")
+      assert has_element?(view, "#ash-bpmn-designer[data-xml*='Process_linear']")
+      refute has_element?(view, "#ash-bpmn-designer[data-xml*='Task_1']")
+
+      # Customize is the way in; Save, Publish and Revert are not offered.
+      assert has_element?(view, "#bpmn-customize-btn")
+      refute has_element?(view, "#bpmn-save-btn")
+      refute has_element?(view, "#bpmn-publish-btn")
+      refute has_element?(view, "#bpmn-revert-btn")
+    end
+
+    test "a save that arrives anyway is refused, and stores nothing" do
+      {:ok, view, _html} = live(build_test_conn(), "/baseline-designer")
+
+      view |> element("#ash-bpmn-save-form") |> render_submit(%{"xml" => @valid_xml})
+      assert flash(view)["error"] =~ "read-only"
+
+      view |> element("#ash-bpmn-publish-form") |> render_submit(%{"xml" => @valid_xml})
+
+      assert stored() == []
+    end
+
+    test "Customize asks the host for a draft and opens it for editing" do
+      {:ok, view, _html} = live(build_test_conn(), "/baseline-designer")
+
+      view |> element("#bpmn-customize-btn") |> render_click()
+
+      assert flash(view)["info"] =~ "Draft created from the baseline"
+      assert [%{status: :draft, name: "Customized"}] = stored()
+      assert has_element?(view, "#bpmn-save-btn")
+      refute has_element?(view, "#bpmn-customize-btn")
+      assert_push_event(view, "load_xml", %{xml: xml})
+      assert xml == AshBpmn.Test.Baselines.xml()
+    end
+
+    test "a refused Customize says why and stays read-only" do
+      {:ok, view, _html} = live(build_test_conn(), "/refusing-baseline-designer")
+
+      view |> element("#bpmn-customize-btn") |> render_click()
+
+      assert flash(view)["error"] == "No baseline to customize from."
+      assert stored() == []
+      assert has_element?(view, "#bpmn-customize-btn")
+    end
+
+    test "a scope with its own draft never sees the baseline" do
+      Definition.create!(%{key: "web_test", name: "Own", xml: @valid_xml}, authorize?: false)
+
+      {:ok, view, _html} = live(build_test_conn(), "/baseline-designer")
+
+      refute has_element?(view, "#bpmn-baseline-note")
+      assert has_element?(view, "#bpmn-save-btn")
+    end
+  end
+
+  describe "template_xml/1" do
+    test "carries a diagram for every element, so bpmn-js has something to draw" do
+      xml = AshBpmn.Web.DesignerLive.template_xml("morning.brief")
+
+      assert xml =~ ~s(<bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_morning.brief">)
+
+      for element <- ~w(Start_1 Task_1 End_1) do
+        assert xml =~ ~s(<bpmndi:BPMNShape id="#{element}_di" bpmnElement="#{element}">)
+      end
+
+      for flow <- ~w(Flow_1 Flow_2) do
+        assert xml =~ ~s(<bpmndi:BPMNEdge id="#{flow}_di" bpmnElement="#{flow}">)
+      end
+    end
+
+    test "compiles cleanly" do
+      assert {:ok, _graph} = AshBpmn.Compiler.compile(AshBpmn.Web.DesignerLive.template_xml("x"))
+    end
+
+    test "a key from the route cannot break out of the attribute it lands in" do
+      xml = AshBpmn.Web.DesignerLive.template_xml(~s(a"><x y="))
+
+      assert xml =~ ~s(id="Process_a___x_y__")
+      assert xml =~ ~s(name="a&quot;&gt;&lt;x y=&quot;")
+      assert {:ok, _graph} = AshBpmn.Compiler.compile(xml)
+    end
+  end
+
   # ── Gateway conditions & default flows (FR-2.1) ────────────────────────
 
   describe "designer: sequence flow conditions" do
