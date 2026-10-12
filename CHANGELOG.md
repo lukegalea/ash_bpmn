@@ -16,6 +16,13 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Features:
 
+- **Discarding a draft.** Definitions gain a `:discard` destroy action (code
+  interface `discard/2`) that removes a draft and refuses everything else: the
+  validation names the problem, and a `status = 'draft'` filter on the delete
+  makes the rule hold at the database, so a stale struct cannot take a row that
+  has been published since. The designer offers "Discard draft" on a stored
+  draft and falls back to the scope's published definition, the baseline, or
+  the template.
 - **The live process flight view.** `AshBpmn.FlightView` gives hosts the three
   pieces a live process view is built from: `mermaid/2` renders a published
   definition as a mermaid flowchart whose node ids are the definition's own

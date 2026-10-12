@@ -350,6 +350,68 @@ defmodule AshBpmn.WebTest do
     end
   end
 
+  describe "designer: discarding a draft" do
+    test "the button is offered only for a stored draft" do
+      {:ok, view, _html} = live(build_test_conn(), "/designer")
+      refute has_element?(view, "#bpmn-discard-btn")
+
+      view |> element("#ash-bpmn-save-form") |> render_submit(%{"xml" => @valid_xml})
+      assert has_element?(view, "#bpmn-discard-btn[data-confirm]")
+    end
+
+    test "discarding removes the draft and falls back to the template" do
+      Definition.create!(%{key: "web_test", name: "Own", xml: @valid_xml}, authorize?: false)
+      {:ok, view, _html} = live(build_test_conn(), "/designer")
+
+      view |> element("#bpmn-discard-btn") |> render_click()
+
+      assert stored() == []
+      assert flash(view)["info"] == "Draft discarded."
+      assert has_element?(view, "#bpmn-origin", "nothing is stored until you save")
+      # The first push is the draft, on connect; the second is what replaced it.
+      assert_push_event(view, "load_xml", %{xml: _draft})
+      assert_push_event(view, "load_xml", %{xml: xml})
+      assert xml =~ "bpmndi:BPMNDiagram"
+    end
+
+    test "with a published version, discarding falls back to it and keeps it" do
+      published =
+        Definition.create!(%{key: "web_test", name: "Web test", xml: @valid_xml},
+          authorize?: false
+        )
+        |> Definition.publish!(authorize?: false)
+
+      Definition.create!(%{key: "web_test", name: "Web test", xml: @error_xml}, authorize?: false)
+
+      {:ok, view, _html} = live(build_test_conn(), "/designer")
+      view |> element("#bpmn-discard-btn") |> render_click()
+
+      assert [%{id: id, status: :published}] = stored()
+      assert id == published.id
+      assert has_element?(view, "#bpmn-origin", "published v#{published.version}")
+    end
+
+    test "with a baseline, discarding falls back to the baseline, read-only" do
+      Definition.create!(%{key: "web_test", name: "Own", xml: @valid_xml}, authorize?: false)
+      {:ok, view, _html} = live(build_test_conn(), "/baseline-designer")
+
+      view |> element("#bpmn-discard-btn") |> render_click()
+
+      assert stored() == []
+      assert has_element?(view, "#bpmn-baseline-note")
+      assert has_element?(view, "#bpmn-customize-btn")
+    end
+
+    test "a just-published definition offers no discard" do
+      {:ok, view, _html} = live(build_test_conn(), "/designer")
+
+      view |> element("#ash-bpmn-publish-form") |> render_submit(%{"xml" => @valid_xml})
+
+      assert [%{status: :published}] = stored()
+      refute has_element?(view, "#bpmn-discard-btn")
+    end
+  end
+
   describe "template_xml/1" do
     test "carries a diagram for every element, so bpmn-js has something to draw" do
       xml = AshBpmn.Web.DesignerLive.template_xml("morning.brief")

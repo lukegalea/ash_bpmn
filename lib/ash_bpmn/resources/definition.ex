@@ -28,6 +28,8 @@ defmodule AshBpmn.Resources.Definition do
     * `publish!/1` — draft → published (errors must be `[]`).
     * `retire!/1` — published → retired.
     * `save_xml!/2` — update XML on a draft definition.
+    * `discard!/1` — delete a draft. Refuses anything that is not a draft, at the
+      database as well as in validation.
     * `by_key_version/2` — fetch by identity (returns single or `nil`).
     * `latest_published/1` — returns list (callers take `hd/1`).
 
@@ -188,6 +190,18 @@ defmodule AshBpmn.Resources.Definition do
           validate AshBpmn.Resources.Definition.StatusIsPublished
           change set_attribute(:status, :retired)
         end
+
+        # Abandoning a draft. A published or retired row is never removed: instances pin
+        # it for life and it is the record of what ran. The validation gives a readable
+        # error for a record that is not a draft; the filter makes the same rule hold at
+        # the database, so a stale struct loaded as a draft and published since cannot
+        # take the published row with it -- the DELETE simply matches nothing.
+        destroy :discard do
+          require_atomic? false
+
+          validate AshBpmn.Resources.Definition.StatusIsDraft
+          change filter(status: :draft)
+        end
       end
 
       code_interface do
@@ -195,6 +209,7 @@ defmodule AshBpmn.Resources.Definition do
         define :publish, action: :publish
         define :retire, action: :retire
         define :save_xml, action: :save_xml, args: [:xml]
+        define :discard, action: :discard
         define :by_key_version, action: :read, get_by: [:key, :version], get?: true
         define :latest_published, action: :latest_published, args: [:key]
       end
