@@ -51,8 +51,9 @@ defmodule AshBpmn.DefinitionDiscardTest do
     draft = draft!(key)
     Definition.publish!(draft, authorize?: false)
 
-    # `draft` still says :draft, so the validation passes; the filter is what stops it.
-    assert {:error, _} = Definition.discard(draft, authorize?: false)
+    # `draft` still says :draft, so the validation passes; the locked re-read refuses it.
+    assert {:error, %Ash.Error.Invalid{} = error} = Definition.discard(draft, authorize?: false)
+    assert Exception.message(error) =~ "draft"
     assert [%{status: :published}] = rows(key)
   end
 end

@@ -192,14 +192,18 @@ defmodule AshBpmn.Resources.Definition do
         end
 
         # Abandoning a draft. A published or retired row is never removed: instances pin
-        # it for life and it is the record of what ran. The validation gives a readable
-        # error for a record that is not a draft; the filter makes the same rule hold at
-        # the database, so a stale struct loaded as a draft and published since cannot
-        # take the published row with it -- the DELETE simply matches nothing.
+        # it for life and it is the record of what ran. Three layers, each for a reason:
+        # the validation gives the readable error for a struct that says it is not a
+        # draft; `StillDraft` re-reads the row under a lock inside the transaction, so a
+        # struct that was a draft when loaded and has been published since is refused
+        # *before* anything runs (an event-logging wrapper around the destroy would
+        # otherwise record a discard that deleted nothing); and the filter keeps the
+        # DELETE itself from ever matching a non-draft row.
         destroy :discard do
           require_atomic? false
 
           validate AshBpmn.Resources.Definition.StatusIsDraft
+          change AshBpmn.Resources.Definition.StillDraft
           change filter(status: :draft)
         end
       end
@@ -382,6 +386,49 @@ defmodule AshBpmn.Resources.Definition.StatusIsDraft do
       :ok
     else
       {:error, field: :status, message: "can only perform this action on a draft definition"}
+    end
+  end
+end
+
+defmodule AshBpmn.Resources.Definition.StillDraft do
+  @moduledoc false
+
+  # Re-reads the row being discarded, locked, inside the action's transaction, and refuses
+  # unless it is still a draft. See the note on the `:discard` action.
+
+  use Ash.Resource.Change
+
+  require Ash.Query
+
+  @impl true
+  def change(changeset, _opts, _context) do
+    Ash.Changeset.before_action(changeset, &still_draft/1)
+  end
+
+  defp still_draft(changeset) do
+    id = changeset.data.id
+    opts = AshBpmn.Scope.engine(AshBpmn.Scope.from_changeset(changeset))
+
+    changeset.resource
+    |> Ash.Query.for_read(:read, %{}, opts)
+    |> Ash.Query.filter(id == ^id)
+    |> Ash.Query.lock(:for_update)
+    |> Ash.read_one(opts)
+    |> case do
+      {:ok, %{status: :draft}} ->
+        changeset
+
+      {:ok, nil} ->
+        Ash.Changeset.add_error(changeset, field: :status, message: "the draft no longer exists")
+
+      {:ok, _not_a_draft} ->
+        Ash.Changeset.add_error(changeset,
+          field: :status,
+          message: "can only perform this action on a draft definition"
+        )
+
+      {:error, error} ->
+        Ash.Changeset.add_error(changeset, error)
     end
   end
 end
