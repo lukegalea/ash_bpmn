@@ -61,6 +61,33 @@ defmodule AshBpmn.Web.DesignerLive do
       with `module.function(args ++ [decision_key, socket])` and expected to
       answer with an href (or nil) for editing that decision, which becomes the
       business rule panel's "Edit decision ↗" link.
+    * `:baseline` — optional `{module, function, args}` tuple; called with
+      `module.function(args ++ [process_key, socket])` when the scope has neither
+      a draft nor a published definition of its own for the key. Answer `nil`, or
+      a map (or definition struct) with `:xml` and optionally `:version` and
+      `:name`: the definition this scope would run if it changed nothing — a
+      centrally shipped baseline, say. The designer shows it **read-only**.
+    * `:customize` — optional `{module, function, args}` tuple; called with
+      `module.function(args ++ [process_key, socket])` when someone presses
+      Customize on a read-only baseline. Expected to create the scope's own draft
+      (a copy of the baseline, with whatever lineage the host records) and
+      answer `{:ok, draft}` or `{:error, message}`. Without it a baseline is
+      view-only.
+
+  ## Opening the designer writes nothing
+
+  Looking is not editing. Opening the designer on a key reads what exists and
+  shows it; the draft row is created by the **first save**, from the XML being
+  saved. What is shown before then, in order:
+
+    1. the scope's draft for the key, if it has one;
+    2. otherwise its latest published definition — saving starts a draft from
+       what is live, never from a blank canvas floating over a real process;
+    3. otherwise the `:baseline`, read-only, with a Customize button when
+       `:customize` is configured — a baseline belongs to somebody else, and
+       copying it is a decision with lineage the host may need to record, so it
+       is never a side effect of a save;
+    4. otherwise `template_xml/1`, a start → task → end starter with a diagram.
 
   ## The catalogue-backed fields are comboboxes
 
@@ -130,6 +157,8 @@ defmodule AshBpmn.Web.DesignerLive do
     decisions_mfa = Keyword.get(opts, :decisions, nil)
     actions_mfa = Keyword.get(opts, :actions, nil)
     decision_editor_mfa = Keyword.get(opts, :decision_editor, nil)
+    baseline_mfa = Keyword.get(opts, :baseline, nil)
+    customize_mfa = Keyword.get(opts, :customize, nil)
 
     quote do
       use Phoenix.LiveView
@@ -147,45 +176,8 @@ defmodule AshBpmn.Web.DesignerLive do
       @ash_bpmn_designer_decisions_mfa unquote(decisions_mfa)
       @ash_bpmn_designer_actions_mfa unquote(actions_mfa)
       @ash_bpmn_designer_decision_editor_mfa unquote(decision_editor_mfa)
-
-      # ── Minimal template XML for new drafts ───────────────────────────────
-
-      # A function rather than an attribute: the key is not known until the route is.
-      defp ash_bpmn_template_xml(process_key) do
-        """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
-                           xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
-                           id="Definitions_1"
-                           targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
-          <bpmn2:process id="Process_#{process_key}" name="#{process_key}" isExecutable="true">
-            <bpmn2:startEvent id="Start_1" name="Start">
-              <bpmn2:outgoing>Flow_1</bpmn2:outgoing>
-            </bpmn2:startEvent>
-            <bpmn2:userTask id="Task_1" name="Task">
-              <bpmn2:extensionElements>
-                <ash:taskConfig>
-                  <ash:candidates>
-                    <ash:candidate kind="user" of="actor"/>
-                  </ash:candidates>
-                  <ash:outcomes>
-                    <ash:outcome name="approve"/>
-                    <ash:outcome name="reject"/>
-                  </ash:outcomes>
-                </ash:taskConfig>
-              </bpmn2:extensionElements>
-              <bpmn2:incoming>Flow_1</bpmn2:incoming>
-              <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
-            </bpmn2:userTask>
-            <bpmn2:endEvent id="End_1" name="End">
-              <bpmn2:incoming>Flow_2</bpmn2:incoming>
-            </bpmn2:endEvent>
-            <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Task_1"/>
-            <bpmn2:sequenceFlow id="Flow_2" sourceRef="Task_1" targetRef="End_1"/>
-          </bpmn2:process>
-        </bpmn2:definitions>
-        """
-      end
+      @ash_bpmn_designer_baseline_mfa unquote(baseline_mfa)
+      @ash_bpmn_designer_customize_mfa unquote(customize_mfa)
 
       # The route wins over the compile-time option, so one module can serve every process a
       # tenant authors. Neither being present is a configuration error rather than a blank
@@ -216,6 +208,12 @@ defmodule AshBpmn.Web.DesignerLive do
            definition: nil,
            xml: "",
            latest_published: nil,
+           # Where the canvas came from: :draft, :published, :baseline or :template.
+           # Only a draft is a row; everything else is shown, not stored.
+           origin: nil,
+           baseline: nil,
+           read_only: false,
+           can_customize: @ash_bpmn_designer_customize_mfa != nil,
            selected: nil,
            dirty: false,
            errors: [],
@@ -230,7 +228,7 @@ defmodule AshBpmn.Web.DesignerLive do
       @impl true
       def handle_params(params, _uri, socket) do
         socket = assign(socket, :definition_key, ash_bpmn_resolve_key(params))
-        socket = load_or_create_definition(socket)
+        socket = load_definition(socket)
         # The catalogues can depend on the tenant, which the route may just have changed.
         socket = ash_bpmn_load_catalogues(socket)
 
@@ -327,12 +325,35 @@ defmodule AshBpmn.Web.DesignerLive do
 
       @impl true
       def handle_event("revert", _params, socket) do
-        socket = load_or_create_definition(socket)
+        socket = load_definition(socket)
 
         {:noreply,
          socket
          |> assign(:dirty, false)
          |> push_event("load_xml", %{xml: socket.assigns.xml})}
+      end
+
+      # Copying a baseline is the host's act, not ours: it knows where baselines live and
+      # what lineage to record. The designer only asks, then reloads onto the draft that now
+      # exists.
+      @impl true
+      def handle_event("customize", _params, socket) do
+        {:noreply,
+         AshBpmn.Web.DesignerLive.customize(
+           @ash_bpmn_designer_customize_mfa,
+           socket.assigns.definition_key,
+           socket,
+           &ash_bpmn_customized/1
+         )}
+      end
+
+      defp ash_bpmn_customized(socket) do
+        socket = load_definition(socket)
+
+        socket
+        |> assign(:dirty, false)
+        |> put_flash(:info, "Draft created from the baseline. Publish it to switch over.")
+        |> push_event("load_xml", %{xml: socket.assigns.xml})
       end
 
       @impl true
@@ -481,78 +502,116 @@ defmodule AshBpmn.Web.DesignerLive do
         end
       end
 
-      defp load_or_create_definition(socket) do
+      # Reads what exists for the key and shows it. Writes nothing: see "Opening the
+      # designer writes nothing" in the moduledoc.
+      defp load_definition(socket) do
         {:ok, %{definition: definition_mod}} =
           AshBpmn.Resources.for_domain(@ash_bpmn_designer_domain)
 
+        key = socket.assigns.definition_key
         opts = AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
 
         latest_published =
-          case definition_mod.latest_published(
-                 socket.assigns.definition_key,
-                 AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
-               ) do
-            {:ok, []} -> nil
+          case definition_mod.latest_published(key, opts) do
             {:ok, [pub | _]} -> pub
-            [] -> nil
             [pub | _] -> pub
-          end
-
-        # Opening with no draft starts the new draft from the published
-        # version when one exists: editing continues from what is live,
-        # never from a blank canvas floating over a real process. The
-        # template is only for keys that have never been published.
-        bootstrap_xml =
-          case latest_published do
-            %{} = pub -> pub.xml
-            nil -> ash_bpmn_template_xml(socket.assigns.definition_key)
+            _ -> nil
           end
 
         # A draft is edited in place until published; find it by key+status.
         # `do_filter/2` (not the filter macro) because the resource module is
         # only known at runtime — the macro resolves bare fields statically.
-        definition =
+        draft =
           definition_mod
-          |> Ash.Query.for_read(
-            :read,
-            %{},
-            AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
-          )
-          |> Ash.Query.do_filter(key: socket.assigns.definition_key, status: :draft)
-          |> Ash.read_one!(AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns)))
-          |> case do
-            nil ->
-              AshBpmn.Web.DesignerDraft.create_or_reread!(
-                definition_mod,
-                socket.assigns.definition_key,
-                bootstrap_xml,
-                opts
-              )
+          |> Ash.Query.for_read(:read, %{}, opts)
+          |> Ash.Query.do_filter(key: key, status: :draft)
+          |> Ash.read_one!(opts)
 
-            defn ->
-              defn
-          end
+        socket =
+          socket
+          |> assign(:definition, draft)
+          |> assign(:latest_published, latest_published)
+          |> assign(:baseline, nil)
+          |> assign(:read_only, false)
 
+        cond do
+          draft ->
+            ash_bpmn_show(socket, :draft, draft.xml, draft.errors, draft.graph)
+
+          latest_published ->
+            ash_bpmn_show(
+              socket,
+              :published,
+              latest_published.xml,
+              latest_published.errors,
+              latest_published.graph
+            )
+
+          true ->
+            view =
+              AshBpmn.Web.DesignerLive.unstored_view(@ash_bpmn_designer_baseline_mfa, key, socket)
+
+            socket
+            |> assign(:baseline, view.baseline)
+            |> assign(:read_only, view.read_only)
+            |> ash_bpmn_show(view.origin, view.xml, [], nil)
+        end
+      end
+
+      defp ash_bpmn_show(socket, origin, xml, errors, graph) do
         socket
-        |> assign(:definition, definition)
-        |> assign(:xml, definition.xml)
-        |> assign(:errors, AshBpmn.Web.DesignerLive.normalize_errors(definition.errors))
-        |> assign(:graph, definition.graph)
-        |> assign(:latest_published, latest_published)
+        |> assign(:origin, origin)
+        |> assign(:xml, xml)
+        |> assign(:errors, AshBpmn.Web.DesignerLive.normalize_errors(errors))
+        |> assign(:graph, graph)
+      end
+
+      # A baseline is somebody else's definition. Saving over it would either fail (it is
+      # not in this scope) or, worse, quietly start a copy with no lineage -- so the only
+      # way from here to an editable draft is Customize.
+      defp do_save_xml(%{assigns: %{read_only: true}} = socket, _xml) do
+        put_flash(
+          socket,
+          :error,
+          "This is a baseline and is read-only. Customize it to edit a copy of your own."
+        )
       end
 
       defp do_save_xml(socket, xml) do
         {:ok, %{definition: definition_mod}} =
           AshBpmn.Resources.for_domain(@ash_bpmn_designer_domain)
 
-        definition = socket.assigns.definition
-
         opts = AshBpmn.Scope.engine(AshBpmn.Scope.from_assigns(socket.assigns))
 
-        case definition_mod.save_xml(definition, xml, opts) do
+        result =
+          case socket.assigns.definition do
+            # The first save is what creates the draft -- from the XML being saved, so the
+            # row never holds anything nobody chose to keep.
+            nil ->
+              draft =
+                AshBpmn.Web.DesignerDraft.create_or_reread!(
+                  definition_mod,
+                  socket.assigns.definition_key,
+                  xml,
+                  opts
+                )
+
+              # Lost a race to someone else's first save: theirs is the draft now, and this
+              # save lands on it the way any later save would. (Compared trimmed: the
+              # string type trims what it stores.)
+              if draft.xml == String.trim(xml),
+                do: {:ok, draft},
+                else: definition_mod.save_xml(draft, xml, opts)
+
+            definition ->
+              definition_mod.save_xml(definition, xml, opts)
+          end
+
+        case result do
           {:ok, updated} ->
             socket
             |> assign(:definition, updated)
+            |> assign(:origin, :draft)
             |> assign(:xml, updated.xml)
             |> assign(:errors, AshBpmn.Web.DesignerLive.normalize_errors(updated.errors))
             |> assign(:graph, updated.graph)
@@ -570,6 +629,14 @@ defmodule AshBpmn.Web.DesignerLive do
             |> put_flash(:error, Exception.message(error))
         end
       end
+
+      # Nothing to publish: a read-only baseline, or a save that did not produce a draft
+      # (its flash already says why).
+      defp do_publish(%{assigns: %{read_only: true}} = socket),
+        do: assign(socket, :pending_publish, false)
+
+      defp do_publish(%{assigns: %{definition: nil}} = socket),
+        do: assign(socket, :pending_publish, false)
 
       defp do_publish(socket) do
         {:ok, %{definition: definition_mod}} =
@@ -816,6 +883,151 @@ defmodule AshBpmn.Web.DesignerLive do
     _ -> nil
   end
 
+  @doc """
+  The starter document for a key that has nothing else to show: start → user task → end.
+
+  It carries a diagram (`bpmndi:BPMNDiagram`) on purpose. bpmn-js draws from the diagram
+  interchange section, not from the process semantics, so a document without one imports as
+  "no diagram to display" and the author is left facing an empty canvas with an error.
+
+  The key arrives from the route, so it is escaped for the attribute it lands in and reduced
+  to XML name characters for the id.
+  """
+  @spec template_xml(String.t()) :: String.t()
+  def template_xml(process_key) do
+    name = process_key |> Phoenix.HTML.html_escape() |> Phoenix.HTML.safe_to_string()
+    id = "Process_" <> String.replace(process_key, ~r/[^A-Za-z0-9_.-]/u, "_")
+
+    """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                       xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                       xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                       xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                       xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                       id="Definitions_1"
+                       targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+      <bpmn2:process id="#{id}" name="#{name}" isExecutable="true">
+        <bpmn2:startEvent id="Start_1" name="Start">
+          <bpmn2:outgoing>Flow_1</bpmn2:outgoing>
+        </bpmn2:startEvent>
+        <bpmn2:userTask id="Task_1" name="Task">
+          <bpmn2:extensionElements>
+            <ash:taskConfig>
+              <ash:candidates>
+                <ash:candidate kind="user" of="actor"/>
+              </ash:candidates>
+              <ash:outcomes>
+                <ash:outcome name="approve"/>
+                <ash:outcome name="reject"/>
+              </ash:outcomes>
+            </ash:taskConfig>
+          </bpmn2:extensionElements>
+          <bpmn2:incoming>Flow_1</bpmn2:incoming>
+          <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
+        </bpmn2:userTask>
+        <bpmn2:endEvent id="End_1" name="End">
+          <bpmn2:incoming>Flow_2</bpmn2:incoming>
+        </bpmn2:endEvent>
+        <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Task_1"/>
+        <bpmn2:sequenceFlow id="Flow_2" sourceRef="Task_1" targetRef="End_1"/>
+      </bpmn2:process>
+      <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+        <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="#{id}">
+          <bpmndi:BPMNShape id="Start_1_di" bpmnElement="Start_1">
+            <dc:Bounds x="152" y="102" width="36" height="36"/>
+          </bpmndi:BPMNShape>
+          <bpmndi:BPMNShape id="Task_1_di" bpmnElement="Task_1">
+            <dc:Bounds x="240" y="80" width="100" height="80"/>
+          </bpmndi:BPMNShape>
+          <bpmndi:BPMNShape id="End_1_di" bpmnElement="End_1">
+            <dc:Bounds x="392" y="102" width="36" height="36"/>
+          </bpmndi:BPMNShape>
+          <bpmndi:BPMNEdge id="Flow_1_di" bpmnElement="Flow_1">
+            <di:waypoint x="188" y="120"/>
+            <di:waypoint x="240" y="120"/>
+          </bpmndi:BPMNEdge>
+          <bpmndi:BPMNEdge id="Flow_2_di" bpmnElement="Flow_2">
+            <di:waypoint x="340" y="120"/>
+            <di:waypoint x="392" y="120"/>
+          </bpmndi:BPMNEdge>
+        </bpmndi:BPMNPlane>
+      </bpmndi:BPMNDiagram>
+    </bpmn2:definitions>
+    """
+  end
+
+  @doc """
+  Resolves the `:baseline` option for one key into `%{xml:, version:, name:}`, or `nil` when
+  the option is absent, answers nothing usable, or fails.
+
+  A failure degrades to `nil` -- the template -- rather than a crashed page, and a save from
+  there creates a draft of the scope's own, which is the same outcome as a host with no
+  baselines at all.
+  """
+  @spec baseline(nil | {module(), atom(), list()}, String.t(), Phoenix.LiveView.Socket.t()) ::
+          %{xml: String.t(), version: term(), name: term()} | nil
+  def baseline(nil, _key, _socket), do: nil
+
+  def baseline({module, function, args}, key, socket) do
+    case apply(module, function, args ++ [key, socket]) do
+      %{xml: xml} = found when is_binary(xml) and xml != "" ->
+        %{xml: xml, version: Map.get(found, :version), name: Map.get(found, :name)}
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  @doc """
+  What the designer shows for a key the scope has stored nothing for: the `:baseline`,
+  read-only, when the host offers one, and otherwise `template_xml/1`.
+  """
+  @spec unstored_view(nil | {module(), atom(), list()}, String.t(), Phoenix.LiveView.Socket.t()) ::
+          %{
+            origin: :baseline | :template,
+            xml: String.t(),
+            baseline: map() | nil,
+            read_only: boolean()
+          }
+  def unstored_view(baseline_mfa, key, socket) do
+    case baseline(baseline_mfa, key, socket) do
+      nil -> %{origin: :template, xml: template_xml(key), baseline: nil, read_only: false}
+      found -> %{origin: :baseline, xml: found.xml, baseline: found, read_only: true}
+    end
+  end
+
+  @doc """
+  Runs the `:customize` option for one key: `on_ok` (the designer reloading onto the new
+  draft) once the host reports a draft exists, or an error flash saying why not.
+  """
+  @spec customize(
+          nil | {module(), atom(), list()},
+          String.t(),
+          Phoenix.LiveView.Socket.t(),
+          (Phoenix.LiveView.Socket.t() -> Phoenix.LiveView.Socket.t())
+        ) :: Phoenix.LiveView.Socket.t()
+  def customize(customize_mfa, key, socket, on_ok) do
+    case run_customize(customize_mfa, key, socket) do
+      :ok -> on_ok.(socket)
+      {:error, message} -> Phoenix.LiveView.put_flash(socket, :error, message)
+    end
+  end
+
+  defp run_customize(nil, _key, _socket),
+    do: {:error, "This baseline cannot be customized from here."}
+
+  defp run_customize({module, function, args}, key, socket) do
+    case apply(module, function, args ++ [key, socket]) do
+      {:ok, _draft} -> :ok
+      {:error, message} when is_binary(message) -> {:error, message}
+      {:error, %{__exception__: true} = error} -> {:error, Exception.message(error)}
+      other -> {:error, "Could not customize #{key}: #{inspect(other)}"}
+    end
+  end
+
   @doc false
   def __render__(assigns) do
     ~H"""
@@ -837,6 +1049,20 @@ defmodule AshBpmn.Web.DesignerLive do
               {to_string(assigns.definition.status)}
             </span>
           <% end %>
+          <%!-- No draft row yet: say what the canvas is showing instead. --%>
+          <span :if={assigns.origin == :published} id="bpmn-origin" class="ash-bpmn-subtle">
+            published v{assigns.latest_published.version} · saving starts a draft
+          </span>
+          <span :if={assigns.origin == :template} id="bpmn-origin" class="ash-bpmn-subtle">
+            new · nothing is stored until you save
+          </span>
+          <span
+            :if={assigns.origin == :baseline}
+            id="bpmn-origin"
+            class={["ash-bpmn-badge", definition_status_class(:published)]}
+          >
+            baseline{if assigns.baseline.version, do: " v#{assigns.baseline.version}"}
+          </span>
         </div>
 
         <div class="ash-bpmn-row">
@@ -848,32 +1074,51 @@ defmodule AshBpmn.Web.DesignerLive do
           >
             Fit
           </button>
-          <button
-            type="button"
-            id="bpmn-revert-btn"
-            phx-click="revert"
-            class="ash-bpmn-btn"
-          >
-            Revert
-          </button>
-          <button
-            type="button"
-            id="bpmn-publish-btn"
-            phx-click="publish"
-            class="ash-bpmn-btn ash-bpmn-btn--primary"
-          >
-            Publish
-          </button>
-          <button
-            type="button"
-            id="bpmn-save-btn"
-            phx-click="collect-xml"
-            class="ash-bpmn-btn ash-bpmn-btn--primary"
-          >
-            Save
-          </button>
+          <%= if assigns.read_only do %>
+            <button
+              :if={assigns.can_customize}
+              type="button"
+              id="bpmn-customize-btn"
+              phx-click="customize"
+              class="ash-bpmn-btn ash-bpmn-btn--primary"
+            >
+              Customize
+            </button>
+          <% else %>
+            <button
+              type="button"
+              id="bpmn-revert-btn"
+              phx-click="revert"
+              class="ash-bpmn-btn"
+            >
+              Revert
+            </button>
+            <button
+              type="button"
+              id="bpmn-publish-btn"
+              phx-click="publish"
+              class="ash-bpmn-btn ash-bpmn-btn--primary"
+            >
+              Publish
+            </button>
+            <button
+              type="button"
+              id="bpmn-save-btn"
+              phx-click="collect-xml"
+              class="ash-bpmn-btn ash-bpmn-btn--primary"
+            >
+              Save
+            </button>
+          <% end %>
         </div>
       </div>
+
+      <p :if={assigns.read_only} id="bpmn-baseline-note" class="ash-bpmn-subtle">
+        You are looking at the baseline this key runs when nothing has been customized. It is
+        read-only here; {if assigns.can_customize,
+          do: "Customize makes an editable draft of your own from it.",
+          else: "there is no way to customize it from this screen."}
+      </p>
 
       <div class="ash-bpmn-body">
         <%!-- Main canvas area --%>
@@ -987,7 +1232,10 @@ defmodule AshBpmn.Web.DesignerLive do
                   feel={assigns[:feel]}
                 />
 
+                <%!-- A baseline's panel is for reading what each node does; Apply would
+                      change a canvas there is no way to save. --%>
                 <button
+                  :if={!assigns.read_only}
                   type="submit"
                   class="ash-bpmn-btn ash-bpmn-btn--primary ash-bpmn-btn--block"
                 >

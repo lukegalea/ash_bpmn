@@ -65,6 +65,18 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Fixes:
 
+- Opening the designer writes nothing. It used to create a draft row the moment
+  it was opened on a key with no draft, seeded from a starter template whenever
+  the scope had nothing published -- so merely viewing a key that a host serves
+  from somewhere else (a centrally shipped baseline) left a blank draft over it.
+  The draft is now created by the first save, from the XML being saved. The new
+  `:baseline` option lets a host say what a key runs when the scope has stored
+  nothing for it; the designer shows that read-only, with a Customize button
+  wired to the new `:customize` option.
+- The starter template (`AshBpmn.Web.DesignerLive.template_xml/1`) carries a
+  `bpmndi:BPMNDiagram`. Without one bpmn-js has nothing to draw and reports "no
+  diagram to display". The key it is built from is escaped for the attribute
+  it lands in.
 - A service task or decision whose callee returns a struct no longer crashes
   promotion with `Protocol.UndefinedError`. Results are normalised to plain maps
   before promotion — recursively, leaving `Decimal`/`Date`/`DateTime` alone — and
