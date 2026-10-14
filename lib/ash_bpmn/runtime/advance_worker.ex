@@ -8,11 +8,14 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   Job args: `%{"instance_id" => id, "token_id" => id, "node_id" => binary}`
 
   Steps:
-    1. Load instance + token; skip unless token is :active
+    1. Load instance + token. No live token is a redelivery: skip.
     2. Claim token (optimistic lock); skip on lost race
     3. Dispatch node execution via Interpreter
     4. Apply effects (create tokens, events, enqueue jobs, etc.)
-    5. Handle max_attempts exhaustion → mark instance failed
+    5. On a node failure, hand the claim back so Oban's retry can take it again -- or, once
+       the attempts are spent, kill the token and mark the instance `:failed`
+    6. A retry that finds its token still `:executing` is resuming after a crash: it takes the
+       claim back once it is older than `AshBpmn.Config.claim_timeout/0`, and snoozes until then
   """
 
   use Oban.Worker, max_attempts: 10
@@ -27,10 +30,9 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   def queue, do: Config.queue()
 
   @impl true
-  def perform(%Oban.Job{args: args, attempt: _attempt} = _job) do
+  def perform(%Oban.Job{args: args} = job) do
     instance_id = args["instance_id"]
     node_id = args["node_id"]
-    task_outcome = args["task_outcome"]
 
     scope = Scope.from_job(args, :advance)
     resources = DomainResolver.resolve!(scope.domain)
@@ -56,82 +58,202 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     # with multi-instance, where N tokens sit at the same node and a position lookup finds all
     # of them and raises. Preferring the id when it resolves keeps the old behaviour exactly
     # where it was right and makes a fan-out addressable.
-    token = resolve_token(resources, args["token_id"], instance_id, node_id, scope)
+    #
+    # Nil is an ordinary answer, not an error: the token moved on, or was killed, or the job is
+    # a redelivery of one that already ran. It used to fall through to `token.status` and crash
+    # every retry of a job whose node had failed, which is how a failed service task wedged its
+    # instance `:running` forever.
+    case instance && resolve_token(resources, args["token_id"], instance_id, node_id, scope) do
+      %{status: :active} = token ->
+        claim_and_run(resources, job, instance, token, scope)
 
-    # Idempotent: skip if token is not active
-    if token.status != :active do
-      {:ok, :skipped}
+      %{status: :executing} = token ->
+        resume_executing(resources, job, instance, token, scope)
+
+      _ ->
+        {:ok, :skipped}
+    end
+  end
+
+  # ── Claim and run ─────────────────────────────────────────────────────────
+
+  defp claim_and_run(resources, job, instance, token, scope) do
+    # 2. Claim token
+    case claim_token(resources, resources.token, token, scope) do
+      {:ok, claimed_token} ->
+        # The claim is movement too — a token visibly "in progress" between
+        # arriving at a node and finishing there.
+        FlightView.token_moved(instance, claimed_token)
+
+        # The budget is spent before this attempt starts -- a re-claim after a crash
+        # increments it without a failure having been handled. Same ending as a failure on
+        # the last attempt.
+        if claimed_token.attempts > Config.max_attempts() do
+          mark_instance_failed(
+            resources,
+            instance,
+            claimed_token,
+            claimed_token.node_id,
+            "attempts exhausted before the node ran",
+            scope
+          )
+
+          {:ok, :failed_permanently}
+        else
+          run_node(resources, job, instance, claimed_token, scope)
+        end
+
+      {:error, _} ->
+        # Lost the race — another worker won
+        {:ok, :lost_race}
+    end
+  end
+
+  defp run_node(resources, job, instance, token, scope) do
+    node_id = token.node_id
+
+    # 3. Load graph and dispatch
+    # Through the loader seam, not directly: an instance's definition does not
+    # necessarily live in the instance's tenant. See `AshBpmn.DefinitionLoader`.
+    definition =
+      AshBpmn.DefinitionLoader.load!(
+        resources.definition,
+        instance.definition_id,
+        instance,
+        scope
+      )
+
+    graph = definition.graph
+    node = graph["nodes"][node_id]
+    # Check if this is a parallel join — handle join semantics here
+    join_info = graph["joins"][node_id]
+
+    cond do
+      is_nil(node) ->
+        node_failed(
+          resources,
+          job,
+          instance,
+          token,
+          {:error, "node #{node_id} not found in graph"},
+          scope
+        )
+
+      join_info && node["type"] == "parallelGateway" ->
+        handle_parallel_join(resources, graph, instance, token, node_id, join_info, scope)
+
+      true ->
+        ctx =
+          build_context(instance, token, scope, job.args["task_outcome"], node["load"])
+
+        case dispatch(graph, node_id, node, ctx) do
+          {:ok, effects} ->
+            apply_effects(resources, effects, ctx)
+            {:ok, :advanced}
+
+          failure ->
+            node_failed(resources, job, instance, token, failure, scope)
+        end
+    end
+  end
+
+  # The node's own failure, told apart from a failure applying its effects. Dispatch is the
+  # interpreter deciding what to do -- the host action a service task calls runs here -- and it
+  # writes nothing of the engine's, so a failure inside it leaves the token exactly as claimed
+  # and safe to hand back. A failure in `apply_effects/3` may have written half the node's
+  # effects, and is left to propagate: that is the crash case, recovered by
+  # `resume_executing/5` once the claim is stale.
+  defp dispatch(graph, node_id, node, ctx) do
+    Interpreter.dispatch(graph, node_id, node, ctx)
+  rescue
+    e -> {:raised, e, __STACKTRACE__}
+  end
+
+  # 5. A node failed: hand the claim back for Oban's retry, or -- on the last attempt the
+  # engine or Oban will make -- give up the way the docs say: the token dead, the instance
+  # `:failed`, an `:action_failed` event naming the node and the error.
+  #
+  # Re-read rather than trusted, because the node may have run for a while: a cancel that
+  # killed the token meanwhile wins, and the failure is only passed on.
+  defp node_failed(resources, job, instance, token, failure, scope) do
+    current = reload_token(resources, token, scope)
+
+    cond do
+      is_nil(current) or current.status != :executing ->
+        pass_on(failure)
+
+      exhausted?(current, job) ->
+        mark_instance_failed(
+          resources,
+          instance,
+          current,
+          current.node_id,
+          describe_failure(failure),
+          scope
+        )
+
+        {:ok, :failed_permanently}
+
+      true ->
+        released = resources.token.release!(current, Scope.engine(scope))
+        FlightView.token_moved(instance, released)
+        pass_on(failure)
+    end
+  end
+
+  # The engine's budget (`Config.max_attempts/0`, counted on the token by every claim) or
+  # Oban's (the job's own `max_attempts`), whichever runs out first. Oban's matters as much as
+  # the engine's: a job Oban discards with the token handed back leaves an `:active` token
+  # nothing will ever run.
+  defp exhausted?(token, %Oban.Job{attempt: attempt, max_attempts: max_attempts}) do
+    token.attempts >= Config.max_attempts() or
+      (is_integer(attempt) and is_integer(max_attempts) and attempt >= max_attempts)
+  end
+
+  defp pass_on({:error, reason}), do: {:error, reason}
+  defp pass_on({:raised, e, stacktrace}), do: reraise(e, stacktrace)
+
+  defp describe_failure({:error, reason}) when is_binary(reason), do: reason
+  defp describe_failure({:error, reason}), do: inspect(reason)
+  defp describe_failure({:raised, e, _stacktrace}), do: Exception.message(e)
+
+  # 6. A retry finding its token still `:executing`: the job that held the claim died
+  # mid-node, so nothing will ever hand it back.
+  #
+  # Only a retry (`attempt > 1`) may take it, because only a retry can be the job that left
+  # it. A first attempt finding the token `:executing` is a duplicate of a job that is running
+  # right now, and taking the claim from it would run the node twice. Even a retry waits until
+  # the claim is older than `Config.claim_timeout/0`, which is what keeps a duplicate that
+  # happens to be a retry from cutting into a long node that is still running.
+  defp resume_executing(resources, %Oban.Job{attempt: attempt} = job, instance, token, scope)
+       when is_integer(attempt) and attempt > 1 do
+    remaining = Config.claim_timeout() - claim_age(token)
+
+    if remaining > 0 do
+      {:snooze, remaining}
     else
-      # 2. Claim token
-      case claim_token(resources, resources.token, token, scope) do
-        {:ok, claimed_token} ->
-          # The claim is movement too — a token visibly "in progress" between
-          # arriving at a node and finishing there.
-          FlightView.token_moved(instance, claimed_token)
-
-          # Check max attempts before proceeding
-          max = Config.max_attempts()
-
-          if claimed_token.attempts > max do
-            mark_instance_failed(resources, instance, node_id, :action_failed, scope)
-            {:ok, :failed_permanently}
-          else
-            # 3. Load graph and dispatch
-            # Through the loader seam, not directly: an instance's definition does not
-            # necessarily live in the instance's tenant. See `AshBpmn.DefinitionLoader`.
-            definition =
-              AshBpmn.DefinitionLoader.load!(
-                resources.definition,
-                instance.definition_id,
-                instance,
-                scope
-              )
-
-            graph = definition.graph
-
-            node = graph["nodes"][node_id]
-
-            if node do
-              # Check if this is a parallel join — handle join semantics here
-              join_info = graph["joins"][node_id]
-
-              if join_info && node["type"] == "parallelGateway" do
-                handle_parallel_join(
-                  resources,
-                  graph,
-                  instance,
-                  claimed_token,
-                  node_id,
-                  join_info,
-                  scope
-                )
-              else
-                ctx = build_context(instance, claimed_token, scope, task_outcome, node["load"])
-
-                case Interpreter.dispatch(graph, node_id, node, ctx) do
-                  {:ok, effects} ->
-                    apply_effects(resources, effects, ctx)
-                    {:ok, :advanced}
-
-                  {:error, reason} ->
-                    # Let Oban retry
-                    {:error, reason}
-                end
-              end
-            else
-              {:error, "node #{node_id} not found in graph"}
-            end
-          end
-
-        {:error, _} ->
-          # Lost the race — another worker won
-          {:ok, :lost_race}
+      case resources.token.release(token, Scope.engine(scope)) do
+        {:ok, released} -> claim_and_run(resources, job, instance, released, scope)
+        {:error, _} -> {:ok, :lost_race}
       end
     end
-  rescue
-    e ->
-      # Re-raise for Oban retry mechanism
-      reraise e, __STACKTRACE__
+  end
+
+  defp resume_executing(_resources, _job, _instance, _token, _scope), do: {:ok, :skipped}
+
+  # Seconds since the claim. `updated_at` is the claim's timestamp because the claim is the
+  # last write a token in `:executing` receives.
+  defp claim_age(%{updated_at: %DateTime{} = at}),
+    do: DateTime.diff(DateTime.utc_now(), at, :second)
+
+  defp claim_age(%{updated_at: %NaiveDateTime{} = at}),
+    do: NaiveDateTime.diff(NaiveDateTime.utc_now(), at, :second)
+
+  defp reload_token(resources, token, scope) do
+    resources.token
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(id == ^token.id)
+    |> Ash.read_one!(Scope.engine(scope))
   end
 
   # ── Token claim ──────────────────────────────────────────────────────────
@@ -241,13 +363,13 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         node = graph["nodes"][next_node_id]
 
         if node do
-          case Interpreter.dispatch(graph, next_node_id, node, ctx) do
+          case dispatch(graph, next_node_id, node, ctx) do
             {:ok, effects} ->
               apply_effects(resources, effects, ctx)
               {:ok, :joined_and_advanced}
 
-            {:error, reason} ->
-              {:error, reason}
+            failure ->
+              hand_off_after_join(resources, instance, new_token, failure, scope)
           end
         else
           {:ok, :joined}
@@ -258,12 +380,43 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     end
   end
 
+  # `:executing` is admitted by id and only by id. By id it is this job's own token, left
+  # mid-flight by an earlier attempt that died, and `resume_executing/5` decides whether it may
+  # be taken back. By position it could be any token at the node, held by any job.
+  # The node past a join failed inline, in a job that belongs to the arriving branch -- whose
+  # token the join has already killed. A retry of *this* job would find that token dead and
+  # skip, so the new token would sit `:executing` with nothing coming for it. It is handed
+  # back and given a job of its own instead, which then retries and fails the instance exactly
+  # as any other node does. The join itself is done, so this job succeeds.
+  defp hand_off_after_join(resources, instance, token, failure, scope) do
+    case resources.token.release(token, Scope.engine(scope)) do
+      {:ok, released} ->
+        FlightView.token_moved(instance, released)
+
+        AshBpmn.Runtime.Oban.insert(
+          __MODULE__,
+          Scope.to_job_args(scope, %{
+            "instance_id" => instance.id,
+            "token_id" => released.id,
+            "node_id" => released.node_id
+          })
+        )
+
+        {:ok, :joined}
+
+      {:error, _} ->
+        pass_on(failure)
+    end
+  end
+
   defp resolve_token(resources, token_id, instance_id, node_id, scope) do
     by_id =
       token_id &&
         resources.token
         |> Ash.Query.for_read(:read)
-        |> Ash.Query.filter(id == ^token_id and status == :active and node_id == ^node_id)
+        |> Ash.Query.filter(
+          id == ^token_id and status in [:active, :executing] and node_id == ^node_id
+        )
         |> Ash.read_one!(Scope.engine(scope))
 
     by_id ||
@@ -624,15 +777,39 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
   # ── Instance failure ─────────────────────────────────────────────────────
 
-  defp mark_instance_failed(resources, instance, node_id, kind, scope) do
-    resources.instance.mark_failed!(instance, Scope.engine(scope))
+  # The engine giving up, which the token lifecycle spells `:dead` and the instance `:failed`.
+  # The token is killed rather than left `:executing` because `:executing` means "a job is
+  # running this", and nothing is; `AshBpmn.retry_instance/2` finds it by the `token_id` on
+  # the event and brings it back.
+  #
+  # The instance is re-read because the node may have run for a long time: a cancel that
+  # landed meanwhile has already ended it, and `mark_failed` would refuse a non-running one.
+  defp mark_instance_failed(resources, instance, token, node_id, error, scope) do
+    killed = resources.token.kill!(token, Scope.engine(scope))
+    FlightView.token_moved(instance, killed)
+
+    current =
+      resources.instance
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(id == ^instance.id)
+      |> Ash.read_one!(Scope.engine(scope))
+
+    if current && current.status == :running do
+      resources.instance.mark_failed!(current, Scope.engine(scope))
+    end
 
     resources.process_event.create!(
       %{
         instance_id: instance.id,
-        kind: kind,
+        token_id: token.id,
+        kind: :action_failed,
         node_id: node_id,
-        data: %{"reason" => "max_attempts_exceeded"}
+        data: %{
+          "reason" => "max_attempts_exceeded",
+          "attempts" => token.attempts,
+          # Bounded: the event is the engine's diagnostic, not a copy of the host's error log.
+          "error" => String.slice(error, 0, 500)
+        }
       },
       Scope.engine(scope)
     )

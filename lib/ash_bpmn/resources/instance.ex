@@ -287,6 +287,18 @@ defmodule AshBpmn.Resources.Instance do
           change set_attribute(:status, :failed)
         end
 
+        # The way back from `:failed`, and the only one. `AshBpmn.retry_instance/2` calls it
+        # before reactivating the tokens the engine gave up on: without it those tokens run
+        # against an instance that still says `:failed`, and the first end event they reach is
+        # refused by `mark_completed`'s `StatusIsRunning`.
+        update :resume do
+          accept []
+          require_atomic? false
+
+          validate AshBpmn.Resources.Instance.StatusIsFailed
+          change set_attribute(:status, :running)
+        end
+
         update :mark_errored do
           accept [:outcome]
           require_atomic? false
@@ -330,6 +342,7 @@ defmodule AshBpmn.Resources.Instance do
         define :mark_completed, action: :mark_completed, args: [:outcome]
         define :mark_errored, action: :mark_errored
         define :mark_failed, action: :mark_failed
+        define :resume, action: :resume
         define :cancel, action: :cancel
         define :supersede, action: :supersede, args: [:superseded_by_instance_id]
       end
@@ -421,6 +434,20 @@ defmodule AshBpmn.Resources.Instance.StatusIsRunning do
       :ok
     else
       {:error, field: :status, message: "can only perform this action on a running instance"}
+    end
+  end
+end
+
+defmodule AshBpmn.Resources.Instance.StatusIsFailed do
+  @moduledoc false
+  use Ash.Resource.Validation
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    if changeset.data.status == :failed do
+      :ok
+    else
+      {:error, field: :status, message: "can only resume a failed instance"}
     end
   end
 end

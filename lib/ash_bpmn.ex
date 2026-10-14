@@ -761,14 +761,16 @@ defmodule AshBpmn do
   end
 
   defp do_retry_instance(resources, instance, scope) do
-    dead_tokens =
-      resources.token
-      |> Ash.Query.for_read(:read)
-      |> Ash.Query.filter(instance_id == ^instance.id)
-      |> Ash.Query.filter(status == :dead)
-      |> Ash.read!(Scope.engine(scope))
+    tokens = tokens_to_retry(resources, instance, scope)
 
-    Enum.each(dead_tokens, fn token ->
+    # Back to `:running` first. The reactivated tokens advance as soon as their jobs run --
+    # inline, at once -- and an instance still saying `:failed` refuses the completion they
+    # are heading for.
+    if instance.status == :failed do
+      resources.instance.resume!(instance, Scope.engine(scope))
+    end
+
+    Enum.each(tokens, fn token ->
       reactivated = resources.token.reactivate!(token, Scope.engine(scope))
       FlightView.token_moved(instance, reactivated)
 
@@ -792,6 +794,39 @@ defmodule AshBpmn do
     {:ok, fresh}
   rescue
     e -> {:error, e}
+  end
+
+  # A failed instance retries what the engine gave up on, and nothing else. Its other dead
+  # tokens are branches that ended on purpose -- every branch arriving at a parallel join dies
+  # there -- and reactivating those would run the join's far side a second time. The tokens the
+  # engine gave up on are the ones its `:action_failed` events name, plus any left
+  # `:executing` by a failure from before the engine killed them.
+  #
+  # Any other status keeps the old behaviour: every dead token.
+  defp tokens_to_retry(resources, %{status: :failed} = instance, scope) do
+    given_up =
+      resources.process_event
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(instance_id == ^instance.id and kind == :action_failed)
+      |> Ash.read!(Scope.engine(scope))
+      |> Enum.map(& &1.token_id)
+      |> Enum.reject(&is_nil/1)
+
+    resources.token
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(
+      instance_id == ^instance.id and
+        ((status == :dead and id in ^given_up) or status == :executing)
+    )
+    |> Ash.read!(Scope.engine(scope))
+  end
+
+  defp tokens_to_retry(resources, instance, scope) do
+    resources.token
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(instance_id == ^instance.id)
+    |> Ash.Query.filter(status == :dead)
+    |> Ash.read!(Scope.engine(scope))
   end
 
   # ── Private helpers ─────────────────────────────────────────────────────

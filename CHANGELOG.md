@@ -72,6 +72,24 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Fixes:
 
+- **A failed service task no longer wedges its instance.** The advance job
+  claimed the token, the node raised, and nothing handed the claim back: every
+  Oban retry found no `:active` token and crashed on it (`BadMapError` /
+  `KeyError` on `nil`), and the instance stayed `:running` forever because the
+  `max_attempts` check sat behind a claim no retry could make. A node failure
+  now releases the token (new `:release` action, attempts kept) so the retry
+  claims it; the last attempt -- the engine's `max_attempts` or the job's own,
+  whichever comes first -- kills the token, marks the instance `:failed` and
+  records `:action_failed` with the node, token, attempts and error. A job
+  whose token is gone skips. A retry that finds its own token still
+  `:executing` (the node died mid-job) takes it back once the claim is older
+  than `config :ash_bpmn, claim_timeout:` (seconds, default 300) and snoozes
+  until then; a first attempt finding it `:executing` is a redelivery and
+  skips. A failure on the far side of a parallel join hands the new token to a
+  job of its own. `AshBpmn.retry_instance/2` now resumes a `:failed` instance
+  (new instance `:resume` action), reactivates only the tokens the engine gave
+  up on, and gives them a fresh attempt budget.
+
 - Opening the designer writes nothing. It used to create a draft row the moment
   it was opened on a key with no draft, seeded from a starter template whenever
   the scope had nothing published -- so merely viewing a key that a host serves

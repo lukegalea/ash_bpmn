@@ -294,12 +294,34 @@ defmodule AshBpmn.Resources.Token do
           change set_attribute(:status, :dead)
         end
 
+        # The advance worker handing a claim back: the node failed and the job is going back to
+        # Oban for a retry, which has to be able to claim the token again. Leaving it
+        # `:executing` -- which is what used to happen -- made every retry find no `:active`
+        # token and crash, and the instance never reached `:failed`.
+        #
+        # Distinct from `:reactivate` because the attempt count survives it: the count is the
+        # engine's retry budget, and a release that reset it would retry forever. Guarded in
+        # the database, like the claim, so a token a cancel killed while the node ran stays
+        # dead.
+        update :release do
+          accept []
+          require_atomic? false
+
+          validate AshBpmn.Resources.Token.StatusIsExecuting
+          change {AshBpmn.Resources.Token.EnsureStatusInDb, status: :executing}
+          change set_attribute(:status, :active)
+        end
+
+        # The operator's retry (`AshBpmn.retry_instance/2`), after the cause has been fixed. A
+        # fresh budget, because the old one is what ran out: keeping it would fail the token on
+        # its very next claim.
         update :reactivate do
           accept []
           require_atomic? false
 
           validate AshBpmn.Resources.Token.StatusIsDeadOrExecuting
           change set_attribute(:status, :active)
+          change set_attribute(:attempts, 0)
           change AshBpmn.Resources.Token.ClearWaitingFields
         end
       end
@@ -312,6 +334,7 @@ defmodule AshBpmn.Resources.Token do
         define :claim_waiting, action: :claim_waiting
         define :consume, action: :consume
         define :kill, action: :kill
+        define :release, action: :release
         define :reactivate, action: :reactivate
         define :promote_routing, action: :promote_routing
       end
@@ -382,7 +405,7 @@ defmodule AshBpmn.Resources.Token.StatusIsExecuting do
     if changeset.data.status == :executing do
       :ok
     else
-      {:error, field: :status, message: "token must be executing to consume"}
+      {:error, field: :status, message: "token must be executing"}
     end
   end
 end

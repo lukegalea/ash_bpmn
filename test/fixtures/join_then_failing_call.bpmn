@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_join_then_failing_call"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_join_then_failing_call" name="A join whose far side fails" isExecutable="true">
+
+    <bpmn2:startEvent id="Start">
+      <bpmn2:outgoing>F_start</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <bpmn2:parallelGateway id="Fork">
+      <bpmn2:incoming>F_start</bpmn2:incoming>
+      <bpmn2:outgoing>F_a</bpmn2:outgoing>
+      <bpmn2:outgoing>F_b</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+
+    <bpmn2:serviceTask id="Task_A" name="Task A">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="task_a"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_a</bpmn2:incoming>
+      <bpmn2:outgoing>F_a_join</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:serviceTask id="Task_B" name="Task B">
+      <bpmn2:extensionElements>
+        <ash:taskConfig action="task_b"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_b</bpmn2:incoming>
+      <bpmn2:outgoing>F_b_join</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:parallelGateway id="Join">
+      <bpmn2:incoming>F_a_join</bpmn2:incoming>
+      <bpmn2:incoming>F_b_join</bpmn2:incoming>
+      <bpmn2:outgoing>F_join</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+
+    <bpmn2:serviceTask id="AfterJoin" name="This callable refuses">
+      <bpmn2:extensionElements>
+        <ash:call ref="AshBpmn.Test.RuntimeCallablesDomain.always_fails"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_join</bpmn2:incoming>
+      <bpmn2:outgoing>F_done</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End">
+      <bpmn2:incoming>F_done</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F_start" sourceRef="Start" targetRef="Fork"/>
+    <bpmn2:sequenceFlow id="F_a" sourceRef="Fork" targetRef="Task_A"/>
+    <bpmn2:sequenceFlow id="F_b" sourceRef="Fork" targetRef="Task_B"/>
+    <bpmn2:sequenceFlow id="F_a_join" sourceRef="Task_A" targetRef="Join"/>
+    <bpmn2:sequenceFlow id="F_b_join" sourceRef="Task_B" targetRef="Join"/>
+    <bpmn2:sequenceFlow id="F_join" sourceRef="Join" targetRef="AfterJoin"/>
+    <bpmn2:sequenceFlow id="F_done" sourceRef="AfterJoin" targetRef="End"/>
+  </bpmn2:process>
+</bpmn2:definitions>

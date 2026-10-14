@@ -32,6 +32,20 @@ in
     jq
   ];
 
+  # Cap open files at 65536, soft AND hard.
+  #
+  # ERTS raises its soft RLIMIT_NOFILE to the hard limit at boot and sizes its
+  # fd and port tables from the result. Under a systemd user service the hard
+  # limit is ~1.07e9, and every BEAM then reserved ~4 GB and sat at ~2 GB
+  # resident before doing any work; several at once exhausted the host's memory
+  # (2026-10-14). Lowering only the soft limit does nothing, because ERTS raises
+  # it back. Same cap as ash_enterprise's devenv.nix.
+  enterShell = ''
+    if [ "$(ulimit -Hn)" = unlimited ] || [ "$(ulimit -Hn)" -gt 65536 ]; then
+      ulimit -n 65536
+    fi
+  '';
+
   services.postgres = {
     enable = true;
     package = pkgs.postgresql_16;

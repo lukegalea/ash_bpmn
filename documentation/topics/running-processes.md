@@ -229,11 +229,23 @@ gone to finish, not a failure to retry.
 ## Failure semantics
 
 A service task error propagates the error to Oban, which retries with backoff up
-to `max_attempts` (config, default 5). When attempts are exhausted, the worker
-marks the instance `:failed`, records an `:action_failed` event naming the node
-and reason, and stops retrying. `AshBpmn.retry_instance!/1` reactivates dead
-tokens and re-enqueues them — the operator's button after fixing the underlying
-problem.
+to `max_attempts` (config, default 5). Before it does, the worker hands the claim
+back -- the token returns from `:executing` to `:active`, keeping its attempt
+count -- so the retry can claim it again. On the last attempt, which is the
+engine's `max_attempts` or the job's own Oban `max_attempts`, whichever comes
+first, the worker kills the token, marks the instance `:failed`, records an
+`:action_failed` event naming the node, the token, the attempts and the error,
+and stops retrying. `AshBpmn.retry_instance!/1` resumes the instance, reactivates
+the tokens the engine gave up on with a fresh attempt budget, and re-enqueues
+them — the operator's button after fixing the underlying problem.
+
+A node that dies mid-job leaves its token `:executing`, and only the retry of
+that same job may take it back: once the claim is older than
+`config :ash_bpmn, claim_timeout:` (seconds, default 300) it re-claims and runs
+the node again, and until then it snoozes. A first attempt that finds the token
+`:executing` is a duplicate of a job that is running now, and skips. Keep the
+timeout longer than your slowest service task. A job whose token has moved on,
+or was killed, skips rather than failing.
 
 Human tasks never fail the instance by themselves: they wait. Expiry is the
 declared alternative to waiting forever, and it is opt-in per task.

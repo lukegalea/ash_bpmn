@@ -147,6 +147,24 @@ defmodule AshBpmn.Config do
   end
 
   @doc """
+  Seconds after which a retried advance job may take back a token still `:executing`
+  (default `300`).
+
+  A token is left `:executing` only when the job holding it died mid-node — the node crashed,
+  or the job raised after the node's own work. The retry of that job is the one thing that may
+  take it back, and only once the claim is this old; until then the retry snoozes. A fresh
+  job (attempt 1) that finds the token `:executing` is a redelivery and never takes it.
+
+  Keep it at least as long as your slowest service task. Oban's `Lifeline` only rescues an
+  orphaned job after its own `rescue_after`, so a crash is never re-run sooner than that
+  regardless of this value.
+  """
+  @spec claim_timeout() :: pos_integer()
+  def claim_timeout do
+    get(:claim_timeout, 300)
+  end
+
+  @doc """
   Returns the actor the engine acts as, or `nil` to keep the caller's own.
 
   By default the engine keeps whoever was really acting — the person who
