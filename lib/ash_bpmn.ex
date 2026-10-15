@@ -14,7 +14,7 @@ defmodule AshBpmn do
 
   alias AshBpmn.Config
   alias AshBpmn.FlightView
-  alias AshBpmn.Runtime.{AdvanceWorker, DomainResolver, Oban, Routing}
+  alias AshBpmn.Runtime.{AdvanceWorker, DomainResolver, Oban, Routing, Step}
   alias AshBpmn.Scope
 
   # ── Instance lifecycle ───────────────────────────────────────────────────
@@ -81,92 +81,104 @@ defmodule AshBpmn do
         {:error, reason}
 
       {:ok, definition} ->
-        # Create instance
-        instance =
-          resources.instance.create!(
-            %{
-              definition_id: definition.id,
-              subject_type: (subject && subject.__struct__ |> to_string()) || opts[:subject_type],
-              subject_id: (subject && subject.id) || opts[:subject_id],
-              parent_instance_id: opts[:parent_instance_id],
-              parent_token_id: opts[:parent_token_id],
-              trigger_depth: opts[:trigger_depth] || 0,
-              # The actor and the person accountable are not the same thing, and conflating
-              # them breaks two legitimate cases: an engine or system actor has no `:id` at
-              # all and would raise here, and a process started on someone's behalf should
-              # name *them* rather than whatever authority started it. So `:started_by_id`
-              # can be given explicitly, and the actor is only the fallback.
-              #
-              # This is the same distinction a host's audit layer already draws between
-              # `created_by` and `created_on_behalf_by`.
-              started_by_id: Keyword.get(opts, :started_by_id) || actor_id(actor),
-              # The instance has carried a `correlation_id` attribute, and its create action
-              # has accepted one, since the resource was written -- but nothing ever passed
-              # it, so every process was an orphan in the host's trace. A process started by
-              # a request, or by an event, belongs to the operation that started it.
-              correlation_id: Keyword.get(opts, :correlation_id)
-            },
-            Scope.engine(scope)
-          )
+        # One step: the instance, its first token, `:instance_started` and the first advance
+        # job commit together, so a start that dies halfway leaves no instance with no token,
+        # and no token with no job to carry it.
+        Step.transaction(resources, fn ->
+          # Create instance
+          instance =
+            resources.instance.create!(
+              %{
+                definition_id: definition.id,
+                subject_type:
+                  (subject && subject.__struct__ |> to_string()) || opts[:subject_type],
+                subject_id: (subject && subject.id) || opts[:subject_id],
+                parent_instance_id: opts[:parent_instance_id],
+                parent_token_id: opts[:parent_token_id],
+                trigger_depth: opts[:trigger_depth] || 0,
+                # The actor and the person accountable are not the same thing, and conflating
+                # them breaks two legitimate cases: an engine or system actor has no `:id` at
+                # all and would raise here, and a process started on someone's behalf should
+                # name *them* rather than whatever authority started it. So `:started_by_id`
+                # can be given explicitly, and the actor is only the fallback.
+                #
+                # This is the same distinction a host's audit layer already draws between
+                # `created_by` and `created_on_behalf_by`.
+                started_by_id: Keyword.get(opts, :started_by_id) || actor_id(actor),
+                # The instance has carried a `correlation_id` attribute, and its create action
+                # has accepted one, since the resource was written -- but nothing ever passed
+                # it, so every process was an orphan in the host's trace. A process started by
+                # a request, or by an event, belongs to the operation that started it.
+                correlation_id: Keyword.get(opts, :correlation_id)
+              },
+              Scope.engine(scope)
+            )
 
-        # Reload instance to get fresh state
-        instance =
-          resources.instance
-          |> Ash.Query.for_read(:read)
-          |> Ash.Query.filter(id == ^instance.id)
-          |> Ash.read_one!(Scope.engine(scope))
+          # Reload instance to get fresh state
+          instance =
+            resources.instance
+            |> Ash.Query.for_read(:read)
+            |> Ash.Query.filter(id == ^instance.id)
+            |> Ash.read_one!(Scope.engine(scope))
 
-        # Create initial token at the start node
-        start_node = definition.graph["start"]
+          # Create initial token at the start node
+          start_node = definition.graph["start"]
 
-        token =
-          resources.token.create!(
+          token =
+            resources.token.create!(
+              %{
+                instance_id: instance.id,
+                node_id: start_node,
+                status: :active
+              },
+              Scope.engine(scope)
+            )
+
+          FlightView.token_moved(instance, token)
+
+          # Record instance_started event
+          resources.process_event.create!(
             %{
               instance_id: instance.id,
-              node_id: start_node,
-              status: :active
+              kind: :instance_started,
+              data: %{
+                # The definition's own key rather than the caller's argument: a host that passed
+                # a definition directly never supplied one, and the key on the row is the
+                # authoritative answer either way.
+                "process_key" => definition.key,
+                "definition_version" => definition.version
+              }
             },
             Scope.engine(scope)
           )
 
-        FlightView.token_moved(instance, token)
+          # Enqueue first advance. The tenant rides in the job args because the
+          # worker runs in a different process, quite possibly on a different node
+          # and after a restart -- there is nothing left for it to infer one from.
+          Oban.insert(
+            AdvanceWorker,
+            Scope.to_job_args(scope, %{
+              "instance_id" => instance.id,
+              "token_id" => token.id,
+              "node_id" => start_node
+            })
+          )
 
-        # Record instance_started event
-        resources.process_event.create!(
-          %{
-            instance_id: instance.id,
-            kind: :instance_started,
-            data: %{
-              # The definition's own key rather than the caller's argument: a host that passed
-              # a definition directly never supplied one, and the key on the row is the
-              # authoritative answer either way.
-              "process_key" => definition.key,
-              "definition_version" => definition.version
-            }
-          },
-          Scope.engine(scope)
-        )
+          instance
+        end)
+        |> case do
+          # Reloaded after the commit rather than inside it: in inline mode the first advance
+          # runs at the commit, and the caller is owed the state it left behind.
+          {:ok, instance} ->
+            {:ok,
+             resources.instance
+             |> Ash.Query.for_read(:read)
+             |> Ash.Query.filter(id == ^instance.id)
+             |> Ash.read_one!(Scope.engine(scope))}
 
-        # Enqueue first advance. The tenant rides in the job args because the
-        # worker runs in a different process, quite possibly on a different node
-        # and after a restart -- there is nothing left for it to infer one from.
-        Oban.insert(
-          AdvanceWorker,
-          Scope.to_job_args(scope, %{
-            "instance_id" => instance.id,
-            "token_id" => token.id,
-            "node_id" => start_node
-          })
-        )
-
-        # Reload instance to get fresh state
-        fresh_instance =
-          resources.instance
-          |> Ash.Query.for_read(:read)
-          |> Ash.Query.filter(id == ^instance.id)
-          |> Ash.read_one!(Scope.engine(scope))
-
-        {:ok, fresh_instance}
+          {:error, reason} ->
+            {:error, reason}
+        end
     end
   rescue
     e -> {:error, e}
@@ -203,6 +215,23 @@ defmodule AshBpmn do
     resources = DomainResolver.resolve!()
     scope = Scope.from_record(task, opts)
 
+    # One step: the decision, its events, the timers it cancels, the wake of the token and
+    # whatever the token does next commit together, under the instance's lock. Completing a
+    # task is the human half of a node step, and a crash in the middle of it used to leave a
+    # completed task whose token never moved.
+    in_step(resources, task.instance_id, scope, fn ->
+      do_complete_task(resources, task, outcome, comment, actor, scope)
+    end)
+  rescue
+    e -> {:error, e}
+  end
+
+  defp in_step(resources, nil, _scope, fun), do: Step.transaction(resources, fun)
+
+  defp in_step(resources, instance_id, scope, fun),
+    do: Step.transaction(resources, fn _locked -> fun.() end, lock: {instance_id, scope})
+
+  defp do_complete_task(resources, task, outcome, comment, actor, scope) do
     # Reload so we complete against current state, not a struct the caller may
     # have been holding since before the task's timers were attached.
     task = reload_task!(resources, task, scope)
@@ -253,9 +282,7 @@ defmodule AshBpmn do
       advance_token_after_task(resources, completed, outcome, scope)
     end
 
-    {:ok, completed}
-  rescue
-    e -> {:error, e}
+    completed
   end
 
   @doc """
@@ -887,8 +914,16 @@ defmodule AshBpmn do
     # was advancing it; two deliveries of the same completion both passed it. `claim_waiting`
     # re-reads the row inside the transaction and admits exactly one winner, so a redelivery
     # loses here rather than routing the token twice.
+    #
+    # `rollback_on_error?: false` because losing is ordinary here and this runs inside the
+    # completion's step: a failed action otherwise rolls the whole transaction back, the
+    # task's completion with it.
     with true <- !is_nil(task.instance_id),
-         {:ok, token} <- resources.token.claim_waiting(token, Scope.engine(scope)) do
+         {:ok, token} <-
+           resources.token.claim_waiting(
+             token,
+             Keyword.put(Scope.engine(scope), :rollback_on_error?, false)
+           ) do
       instance =
         resources.instance
         |> Ash.Query.for_read(:read)

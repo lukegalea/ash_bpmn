@@ -128,9 +128,11 @@ not the same thing happening to a branch.
 
 A join node waits for all branches named in its `waits_for`. Each arriving token
 is consumed and counted; when the count of consumed arrivals for a `fork_id`
-reaches the expected arity, one fresh token is minted at the join and the process
-continues. All of this happens in one transaction per arrival, so two branches
-finishing simultaneously cannot double-fire: the counter arithmetic is the lock.
+reaches the expected arity, one fresh token is minted past the join, with an
+advance job of its own, and the process continues. Each arrival is one step (see
+"Each step commits as one" below) under the instance's row lock, so two branches
+finishing at the same moment are counted one after the other: the join fires
+exactly once, and neither arrival misses the other.
 
 A dead sibling branch means the join can never fire — the compiler rejects the
 mixed-gateway patterns that create this shape, and the reconciliation sweep
@@ -226,10 +228,40 @@ end event killed the branch, or the job is a redelivery of one that already ran 
 ends the wake with no error. It is the ordinary way for a timer whose branch is
 gone to finish, not a failure to retry.
 
+## Each step commits as one
+
+A node step -- a token through one node -- writes several rows: the token's own
+transition, the tokens that replace it, the instance's status, the process
+events, any tasks, candidates and timer ledger rows, and the Oban jobs that carry
+the next steps. They commit as one transaction, so a crash between two of them
+leaves none of them, and the token is exactly as its job claimed it.
+
+The Oban jobs are inside that transaction because Oban inserts through the same
+Ecto repo: a rollback drops them with everything else. That needs your Oban
+instance to use the same repo as your BPMN resources. If it uses another, the
+jobs commit on their own and a crash can leave a job for a step that rolled
+back -- harmless, because the claim gate makes it skip, but no longer atomic.
+
+What is not inside is the work the node does for you. A service task's action, a
+business rule's decision, an `ash:call` run after the claim and before the step's
+transaction opens, so a slow host call holds no database lock, and a rollback
+never pretends to undo something your action already did.
+
+Each step also takes its instance's row lock, so the steps of one instance
+commit one at a time. That is what gives "am I the last branch?" one answer: an
+end event asking whether any branch is still live, or a join counting arrivals,
+sees every earlier step of the instance committed. Only the writes are
+serialized; parallel branches still run their host work concurrently.
+
+Starting an instance, completing a task, and the timer, boundary-timer and
+catch-timer wakes are steps in the same sense. A wake's claim of a parked token
+is inside its step, so a wake that fails leaves the token parked for the retry.
+
 ## Failure semantics
 
 A service task error propagates the error to Oban, which retries with backoff up
-to `max_attempts` (config, default 5). Before it does, the worker hands the claim
+to `max_attempts` (config, default 5). So does any failure while the step applies
+its writes, since the rolled-back step has left nothing behind. Before it does, the worker hands the claim
 back -- the token returns from `:executing` to `:active`, keeping its attempt
 count -- so the retry can claim it again. On the last attempt, which is the
 engine's `max_attempts` or the job's own Oban `max_attempts`, whichever comes
@@ -245,7 +277,11 @@ that same job may take it back: once the claim is older than
 the node again, and until then it snoozes. A first attempt that finds the token
 `:executing` is a duplicate of a job that is running now, and skips. Keep the
 timeout longer than your slowest service task. A job whose token has moved on,
-or was killed, skips rather than failing.
+or was killed, skips rather than failing. A worker that outlives its claim --
+a retry took the token back and claimed it again -- finds a different attempt
+count when its step re-reads the token, writes nothing, and ends
+`{:ok, :claim_lost}`: its host action may have run twice, but the token moves
+once.
 
 Human tasks never fail the instance by themselves: they wait. Expiry is the
 declared alternative to waiting forever, and it is opt-in per task.
@@ -296,8 +332,9 @@ tell a lost job from a patient one and so recovered neither.
 ## Testing the engine
 
 `config :ash_bpmn, oban_testing: :inline` swaps the Oban boundary for a
-deterministic shim: advance jobs execute synchronously at insert, timers are
-stored and never self-fire — tests fire them explicitly via
+deterministic shim: advance jobs execute synchronously at insert -- or, when
+inserted by a step, as soon as that step commits, which is when a real Oban job
+would become runnable -- timers are stored and never self-fire — tests fire them explicitly via
 `AshBpmn.Runtime.Oban.TestJobs.fire!/2`. There is no clock, no polling, and no
 sleep in the engine's test suite, and your host tests get the same determinism.
 

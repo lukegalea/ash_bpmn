@@ -89,6 +89,29 @@ Nothing has been released yet. Everything below is the initial body of work.
   job of its own. `AshBpmn.retry_instance/2` now resumes a `:failed` instance
   (new instance `:resume` action), reactivates only the tokens the engine gave
   up on, and gives them a fresh attempt budget.
+- **A node step is atomic.** Advancing a token through a node -- the token's
+  transition, its successors, the instance's status, the process events, tasks,
+  candidates, timer ledger rows and the Oban jobs for the next steps -- now
+  commits as one transaction (`AshBpmn.Runtime.Step`), so a crash between two
+  of those writes leaves none of them. Oban jobs are inserted inside the
+  transaction and dropped with it on rollback, provided the host's Oban uses the
+  same repo as the BPMN resources. The host's own work (a service task's action,
+  a business rule, an `ash:call`) still runs outside, between the claim and the
+  step. Each step takes its instance's row `FOR UPDATE`, so two branches
+  finishing at once can no longer each miss the other at a join or an end event.
+  The same holds for starting an instance, completing a task, and the timer,
+  boundary and catch-timer wakes, whose claim out of `:waiting` is now inside
+  the step and rolls back with it. Because a failed step leaves nothing behind,
+  a failure applying effects now takes the failed-node path (handed back, then
+  `:action_failed`) instead of propagating. The node past a parallel join now
+  runs in an advance job of its own instead of inline in the arriving branch's
+  job. Inline test mode runs a job a step enqueued once the step commits, as
+  production does; flight-view broadcasts are likewise sent after commit. A
+  step goes ahead only while its job's claim is still current (status and
+  attempt count, re-read under a row lock), so a worker that outlived its claim
+  writes nothing and ends `{:ok, :claim_lost}`. `:claim`, `:claim_waiting` and
+  `:release` are now compare-and-set in the `UPDATE` itself, so two concurrent
+  claims can no longer both win under `READ COMMITTED`.
 
 - Opening the designer writes nothing. It used to create a draft row the moment
   it was opened on a key with no draft, seeded from a starter template whenever

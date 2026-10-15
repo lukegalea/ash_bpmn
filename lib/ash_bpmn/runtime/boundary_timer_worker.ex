@@ -34,6 +34,7 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
   alias AshBpmn.Config
   alias AshBpmn.FlightView
   alias AshBpmn.Runtime.DomainResolver
+  alias AshBpmn.Runtime.Step
   alias AshBpmn.Scope
 
   def queue, do: Config.queue()
@@ -63,11 +64,28 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
     end
   end
 
+  # One step either way, under the instance's lock: what the boundary does to the attached
+  # task, the token and the new branch commits together or not at all. An interrupt that
+  # cancelled the task and died before routing used to leave a cancelled task on a token still
+  # parked for it.
   defp interrupt(resources, token, args, scope) do
-    if args["interrupting"] == false do
-      spawn_branch(resources, token, args, scope)
-    else
-      do_interrupt(resources, token, args, scope)
+    resources
+    |> Step.transaction(
+      fn _locked ->
+        if args["interrupting"] == false do
+          spawn_branch(resources, token, args, scope)
+        else
+          do_interrupt(resources, token, args, scope)
+        end
+      end,
+      lock: {token.instance_id, scope}
+    )
+    |> case do
+      {:ok, result} -> result
+      {:error, :lost_to_completion} -> {:ok, :lost_to_completion}
+      {:error, :not_waiting} -> {:ok, :not_waiting}
+      {:error, :instance_gone} -> {:cancel, :instance_gone}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -122,17 +140,25 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
     task = find_task(resources, token, args["attached_to"], scope)
 
     with :ok <- cancel_task(resources, task, scope),
-         {:ok, token} <- resources.token.claim_waiting(token, Scope.engine(scope)) do
+         {:ok, token} <- resources.token.claim_waiting(token, ordinary_loss(scope)) do
       FlightView.token_moved(load_instance(resources, token.instance_id, scope), token)
       route(resources, token, task, args, scope)
     else
       # Both losses are ordinary. `:lost_to_completion` means somebody decided the task
       # between this job being promoted and this line running; `:not_waiting` means the
       # branch was already pruned by a terminate, a cancel, or a redelivery of this job.
-      {:error, :task_not_cancellable} -> {:ok, :lost_to_completion}
-      {:error, _} -> {:ok, :not_waiting}
+      #
+      # Rolled back rather than returned, because the task may already be cancelled by the
+      # time the claim loses, and a cancelled task on a branch nobody routed is exactly the
+      # half-step this transaction exists to prevent.
+      {:error, :task_not_cancellable} -> Step.rollback(resources, :lost_to_completion)
+      {:error, _} -> Step.rollback(resources, :not_waiting)
     end
   end
+
+  # A lost race inside the step is an answer, not an error: it must not abort the transaction
+  # the way a failed action otherwise does, so the `else` above decides what to undo.
+  defp ordinary_loss(scope), do: Keyword.put(Scope.engine(scope), :rollback_on_error?, false)
 
   defp find_task(resources, token, attached_to, scope) do
     resources.human_task
@@ -148,7 +174,7 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
   defp cancel_task(_resources, nil, _scope), do: :ok
 
   defp cancel_task(resources, task, scope) do
-    case resources.human_task.cancel(task, Scope.engine(scope)) do
+    case resources.human_task.cancel(task, ordinary_loss(scope)) do
       {:ok, _} -> :ok
       {:error, _} -> {:error, :task_not_cancellable}
     end

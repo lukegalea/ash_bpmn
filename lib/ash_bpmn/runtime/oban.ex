@@ -6,7 +6,9 @@ defmodule AshBpmn.Runtime.Oban do
   Oban shim — production delegates to real Oban; test mode runs inline.
 
   When `AshBpmn.Config.oban_testing() == :inline`:
-    * `insert/3` without `scheduled_at` — executes `worker.perform/1` synchronously.
+    * `insert/3` without `scheduled_at` — executes `worker.perform/1` synchronously. Inside an
+      `AshBpmn.Runtime.Step` it runs once the step commits, and not at all if it rolls back,
+      which is when a real Oban job inserted in that transaction would become runnable.
     * `unique:` is **not** honoured; see the comment on `insert_inline/3` for why
       implementing it would not make the only two callers testable.
     * `insert/3` with `scheduled_at` — stores in TestJobs ETS table (does NOT execute).
@@ -113,12 +115,36 @@ defmodule AshBpmn.Runtime.Oban do
   # not and the suite is asserting a behaviour the system does not have. Better an
   # acknowledged blind spot than a green test for a fiction. The debounce is production
   # behaviour and needs a test with a real Oban queue behind it.
+  #
+  # Inside a step the job is deferred to the step's commit, and the job handed back carries
+  # the id it will run or be stored under. Running it at insert put the downstream step inside
+  # the upstream one's transaction, so a failure three nodes on rolled back the node that
+  # enqueued it -- a coupling between steps production Oban does not have, and one that would
+  # have made every atomicity test here assert something untrue.
   defp insert_inline(worker_module, args, opts) do
+    id = System.unique_integer([:positive])
+
+    if AshBpmn.Runtime.Step.in_step?() do
+      AshBpmn.Runtime.Step.after_commit(fn -> insert_inline(worker_module, args, opts, id) end)
+
+      {:ok,
+       %Oban.Job{
+         id: id,
+         args: args,
+         worker: worker_module,
+         scheduled_at: Keyword.get(opts, :scheduled_at),
+         meta: Keyword.get(opts, :meta, %{})
+       }}
+    else
+      insert_inline(worker_module, args, opts, id)
+    end
+  end
+
+  defp insert_inline(worker_module, args, opts, id) do
     AshBpmn.Runtime.Oban.TestJobs.ensure_started()
 
     if Keyword.has_key?(opts, :scheduled_at) do
       # Timer — store, do NOT execute
-      id = System.unique_integer([:positive])
       scheduled_at = Keyword.get(opts, :scheduled_at)
       meta = Keyword.get(opts, :meta, %{})
 
@@ -144,7 +170,6 @@ defmodule AshBpmn.Runtime.Oban do
       {:ok, job}
     else
       # Immediate — execute synchronously
-      id = System.unique_integer([:positive])
       job = %Oban.Job{id: id, args: args}
 
       # Every shape `Oban.Worker.perform/1` is allowed to return, because a worker that snoozes

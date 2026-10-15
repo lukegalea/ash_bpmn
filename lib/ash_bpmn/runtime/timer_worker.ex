@@ -20,6 +20,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
   alias AshBpmn.FlightView
   alias AshBpmn.Runtime.DomainResolver
   alias AshBpmn.Runtime.Routing
+  alias AshBpmn.Runtime.Step
   alias AshBpmn.Scope
 
   def queue, do: Config.queue()
@@ -139,7 +140,28 @@ defmodule AshBpmn.Runtime.TimerWorker do
     end
   end
 
+  # The expiry is one step, under the instance's lock: the forced completion, its events, the
+  # wake and the token's next move commit together. An expiry that died after forcing the
+  # task complete used to leave an `:expired` task on a token still parked for it.
   defp fire_timer(resources, task, "expire", scope, _args) do
+    fun = fn -> expire(resources, task, scope) end
+
+    case task.instance_id do
+      nil -> Step.transaction(resources, fun)
+      id -> Step.transaction(resources, fn _locked -> fun.() end, lock: {id, scope})
+    end
+    |> case do
+      {:ok, result} -> result
+      {:error, :instance_gone} -> {:ok, :skipped}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fire_timer(_resources, _task, kind, _scope, _args) do
+    {:error, "unknown timer kind: #{kind}"}
+  end
+
+  defp expire(resources, task, scope) do
     # Force complete the task with :expired outcome
     resources.human_task.force_complete!(task, :expired, Scope.engine(scope))
 
@@ -168,7 +190,11 @@ defmodule AshBpmn.Runtime.TimerWorker do
 
       # Same wake-as-guard as the completion path: a timer firing on a task someone has just
       # completed must lose, and a status read cannot arbitrate that.
-      case resources.token.claim_waiting(token, Scope.engine(scope)) do
+      case resources.token.claim_waiting(
+             token,
+             # Losing is ordinary here; it must not roll the expiry back with it.
+             Keyword.put(Scope.engine(scope), :rollback_on_error?, false)
+           ) do
         {:error, _} ->
           :ok
 
@@ -254,10 +280,6 @@ defmodule AshBpmn.Runtime.TimerWorker do
     end
 
     {:ok, :expired}
-  end
-
-  defp fire_timer(_resources, _task, kind, _scope, _args) do
-    {:error, "unknown timer kind: #{kind}"}
   end
 
   defp invoke_escalation(resolver, task, ctx) do

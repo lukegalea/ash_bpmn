@@ -246,6 +246,7 @@ defmodule AshBpmn.Resources.Token do
 
           validate AshBpmn.Resources.Token.StatusIsActive
           change AshBpmn.Resources.Token.EnsureActiveInDb
+          change {AshBpmn.Resources.Token.CompareAndSet, status: :active}
           change set_attribute(:status, :executing)
           change AshBpmn.Resources.Token.IncrementAttempts
         end
@@ -276,6 +277,7 @@ defmodule AshBpmn.Resources.Token do
 
           validate AshBpmn.Resources.Token.StatusIsWaiting
           change AshBpmn.Resources.Token.EnsureWaitingInDb
+          change {AshBpmn.Resources.Token.CompareAndSet, status: :waiting}
           change set_attribute(:status, :executing)
           change AshBpmn.Resources.Token.ClearWaitingFields
           change AshBpmn.Resources.Token.IncrementAttempts
@@ -309,6 +311,7 @@ defmodule AshBpmn.Resources.Token do
 
           validate AshBpmn.Resources.Token.StatusIsExecuting
           change {AshBpmn.Resources.Token.EnsureStatusInDb, status: :executing}
+          change {AshBpmn.Resources.Token.CompareAndSet, status: :executing}
           change set_attribute(:status, :active)
         end
 
@@ -552,6 +555,44 @@ defmodule AshBpmn.Resources.Token.EnsureStatusInDb do
         end
       end
     end)
+  end
+end
+
+defmodule AshBpmn.Resources.Token.CompareAndSet do
+  @moduledoc """
+  Makes a claim transition a compare-and-set in the `UPDATE` itself.
+
+  `EnsureStatusInDb` re-reads the row before writing, which catches a token that moved long
+  ago but not one that moves between that read and the write: two workers under `READ
+  COMMITTED` can both read `:active` and both claim. This puts the expected state into the
+  update's `WHERE` -- the status the transition starts from, and the attempt count the caller
+  read -- so the database admits exactly one writer, and the loser gets a stale-record error
+  instead of a second claim.
+
+  The attempt count is what makes it a claim *version*. Every claim increments it and nothing
+  else does, so `(status, attempts)` names one particular claim: a token released and claimed
+  again in between is `:executing` again, but not at the count the caller holds.
+  """
+  use Ash.Resource.Change
+
+  import Ash.Expr, only: [expr: 1]
+
+  @impl true
+  def init(opts) do
+    case opts[:status] do
+      status when is_atom(status) and not is_nil(status) -> {:ok, opts}
+      other -> {:error, "status must be an atom, got: #{inspect(other)}"}
+    end
+  end
+
+  @impl true
+  def change(changeset, opts, _context) do
+    status = opts[:status]
+
+    case changeset.data.attempts do
+      nil -> Ash.Changeset.filter(changeset, expr(status == ^status and is_nil(attempts)))
+      seen -> Ash.Changeset.filter(changeset, expr(status == ^status and attempts == ^seen))
+    end
   end
 end
 

@@ -82,6 +82,11 @@ defmodule AshBpmn.Test.ProcessEvent do
     repo: AshBpmn.TestRepo,
     instance: AshBpmn.Test.Instance
 
+  # Test-only: lets a test crash a step between two of its writes. See the module.
+  changes do
+    change AshBpmn.Test.FaultInjection, on: [:create]
+  end
+
   policies do
     bypass do
       authorize_if always()

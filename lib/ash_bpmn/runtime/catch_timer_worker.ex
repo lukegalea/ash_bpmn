@@ -29,6 +29,7 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
   alias AshBpmn.FlightView
   alias AshBpmn.Runtime.DomainResolver
   alias AshBpmn.Runtime.Routing
+  alias AshBpmn.Runtime.Step
   alias AshBpmn.Scope
 
   def queue, do: Config.queue()
@@ -49,14 +50,37 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
       # cancelling stops Oban retrying something that cannot become true.
       {:cancel, :token_gone}
     else
-      case resources.token.claim_waiting(token, Scope.engine(scope)) do
-        {:error, _} ->
-          # Killed, cancelled, or already woken. All three are ordinary.
-          {:ok, :not_waiting}
+      wake(resources, token, args["node_id"], scope)
+    end
+  end
 
-        {:ok, token} ->
-          advance(resources, token, args["node_id"], scope)
-      end
+  # The wake and everything it does commit as one step, under the instance's lock. The claim
+  # out of `:waiting` is inside it, so a wake that dies halfway rolls the claim back too and
+  # Oban's retry finds the token parked exactly as it was -- rather than `:executing` at a
+  # catch event, which re-entering would arm for a second full wait.
+  defp wake(resources, token, node_id, scope) do
+    resources
+    |> Step.transaction(
+      fn _locked ->
+        # Losing the claim must not abort the transaction the way a failed action otherwise
+        # does: it is the ordinary way for this worker to end.
+        opts = Keyword.put(Scope.engine(scope), :rollback_on_error?, false)
+
+        case resources.token.claim_waiting(token, opts) do
+          {:error, _} ->
+            # Killed, cancelled, or already woken. All three are ordinary.
+            {:ok, :not_waiting}
+
+          {:ok, token} ->
+            advance(resources, token, node_id, scope)
+        end
+      end,
+      lock: {token.instance_id, scope}
+    )
+    |> case do
+      {:ok, result} -> result
+      {:error, :instance_gone} -> {:cancel, :instance_gone}
+      {:error, reason} -> {:error, reason}
     end
   end
 
