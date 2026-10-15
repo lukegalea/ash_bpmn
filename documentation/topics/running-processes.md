@@ -261,7 +261,12 @@ is inside its step, so a wake that fails leaves the token parked for the retry.
 
 A service task error propagates the error to Oban, which retries with backoff up
 to `max_attempts` (config, default 5). So does any failure while the step applies
-its writes, since the rolled-back step has left nothing behind. Before it does, the worker hands the claim
+its writes, since the rolled-back step has left nothing behind -- including a call
+activity whose child process cannot be started (nothing published under its key,
+say): the start is part of the call activity's step, so its token is handed back
+rather than left waiting for a child that never existed, and on the last attempt
+the instance fails with `:action_failed` naming the call activity and the reason.
+The subset has no error boundary event a call activity could route this to. Before it does, the worker hands the claim
 back -- the token returns from `:executing` to `:active`, keeping its attempt
 count -- so the retry can claim it again. On the last attempt, which is the
 engine's `max_attempts` or the job's own Oban `max_attempts`, whichever comes

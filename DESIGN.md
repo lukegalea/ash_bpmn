@@ -538,7 +538,11 @@ Job args: `%{"instance_id" => id, "token_id" => id, "node_id" => binary}`. Worke
    claim back (`:release`, attempts kept) and returns the error so Oban retries with
    backoff; on the last attempt (the engine's `max_attempts` or the job's own) the
    worker kills the token, marks the instance `:failed`, records `:action_failed` — one
-   step — and returns `{:ok, :failed_permanently}`.
+   step — and returns `{:ok, :failed_permanently}`. A call activity whose child cannot
+   be started is such a failure: the start is inside the call activity's step, so the
+   park rolls back with it. The subset has no error boundary on a call activity
+   (boundary events attach to user tasks only; error events are end events only), so
+   there is nowhere else to route it.
 
 Timers (`AshBpmn.Runtime.TimerWorker`, args `%{"task_id", "kind"}`): unless task
 status in [:completed, :cancelled] → fire: `remind` → ProcessEvent

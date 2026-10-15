@@ -112,6 +112,15 @@ Nothing has been released yet. Everything below is the initial body of work.
   writes nothing and ends `{:ok, :claim_lost}`. `:claim`, `:claim_waiting` and
   `:release` are now compare-and-set in the `UPDATE` itself, so two concurrent
   claims can no longer both win under `READ COMMITTED`.
+- **A call activity whose child cannot start no longer leaves its parent
+  waiting forever.** The call activity parked its token, then started the child;
+  when the start failed the park had already committed, so every retry found
+  the token `:waiting` and skipped. The start is now part of the call
+  activity's step, so its failure rolls the park back, and it resolves like a
+  failed service task: handed back for Oban's retry, and on the last attempt the
+  instance `:failed` with an `:action_failed` event naming the call activity and
+  why the child could not start. (The subset has no error boundary on a call
+  activity to route to instead.)
 
 - Opening the designer writes nothing. It used to create a draft row the moment
   it was opened on a key with no draft, seeded from a starter template whenever

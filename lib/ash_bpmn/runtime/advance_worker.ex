@@ -991,13 +991,23 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         })
 
       {:error, reason} ->
-        # The parent is already parked. Raising sends the job back to Oban, which retries the
-        # whole dispatch -- and the park is idempotent under that because the token is no
-        # longer `:executing` and the claim fails. Better a retry than a token waiting for a
-        # child that was never started.
-        raise "call activity #{spec.node_id} could not start #{spec.key}: #{inspect(reason)}"
+        # Raising rolls the whole step back -- the park and the `:node_entered` event with it --
+        # so the token is `:executing` under this job's claim again, and the failure takes the
+        # service task's path: handed back for Oban's retry, and on the last attempt the
+        # instance `:failed` with `:action_failed` naming the call activity and this message.
+        #
+        # This used to raise after the park had committed. The retry then found the token
+        # `:waiting`, not `:active`, and skipped, so the parent waited for a child that was
+        # never started, forever. A call activity has no error boundary to route to: the
+        # compiler admits boundary events on user tasks only, and error events on end events
+        # only, so the give-up is the whole of what BPMN offers this model.
+        raise "call activity #{spec.node_id} could not start #{spec.key}: #{describe_start_error(reason)}"
     end
   end
+
+  defp describe_start_error(reason) when is_binary(reason), do: reason
+  defp describe_start_error(%{__exception__: true} = e), do: Exception.message(e)
+  defp describe_start_error(reason), do: inspect(reason)
 
   # Mints the token the fan-out was holding back, once the last instance has finished.
   #
