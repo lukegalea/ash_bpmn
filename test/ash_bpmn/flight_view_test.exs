@@ -298,8 +298,9 @@ defmodule AshBpmn.FlightViewTest do
 
       # The claim out of the park is movement too, then the branch runs on —
       # again creation announced ahead of the retirement behind it. The
-      # starved join's token dies and its continuation is minted straight
-      # past it, and the case runs to its end.
+      # starved join's token dies and its continuation is minted `:active`
+      # past it, for an advance job of its own to claim, and the case runs to
+      # its end.
       sequence =
         drain_payloads()
 
@@ -312,6 +313,7 @@ defmodule AshBpmn.FlightViewTest do
                %{"node_id" => "MgrDecision", "status" => "consumed"},
                %{"node_id" => "Join_1", "status" => "executing"},
                %{"node_id" => "Join_1", "status" => "dead"},
+               %{"node_id" => "Provision", "status" => "active"},
                %{"node_id" => "Provision", "status" => "executing"},
                %{"node_id" => "End_approved", "status" => "active"},
                %{"node_id" => "Provision", "status" => "consumed"},

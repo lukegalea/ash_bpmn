@@ -147,17 +147,19 @@ defmodule AshBpmn.Config do
   end
 
   @doc """
-  Seconds after which a retried advance job may take back a token still `:executing`
+  Seconds after which a token still `:executing` is presumed abandoned by its worker
   (default `300`).
 
-  A token is left `:executing` only when the job holding it died mid-node — the node crashed,
-  or the job raised after the node's own work. The retry of that job is the one thing that may
-  take it back, and only once the claim is this old; until then the retry snoozes. A fresh
-  job (attempt 1) that finds the token `:executing` is a redelivery and never takes it.
+  A token is left `:executing` only when the worker holding it died mid-node -- killed by a
+  deploy, the OOM killer, a lost node. Two things may take it back once the claim is this
+  old: the retry of that same job (which snoozes until then), and
+  `AshBpmn.Runtime.SweepWorker`, which recovers it with a compare-and-set and re-enqueues the
+  advance -- the path for a worker Oban's `Lifeline` has not rescued yet, or never will. A
+  fresh job (attempt 1) that finds the token `:executing` is a redelivery and never takes it.
 
-  Keep it at least as long as your slowest service task. Oban's `Lifeline` only rescues an
-  orphaned job after its own `rescue_after`, so a crash is never re-run sooner than that
-  regardless of this value.
+  Keep it longer than your slowest service task. Neither path can tell a slow worker from a
+  dead one; a slow one that outlives this timeout cannot advance the token twice -- its step
+  finds somebody else's claim and writes nothing -- but its host action will have run twice.
   """
   @spec claim_timeout() :: pos_integer()
   def claim_timeout do

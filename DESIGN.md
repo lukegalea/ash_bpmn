@@ -511,21 +511,38 @@ arg where shown, resolved via `AshBpmn.Resources.for_domain/1`.
 Job args: `%{"instance_id" => id, "token_id" => id, "node_id" => binary}`. Worker:
 
 1. load instance+token; unless token :active → `{:ok, :skipped}` (idempotent redelivery)
-2. token `:claim` — if claim loses the race → `{:ok, :lost_race}`
-3. load graph from definition; execute node by type (§6.3); in ONE transaction
-   (Ash `Ash.transaction` on domain where supported, else sequential ops with the
-   claim-gate as the idempotency anchor):
-   compute outgoing, consume/dead-end token, write next token(s) or complete
-   instance, write ProcessEvent rows, enqueue next AdvanceWorker jobs (Oban insert is
-   transactional — Oban 2.x supports `Oban.insert/2` inside `Ecto` multi via repo
-   transaction; call through `AshBpmn.Runtime.Oban.insert_txn/1` helper that uses
-   `Oban.insert/1` (transaction-aware))
+2. token `:claim` — a compare-and-set in the `UPDATE` on (status `:active`, attempt
+   count read); if it loses the race → `{:ok, :lost_race}`. The claim commits on its
+   own: it is what marks the token as being worked on while the node runs.
+3. load graph from definition; execute node by type (§6.3) — the host's work (service
+   task action, business rule, `ash:call`) runs here, **outside** any transaction.
+4. **A node step is atomic.** The node's writes run as one `AshBpmn.Runtime.Step`:
+   one `Ash.transaction` over the engine's resources, which first takes the instance
+   row `FOR UPDATE` and re-reads the token `FOR UPDATE`, and goes ahead only if this
+   job's claim is still current (status `:executing`, same attempt count) — else it
+   writes nothing and returns `{:ok, :claim_lost}`. Inside: consume/park/kill the token,
+   write next token(s) or complete/fail the instance, ProcessEvent rows, tasks,
+   candidates, timer ledger rows, and every `Oban.insert/2` for the next jobs. Oban
+   inserts through the same repo, so a job is part of the transaction and a rollback
+   drops it — **the host's Oban must use the BPMN resources' repo** for this to hold.
+   The instance lock serializes the steps of one instance, which is what makes "am I
+   the last branch?" (end events, joins) have one answer. Flight-view broadcasts and,
+   in inline test mode, the jobs a step enqueued run after the outermost step commits
+   and are dropped if it rolls back. Starting an instance, completing a task, and the
+   timer, boundary and catch-timer wakes are steps in the same sense; a wake's claim
+   out of `:waiting` is inside its step, so a wake that fails leaves the token parked.
 4. human task nodes: create HumanTask + TaskCandidate rows (via resolver), attach
    timers as Oban jobs (`scheduled_at` = now + minutes), record job ids, **do not
    advance** — token sits at :executing until completion
-5. return `{:ok, ...}`; rescue/error → `{:error, reason}` letting Oban retry with
-   backoff; after `max_attempts` (job.attempts >= max) worker marks instance
-   `:failed` and returns `{:ok, :failed_permanently}` (cancel the loop).
+5. return `{:ok, ...}`; a failure in 3 or 4 (4 having rolled back whole) hands the
+   claim back (`:release`, attempts kept) and returns the error so Oban retries with
+   backoff; on the last attempt (the engine's `max_attempts` or the job's own) the
+   worker kills the token, marks the instance `:failed`, records `:action_failed` — one
+   step — and returns `{:ok, :failed_permanently}`. A call activity whose child cannot
+   be started is such a failure: the start is inside the call activity's step, so the
+   park rolls back with it. The subset has no error boundary on a call activity
+   (boundary events attach to user tasks only; error events are end events only), so
+   there is nowhere else to route it.
 
 Timers (`AshBpmn.Runtime.TimerWorker`, args `%{"task_id", "kind"}`): unless task
 status in [:completed, :cancelled] → fire: `remind` → ProcessEvent
@@ -539,7 +556,8 @@ demands.
 Join semantics (corrected to match the implementation, 2026-09-07 — the previous
 paragraph said a dead sibling meant the join could never fire; the code has never
 behaved that way): when a token arrives at a join node, do not consume-and-advance;
-within one transaction set it :consumed, then:
+within one step (§6.2.4, under the instance lock) retire it (`:dead` arriving from an
+advance, `:consumed` from a task completion), then:
 
 1. Count tokens at the same node (same instance, same fork) with status :consumed
    **or :dead** — a dead token counts as arrived. When the count reaches the
@@ -562,11 +580,22 @@ here (and in `docs/bpmn-event-dimension/05-hygiene.md` #9) so that decision is m
 deliberately, not discovered by accretion.
 
 Sweep (`AshBpmn.Runtime.SweepWorker`): plain Oban worker the host may cron
-(`config :ash_oban`/Oban plugins). Finds instances :running whose :active tokens
-have no live Oban job (query oban_jobs via repo — provide helper with graceful
-fallback if Oban table unqueryable: re-enqueue advances for all :active tokens with
-attempts < max, idempotent by claim-gate) + reports stuck joins via ProcessEvent
-`:sweep_recovered`.
+(`config :ash_oban`/Oban plugins). For each :running instance:
+
+- `:active` tokens: re-enqueue the advance (idempotent by the claim gate), with a
+  `:sweep_recovered` event, in one step.
+- `:executing` tokens whose claim (`updated_at`) is older than `claim_timeout`
+  (default 300 s): **executing tokens are recovered after `claim_timeout`.** The worker
+  that claimed them is presumed dead. `:recover` sets the token back to `:active` as a
+  compare-and-set on the status and attempt count the sweep read — so a racing sweep,
+  or a worker that finished meanwhile, makes it a no-op — and the same step records
+  `:sweep_recovered` (`"problem" => "stale_claim"`) and re-enqueues the advance. The
+  attempt count is kept and the re-claim increments it, so a node that kills its worker
+  every time exhausts `max_attempts` and fails the instance. A worker that was only
+  slow loses at its step's claim check and writes nothing; its host action may have run
+  twice, so `claim_timeout` must exceed the slowest service task.
+- `:waiting` tokens on a timer with no live wake job: reported (`"problem" =>
+  "orphaned_wait"`), never repaired.
 
 ### 6.3 Node execution dispatch (`AshBpmn.Runtime.Interpreter`)
 

@@ -246,6 +246,7 @@ defmodule AshBpmn.Resources.Token do
 
           validate AshBpmn.Resources.Token.StatusIsActive
           change AshBpmn.Resources.Token.EnsureActiveInDb
+          change {AshBpmn.Resources.Token.CompareAndSet, status: :active}
           change set_attribute(:status, :executing)
           change AshBpmn.Resources.Token.IncrementAttempts
         end
@@ -276,6 +277,7 @@ defmodule AshBpmn.Resources.Token do
 
           validate AshBpmn.Resources.Token.StatusIsWaiting
           change AshBpmn.Resources.Token.EnsureWaitingInDb
+          change {AshBpmn.Resources.Token.CompareAndSet, status: :waiting}
           change set_attribute(:status, :executing)
           change AshBpmn.Resources.Token.ClearWaitingFields
           change AshBpmn.Resources.Token.IncrementAttempts
@@ -309,6 +311,28 @@ defmodule AshBpmn.Resources.Token do
 
           validate AshBpmn.Resources.Token.StatusIsExecuting
           change {AshBpmn.Resources.Token.EnsureStatusInDb, status: :executing}
+          change {AshBpmn.Resources.Token.CompareAndSet, status: :executing}
+          change set_attribute(:status, :active)
+        end
+
+        # The sweep taking back a claim nothing is carrying any more: the worker that held it
+        # died, and the token has been `:executing` for longer than `claim_timeout`. The same
+        # transition as `:release` -- back to `:active`, attempts kept, so a node that kills its
+        # worker every time still runs out of budget -- under its own name, because the audit
+        # log records action names and "the node failed and handed it back" and "the sweep
+        # found it abandoned" are different things to have happened.
+        #
+        # The compare-and-set is the whole safety argument. The sweep read the token as
+        # `:executing` at some attempt count; the update only lands if it still is, so a
+        # worker that was merely slow and finished meanwhile, or a retry that already took the
+        # claim back and claimed again, makes this a no-op rather than a second claim on a
+        # token someone is running.
+        update :recover do
+          accept []
+          require_atomic? false
+
+          validate AshBpmn.Resources.Token.StatusIsExecuting
+          change {AshBpmn.Resources.Token.CompareAndSet, status: :executing}
           change set_attribute(:status, :active)
         end
 
@@ -335,6 +359,7 @@ defmodule AshBpmn.Resources.Token do
         define :consume, action: :consume
         define :kill, action: :kill
         define :release, action: :release
+        define :recover, action: :recover
         define :reactivate, action: :reactivate
         define :promote_routing, action: :promote_routing
       end
@@ -552,6 +577,44 @@ defmodule AshBpmn.Resources.Token.EnsureStatusInDb do
         end
       end
     end)
+  end
+end
+
+defmodule AshBpmn.Resources.Token.CompareAndSet do
+  @moduledoc """
+  Makes a claim transition a compare-and-set in the `UPDATE` itself.
+
+  `EnsureStatusInDb` re-reads the row before writing, which catches a token that moved long
+  ago but not one that moves between that read and the write: two workers under `READ
+  COMMITTED` can both read `:active` and both claim. This puts the expected state into the
+  update's `WHERE` -- the status the transition starts from, and the attempt count the caller
+  read -- so the database admits exactly one writer, and the loser gets a stale-record error
+  instead of a second claim.
+
+  The attempt count is what makes it a claim *version*. Every claim increments it and nothing
+  else does, so `(status, attempts)` names one particular claim: a token released and claimed
+  again in between is `:executing` again, but not at the count the caller holds.
+  """
+  use Ash.Resource.Change
+
+  import Ash.Expr, only: [expr: 1]
+
+  @impl true
+  def init(opts) do
+    case opts[:status] do
+      status when is_atom(status) and not is_nil(status) -> {:ok, opts}
+      other -> {:error, "status must be an atom, got: #{inspect(other)}"}
+    end
+  end
+
+  @impl true
+  def change(changeset, opts, _context) do
+    status = opts[:status]
+
+    case changeset.data.attempts do
+      nil -> Ash.Changeset.filter(changeset, expr(status == ^status and is_nil(attempts)))
+      seen -> Ash.Changeset.filter(changeset, expr(status == ^status and attempts == ^seen))
+    end
   end
 end
 

@@ -42,14 +42,16 @@ defmodule AshBpmn.Test.Invoker do
 
   @doc """
   Stages what `invoke/2` returns from now on. Pass `:ok` (the default), an
-  `{:ok, map()}` tuple, an `{:error, term()}` tuple, or an exception struct
-  to raise.
+  `{:ok, map()}` tuple, an `{:error, term()}` tuple, an exception struct
+  to raise, or a zero-arity function whose return value is the result -- for
+  a test that needs something to happen *while* a node's action is running.
   """
   def set_result(:ok), do: store(:ok)
   def set_result({:ok, map} = value) when is_map(map), do: store(value)
   def set_result({:error, _reason} = value), do: store(value)
 
   def set_result(%{__struct__: _} = exception), do: store({:__raise__, exception})
+  def set_result(fun) when is_function(fun, 0), do: store({:__apply__, fun})
 
   @doc "Returns all recorded invocations (list of `{id, action, timestamp}` tuples)."
   def recorded_calls do
@@ -96,6 +98,7 @@ defmodule AshBpmn.Test.Invoker do
       [{:result, {:ok, map}}] when is_map(map) -> {:ok, map}
       [{:result, {:error, reason}}] -> {:error, reason}
       [{:result, {:__raise__, exception}}] -> raise exception
+      [{:result, {:__apply__, fun}}] -> fun.()
       [] -> :ok
     end
   end

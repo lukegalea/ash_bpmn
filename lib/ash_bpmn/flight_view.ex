@@ -503,9 +503,9 @@ defmodule AshBpmn.FlightView do
       nil ->
         :ok
 
+      # After the step commits: a viewer must never see a move the transaction then undid.
       pubsub ->
-        broadcast(pubsub, instance, token)
-        :ok
+        AshBpmn.Runtime.Step.after_commit(fn -> broadcast(pubsub, instance, token) end)
     end
   end
 
