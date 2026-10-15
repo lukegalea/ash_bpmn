@@ -283,8 +283,8 @@ the node again, and until then it snoozes. A first attempt that finds the token
 `:executing` is a duplicate of a job that is running now, and skips. Keep the
 timeout longer than your slowest service task. A job whose token has moved on,
 or was killed, skips rather than failing. A worker that outlives its claim --
-a retry took the token back and claimed it again -- finds a different attempt
-count when its step re-reads the token, writes nothing, and ends
+a retry or the sweep took the token back and another job claimed it -- finds a
+different attempt count when its step re-reads the token, writes nothing, and ends
 `{:ok, :claim_lost}`: its host action may have run twice, but the token moves
 once.
 
@@ -327,9 +327,19 @@ lost to a deploy, a cancelled queue, a bug — and re-enqueues their advances
 net, not the primary driver; the engine is push-based, and the sweep exists so
 "stuck instance" is a detected condition rather than a support ticket.
 
-It considers `:active` tokens only, and leaves `:waiting` ones alone. A parked
-token is not missing a job — it correctly has none — so re-enqueuing an advance
-for it would push a branch past an approval nobody has given or a date that has
+It also recovers `:executing` tokens whose claim is older than `claim_timeout`:
+the worker that claimed them died mid-node, and nothing else will ever hand the
+claim back. The take-back is a compare-and-set on the status and attempt count
+the sweep read, so a second sweep, or a worker that finished in the meantime,
+makes it a no-op; it records `:sweep_recovered` with `"problem" =>
+"stale_claim"` and re-enqueues the advance, in one step. The attempt count is
+kept, so a node that kills its worker every time is recovered until it runs out
+of `max_attempts` and then fails its instance like any other exhausted node. A
+younger claim is left alone, because the sweep cannot tell a slow worker from a
+dead one by looking — keep the timeout above your slowest service task.
+
+It leaves `:waiting` tokens alone. A parked token is not missing a job — it
+correctly has none — so re-enqueuing an advance for it would push a branch past an approval nobody has given or a date that has
 not arrived. That distinction is only available to the sweep because parking has
 its own status; back when parked tokens sat in `:executing`, the sweep could not
 tell a lost job from a patient one and so recovered neither.

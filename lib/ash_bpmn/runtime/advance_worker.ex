@@ -179,9 +179,9 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   # The node's writes, as one `AshBpmn.Runtime.Step`. It locks the instance, re-reads the
   # token under a row lock, and goes ahead only if this job's claim is still the token's
   # current one: same status, same attempt count. A worker that was merely slow -- its claim
-  # outlived `claim_timeout`, a retry took it back and claimed again -- finds a different
-  # attempt count here and writes nothing, so a slow worker can run its host action twice but
-  # can never advance the token twice.
+  # outlived `claim_timeout`, a retry or the sweep took the token back and another job claimed
+  # it -- finds a different attempt count here and writes nothing, so a slow worker can run its
+  # host action twice but can never advance the token twice.
   #
   # A failure anywhere in `fun` rolls the whole step back -- the effects applied so far, the
   # jobs inserted, the events recorded -- which leaves the token exactly as this job claimed

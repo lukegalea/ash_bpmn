@@ -315,6 +315,27 @@ defmodule AshBpmn.Resources.Token do
           change set_attribute(:status, :active)
         end
 
+        # The sweep taking back a claim nothing is carrying any more: the worker that held it
+        # died, and the token has been `:executing` for longer than `claim_timeout`. The same
+        # transition as `:release` -- back to `:active`, attempts kept, so a node that kills its
+        # worker every time still runs out of budget -- under its own name, because the audit
+        # log records action names and "the node failed and handed it back" and "the sweep
+        # found it abandoned" are different things to have happened.
+        #
+        # The compare-and-set is the whole safety argument. The sweep read the token as
+        # `:executing` at some attempt count; the update only lands if it still is, so a
+        # worker that was merely slow and finished meanwhile, or a retry that already took the
+        # claim back and claimed again, makes this a no-op rather than a second claim on a
+        # token someone is running.
+        update :recover do
+          accept []
+          require_atomic? false
+
+          validate AshBpmn.Resources.Token.StatusIsExecuting
+          change {AshBpmn.Resources.Token.CompareAndSet, status: :executing}
+          change set_attribute(:status, :active)
+        end
+
         # The operator's retry (`AshBpmn.retry_instance/2`), after the cause has been fixed. A
         # fresh budget, because the old one is what ran out: keeping it would fail the token on
         # its very next claim.
@@ -338,6 +359,7 @@ defmodule AshBpmn.Resources.Token do
         define :consume, action: :consume
         define :kill, action: :kill
         define :release, action: :release
+        define :recover, action: :recover
         define :reactivate, action: :reactivate
         define :promote_routing, action: :promote_routing
       end

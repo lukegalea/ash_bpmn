@@ -580,11 +580,22 @@ here (and in `docs/bpmn-event-dimension/05-hygiene.md` #9) so that decision is m
 deliberately, not discovered by accretion.
 
 Sweep (`AshBpmn.Runtime.SweepWorker`): plain Oban worker the host may cron
-(`config :ash_oban`/Oban plugins). Finds instances :running whose :active tokens
-have no live Oban job (query oban_jobs via repo — provide helper with graceful
-fallback if Oban table unqueryable: re-enqueue advances for all :active tokens with
-attempts < max, idempotent by claim-gate) + reports stuck joins via ProcessEvent
-`:sweep_recovered`.
+(`config :ash_oban`/Oban plugins). For each :running instance:
+
+- `:active` tokens: re-enqueue the advance (idempotent by the claim gate), with a
+  `:sweep_recovered` event, in one step.
+- `:executing` tokens whose claim (`updated_at`) is older than `claim_timeout`
+  (default 300 s): **executing tokens are recovered after `claim_timeout`.** The worker
+  that claimed them is presumed dead. `:recover` sets the token back to `:active` as a
+  compare-and-set on the status and attempt count the sweep read — so a racing sweep,
+  or a worker that finished meanwhile, makes it a no-op — and the same step records
+  `:sweep_recovered` (`"problem" => "stale_claim"`) and re-enqueues the advance. The
+  attempt count is kept and the re-claim increments it, so a node that kills its worker
+  every time exhausts `max_attempts` and fails the instance. A worker that was only
+  slow loses at its step's claim check and writes nothing; its host action may have run
+  twice, so `claim_timeout` must exceed the slowest service task.
+- `:waiting` tokens on a timer with no live wake job: reported (`"problem" =>
+  "orphaned_wait"`), never repaired.
 
 ### 6.3 Node execution dispatch (`AshBpmn.Runtime.Interpreter`)
 

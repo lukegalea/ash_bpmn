@@ -121,6 +121,19 @@ Nothing has been released yet. Everything below is the initial body of work.
   instance `:failed` with an `:action_failed` event naming the call activity and
   why the child could not start. (The subset has no error boundary on a call
   activity to route to instead.)
+- **The sweep recovers tokens whose worker died holding the claim.**
+  `AshBpmn.Runtime.SweepWorker` looked at `:active` and `:waiting` tokens only,
+  so a token whose worker was killed after claiming it stayed `:executing`
+  forever. A claim older than `claim_timeout` is now taken back with the new
+  token `:recover` action -- a compare-and-set on the status and attempt count
+  the sweep read -- recorded as `:sweep_recovered` (`"problem" =>
+  "stale_claim"`) and its advance re-enqueued, in one step. The attempt count
+  survives, so a node that kills its worker every time still exhausts
+  `max_attempts` and fails its instance. A worker that was merely slow cannot
+  advance the token twice: its step re-reads the token under a row lock and
+  writes nothing unless the attempt count is still the one it claimed at (the
+  job ends `{:ok, :claim_lost}`); its host action can run twice, which is why
+  `claim_timeout` must exceed the slowest service task.
 
 - Opening the designer writes nothing. It used to create a draft row the moment
   it was opened on a key with no draft, seeded from a starter template whenever
