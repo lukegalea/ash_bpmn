@@ -69,7 +69,10 @@ gateway conditions, never in resolver specs, never in the invoker.
    and in particular put every context value through `AshBpmn.Feel.to_feel_value/2`:
    FEEL numbers are decimal, so a plain Elixir integer in the context makes every
    numeric comparison a type error, which becomes `null`, which becomes a silently
-   wrong branch.
+   wrong branch. Evaluation is bounded: it runs in a task that is killed outright on
+   timeout (a backtracking regex in `matches()` does not yield), and a timed-out
+   condition is an error, never "branch not taken" — so a gateway whose condition
+   cannot finish refuses to route rather than routing somewhere else.
 10. **A business rule task asks; it never decides.** `businessRuleTask` resolves to
     the host's `AshBpmn.DecisionResolver`, the third seam beside `ActionInvoker` and
     `AssignmentResolver`. The graph carries a decision *reference*, declared FEEL
@@ -168,6 +171,36 @@ gateway conditions, never in resolver specs, never in the invoker.
     it `audit?: true`, and make sure the event reaches the log carrying the tenant
     the way the log partitions by. Neither mistake raises. See
     `AshBpmn.Resources.Signal`.
+22. **Triggers and signals need an `AshBpmn.EventSource`.** Set
+    `config :ash_bpmn, event_source: MyApp.Audit.EventSource`, a module implementing
+    the `AshBpmn.EventSource` behaviour — the adapter that streams the host's event
+    log to the engine's sweep. It is the only coupling to that log; the engine never
+    sees the log's own types. The trigger sweep raises at start without one, so
+    subscriptions and signal delivery do not run on a host that has not set it.
+23. **A parked token is `:waiting`, not stuck.** A token at a catch node (timer,
+    message, signal, call-activity return) has no job queued and may sit that way
+    for months; that is a correct steady state. Leave its status to the engine:
+    only the wake that claims it out of `:waiting` (`:claim_waiting`, a
+    compare-and-set) may move it, which is what makes delivery redelivery-safe and
+    lets the first of a racing timer, boundary or cancel win. The sweep recovers
+    `:active` and stale `:executing` tokens and deliberately never touches
+    `:waiting` ones; a wait whose waker is gone is reported, not repaired. Do not
+    count `:waiting` tokens as stuck work.
+24. **Retry is for `:failed`; restart is for a new definition.**
+    `AshBpmn.retry_instance/2` resumes a `:failed` instance and re-enqueues the
+    tokens the engine gave up on, each with a fresh attempt budget — so fix the
+    cause first, or the retry spends that budget on the same failure. It refuses an
+    `:errored` instance: an error end event is a designed outcome, and its dead
+    tokens are branches killed on purpose — start a new instance instead. Moving a
+    run onto another definition is `restart_instance/2` (rule 20), not a retry.
+25. **Live token movement needs a `:pubsub_server`.** `AshBpmn.FlightView`
+    broadcasts every token transition on Phoenix PubSub after it commits, but only
+    when `config :ash_bpmn, pubsub_server:` names a running PubSub. Without one the
+    broadcasts are silent no-ops and `subscribe/2` returns
+    `{:error, :pubsub_not_configured}` (or `:pubsub_not_running`); poll
+    `token_positions/2` instead. Even with it, a broadcast is a hint — views that
+    must be exact re-fetch `token_positions/2`. See
+    [the flight view](documentation/topics/flight-view.md).
 
 ## Testing
 

@@ -203,7 +203,7 @@ the rest, step by step.
 
 ## Running the demo
 
-`dev/` is a small Phoenix application that instantiates the six resources,
+`dev/` is a small Phoenix application that instantiates the six core resources,
 implements the two callback modules against a hard-coded org chart, and mounts
 the designer, viewer and task list. It is the fastest way to see the whole thing
 working, and it is where the screenshots above come from.
