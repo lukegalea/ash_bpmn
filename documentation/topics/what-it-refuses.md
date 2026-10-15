@@ -23,14 +23,15 @@ The compiler rejects, each with the offending element's id in the error:
   events, conditional catch events, signal
   throw and catch events, error end events, exclusive and parallel gateways,
   conditional and default flows, parallel multi-instance activities, call
-  activities and receive tasks. Call activities, ad-hoc and
-  transactional sub-processes,
+  activities and receive tasks. Sub-processes (embedded, ad-hoc and
+  transactional), script, manual and untyped tasks,
   the rest of the event-definition taxonomy (message on anything but an
   intermediate catch event, signal on anything but an intermediate throw or
   catch, conditional on anything but an intermediate catch, error on anything
   but an end event,
-  escalation, conditional, compensation, cancel, link), complex and
-  event-based gateways, loop and multi-instance markers: rejected, loudly. A
+  escalation, compensation, cancel, link), complex and
+  event-based gateways, standard loop markers and sequential multi-instance:
+  rejected, loudly. A
   notation element a business analyst drew and a system silently ignored is how
   the diagram and the system end up being about different processes.
 - **Multiple start events, zero end events, dangling flows, unreachable nodes,
@@ -208,7 +209,11 @@ The compiler rejects, each with the offending element's id in the error:
 - **BPMN conformance, and interchange with foreign engines.** Conformance serves
   interchange; we do not interchange. The XML out is the XML in, edited by
   bpmn-js.
-- **Message events and external correlation.** Phase 3, if a use case earns it.
+- **Messages anywhere but a catch.** A message catch event (or a receive task)
+  waits for an Ash action on a host resource, correlated through `ash:subscribe`
+  — see the refusal above. A `messageEventDefinition` on a start, throw, end or
+  boundary event is refused at compile time, with the error naming where it is
+  supported.
 - **Lanes.** Lanes are presentation, not execution semantics — an expensive
   misunderstanding the corpus data already prices for you.
 - **A second runtime.** No JVM, no gRPC bridge, no engine beside the app. The
