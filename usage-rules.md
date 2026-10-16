@@ -20,8 +20,8 @@ requests; reach for the designer only when routing, parallelism or joins exist.
 > **The process graph orchestrates. It never decides, never validates, and never
 > authorizes.**
 
-Every node resolves to a host callback (`AshBpmn.ActionInvoker` for service tasks,
-your Ash actions for mutations). If a process definition contains a business
+Every node resolves to a host callback (`AshBpmn.ActionInvoker` or a declared
+callable for service tasks, your Ash actions for mutations). If a process definition contains a business
 invariant, that invariant is now enforced in one place and bypassed by every other
 caller. Business rules belong in Ash actions, changes and validations — never in
 gateway conditions, never in resolver specs, never in the invoker.
@@ -41,11 +41,17 @@ gateway conditions, never in resolver specs, never in the invoker.
 4. **Definitions are immutable and versioned.** `publish` is one-way. Instances pin
    their definition for life; never migrate in-flight instances automatically.
    A changed process is a new version (or a new key if token topology changes).
+   The one deletion is `discard`, and it removes a draft only: published and
+   retired rows are pinned by the instances that ran them.
 5. **Tokens carry routing, not business data.** A token row holds node ids and
    status. Everything else is read from the subject through Ash at execution time.
 6. **Timers must be cancellable.** Task completion cancels the task's outstanding
    timer jobs. If you add a new completion path, cancel the timers — an escalation
-   email for a task approved four days ago is the canonical incident.
+   email for a task approved four days ago is the canonical incident. When the host
+   installs the timer ledger (`AshBpmn.Resources.TimerJob`), a new cancel path also
+   records the cancellation on the ledger row with a reason
+   (`record_cancelled`): Oban keeps no reason for a cancelled job and prunes the
+   job itself, so the ledger row is the only answer to "why did this never fire?".
 7. **The interpreter reads the snapshot, never a module.** The engine loads
    `definition.graph`. Do not introduce compile-time module references into
    execution paths.
@@ -63,7 +69,10 @@ gateway conditions, never in resolver specs, never in the invoker.
    and in particular put every context value through `AshBpmn.Feel.to_feel_value/2`:
    FEEL numbers are decimal, so a plain Elixir integer in the context makes every
    numeric comparison a type error, which becomes `null`, which becomes a silently
-   wrong branch.
+   wrong branch. Evaluation is bounded: it runs in a task that is killed outright on
+   timeout (a backtracking regex in `matches()` does not yield), and a timed-out
+   condition is an error, never "branch not taken" — so a gateway whose condition
+   cannot finish refuses to route rather than routing somewhere else.
 10. **A business rule task asks; it never decides.** `businessRuleTask` resolves to
     the host's `AshBpmn.DecisionResolver`, the third seam beside `ActionInvoker` and
     `AssignmentResolver`. The graph carries a decision *reference*, declared FEEL
@@ -92,10 +101,19 @@ gateway conditions, never in resolver specs, never in the invoker.
     still the only contract. When the host's `ActionInvoker` exports
     `exists?(ref) :: boolean`, the compiler verifies every service/send action at
     publish time, the same promise the decision resolver's `exists?/1` makes; a
-    catalogue crash degrades the *panel* to free text, never the engine.
+    catalogue crash degrades the *panel* to free text, never the engine. A
+    service or send task carries exactly one binding: `ash:taskConfig action=`,
+    dispatched through the `ActionInvoker`, or `ash:call ref="Domain.name"`, a
+    callable the host declared in a domain's `callables` block
+    (`AshBpmn.Domain`). For `ash:call` the declaration is the allowlist: publish
+    refuses a ref no configured domain declares and an `ash:input` that is not an
+    argument of the callable's action.
 14. **Actions are idempotent under redelivery.** Node execution may run twice
-    (Oban redelivery). The token claim gate makes double-advance safe; your
-    `ActionInvoker` callbacks must tolerate a second invocation.
+    (Oban redelivery, or a claim older than `config :ash_bpmn, claim_timeout:`
+    taken back from a worker presumed dead). The token claim gate makes
+    double-advance safe; it cannot un-run host work, so your `ActionInvoker`
+    callbacks and callables must tolerate a second invocation. Keep
+    `claim_timeout` above your slowest service task.
 15. **Engine calls go through `AshBpmn.Scope`, never `authorize?: false`.** Every
     internal call passes `AshBpmn.Scope.engine/2`, which carries the actor and the
     tenant and marks the call for the bypass each generated resource declares on
@@ -145,6 +163,44 @@ gateway conditions, never in resolver specs, never in the invoker.
     on the predecessor, per token, including the parked waits that nothing will now
     wake and the call-activity children left with nobody to return to. Read that
     record; it is the only place those say anything.
+21. **A signal resource must be audited, and its event must carry the tenant.**
+    Signals are delivered through the host's event log, so the `Signal` resource
+    only works on a base that writes to that log. Its nearest template,
+    `ProcessEvent`, is deliberately `audit?: false`; copied wholesale, a `Signal`
+    compiles, throws succeed, rows accumulate and nothing is ever delivered. Give
+    it `audit?: true`, and make sure the event reaches the log carrying the tenant
+    the way the log partitions by. Neither mistake raises. See
+    `AshBpmn.Resources.Signal`.
+22. **Triggers and signals need an `AshBpmn.EventSource`.** Set
+    `config :ash_bpmn, event_source: MyApp.Audit.EventSource`, a module implementing
+    the `AshBpmn.EventSource` behaviour — the adapter that streams the host's event
+    log to the engine's sweep. It is the only coupling to that log; the engine never
+    sees the log's own types. The trigger sweep raises at start without one, so
+    subscriptions and signal delivery do not run on a host that has not set it.
+23. **A parked token is `:waiting`, not stuck.** A token at a catch node (timer,
+    message, signal, call-activity return) has no job queued and may sit that way
+    for months; that is a correct steady state. Leave its status to the engine:
+    only the wake that claims it out of `:waiting` (`:claim_waiting`, a
+    compare-and-set) may move it, which is what makes delivery redelivery-safe and
+    lets the first of a racing timer, boundary or cancel win. The sweep recovers
+    `:active` and stale `:executing` tokens and deliberately never touches
+    `:waiting` ones; a wait whose waker is gone is reported, not repaired. Do not
+    count `:waiting` tokens as stuck work.
+24. **Retry is for `:failed`; restart is for a new definition.**
+    `AshBpmn.retry_instance/2` resumes a `:failed` instance and re-enqueues the
+    tokens the engine gave up on, each with a fresh attempt budget — so fix the
+    cause first, or the retry spends that budget on the same failure. It refuses an
+    `:errored` instance: an error end event is a designed outcome, and its dead
+    tokens are branches killed on purpose — start a new instance instead. Moving a
+    run onto another definition is `restart_instance/2` (rule 20), not a retry.
+25. **Live token movement needs a `:pubsub_server`.** `AshBpmn.FlightView`
+    broadcasts every token transition on Phoenix PubSub after it commits, but only
+    when `config :ash_bpmn, pubsub_server:` names a running PubSub. Without one the
+    broadcasts are silent no-ops and `subscribe/2` returns
+    `{:error, :pubsub_not_configured}` (or `:pubsub_not_running`); poll
+    `token_positions/2` instead. Even with it, a broadcast is a hint — views that
+    must be exact re-fetch `token_positions/2`. See
+    [the flight view](documentation/topics/flight-view.md).
 
 ## Testing
 
@@ -173,7 +229,9 @@ that has it, or judge a snippet in-VM with `AshAgentTools.judge_laws/1`.
 The laws with the most teeth *for this codebase*:
 
 - **#7 — jobs are idempotent.** The engine's workers run at-least-once
-  (`advance` allows ten attempts; the timers allow three). Double-advance is
+  (`advance` stops at the engine's `config :ash_bpmn, max_attempts:`, default
+  five, or at its Oban job's ten, whichever runs out first; the timers allow
+  three). Double-advance is
   made safe by the token claim gate (rule 14), not by job uniqueness — the
   runtime workers deliberately declare no `unique:` because a uniqueness window
   would suppress a legitimate redelivery, and the trigger sweeps declare

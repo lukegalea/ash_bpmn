@@ -13,8 +13,10 @@ bindings work, and the one licence obligation you cannot skip.
 ![The designer editing a draft process](../assets/designer.png)
 
 The canvas is bpmn-js. The header is the definition's identity — key, version,
-and whether you are looking at a draft or a published version — plus the four
-actions: fit, revert to the stored draft, save, and publish. The right-hand
+and whether you are looking at a draft or a published version — plus the
+actions: fit, revert to the stored draft, save, publish, and, on a stored draft
+only, discard draft. On a read-only baseline the header offers fit and, when the
+host configures `:customize`, Customize instead. The right-hand
 column is the properties panel, empty until something is selected.
 
 Every screenshot on this page comes from the demo app in `dev/`, which is a real
@@ -172,6 +174,9 @@ way vendors from Camunda to Flowable attach execution bindings to a diagram.
 | Element | On | Carries |
 |---|---|---|
 | `ash:taskConfig action="..."` | serviceTask, sendTask | the `ActionInvoker` reference |
+| `ash:call ref="Domain.name"` | serviceTask, sendTask | a callable declared in a domain's `callables` block (`AshBpmn.Domain`); the alternative to `ash:taskConfig action=`, never both |
+| `ash:process key="..."` | callActivity | the key of the published child process to start |
+| `ash:subscribe resource action correlate match` | intermediateCatchEvent with a message definition, receiveTask | the host event the token waits for; on a conditional catch only `resource` is read |
 | `ash:taskConfig` | userTask | candidates, exclusions, outcomes, timers |
 | `ash:taskConfig outcome="..."` | endEvent | the instance outcome |
 | `ash:decision ref binding name?` | businessRuleTask | the decision reference: `binding` is `latest` or `pinned` (a pin requires `version`); `name` names the decision inside a multi-decision key |
@@ -213,8 +218,12 @@ descriptor, keep the alias.
 
 ## Versioning and the designer
 
-The designer edits the **draft** row of a definition key. Publish freezes it as a
-new version; the designer then starts the next draft from the published XML.
+The designer edits the **draft** row of a definition key. Opening it writes
+nothing: the draft row is created by the first save, from the XML being saved.
+Publish freezes the draft as a new version; the designer then shows the published
+XML, and the next save starts a new draft from it. A draft can be discarded
+(`discard/1` on the definition resource, or Discard draft in the header);
+published and retired versions cannot.
 In-flight instances are untouched — they pin the version they started. The
 instance viewer renders the pinned version's graph, not the latest draft, which
 means what an operator sees is what the instance is actually executing.

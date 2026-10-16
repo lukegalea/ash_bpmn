@@ -155,15 +155,21 @@ candidate list that silently disagrees with the role model is a bug you want
 ## What it executes
 
 The [Common Executable] subset that the 39,695-model corpus study says is what
-real processes actually use: start and end events, user and service tasks,
-**business rule tasks**, exclusive gateways (with default flows), parallel fork
-and join. Gateway conditions
+real processes actually use, plus some elements beyond it:
+start and end events (including terminate and error end
+events), user, service, send and **business rule tasks**, exclusive gateways
+(with default flows), parallel fork and join, timer, message, conditional and
+signal catch events, signal throw events, timer boundary events on user tasks,
+call activities, receive tasks and parallel multi-instance activities. The
+full list, and the reason for each refusal, is in
+[what it refuses](documentation/topics/what-it-refuses.md). Gateway conditions
 are written in **FEEL**, the DMN expression language (`subject.amount > 50000`,
 `task.outcome = "approved"`), validated at publish time and stored in the snapshot as source
 text. One language serves gateway conditions and DMN decision tables alike, which is why this
 package no longer carries an expression language of its own.
-Everything else in BPMN's 244 collaboration-relevant elements — call activities,
-ad-hoc sub-processes, the event taxonomy, compensation markers — is rejected at
+Everything else in BPMN's 244 collaboration-relevant elements — sub-processes,
+the rest of the event taxonomy, complex and event-based gateways, compensation
+markers — is rejected at
 compile time with the element's id in the error, because silently ignoring an
 element a business analyst drew is how a diagram and a system quietly become
 about different processes.
@@ -182,8 +188,11 @@ end
 
 Then:
 
-- instantiate the six resources into one of your domains (the `ash_events` pattern
-  — `use AshBpmn.Resources.Definition, domain: ..., repo: ...`),
+- instantiate the six core resources into one of your domains (the `ash_events`
+  pattern — `use AshBpmn.Resources.Definition, domain: ..., repo: ...`), plus
+  the optional ones for the features you use: `TimerJob` (the timer ledger),
+  `Signal` (signal events), and `Subscription`, `Cursor` and `Dispatch` (event
+  triggers),
 - point `config :ash_bpmn, assignment_resolver: ...` and `action_invoker: ...` at
   your two callback modules,
 - add bpmn-js to your asset bundle and register the designer hook (one import),
@@ -194,7 +203,7 @@ the rest, step by step.
 
 ## Running the demo
 
-`dev/` is a small Phoenix application that instantiates the six resources,
+`dev/` is a small Phoenix application that instantiates the six core resources,
 implements the two callback modules against a hard-coded org chart, and mounts
 the designer, viewer and task list. It is the fastest way to see the whole thing
 working, and it is where the screenshots above come from.
