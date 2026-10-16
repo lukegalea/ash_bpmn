@@ -219,8 +219,8 @@ defmodule AshBpmn.Scope do
 
   Nothing breaks when both are `nil`: the engine bypass is what authorizes these
   reads. What a host gains by assigning them is that its *own* policies, and its
-  own tenant scoping, apply to the task list — which is the difference between a
-  work queue and a list of every work item in the database.
+  own tenant scoping, apply to what the designer and viewer read — which is the
+  difference between one tenant's processes and every process in the database.
   """
   @spec from_assigns(map()) :: t()
   def from_assigns(assigns) when is_map(assigns) do

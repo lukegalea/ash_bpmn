@@ -66,12 +66,6 @@ await serviceTask.click();
 await settle(800);
 await shot("designer-service-task", page.locator("#ash-bpmn-designer-root").first());
 
-// ── Task list ──────────────────────────────────────────────────────────────
-
-await page.goto(`${base}/tasks`, { waitUntil: "networkidle" });
-await settle(800);
-await shot("task-list", page.locator("#ash-bpmn-tasklist").first());
-
 // ── Instance viewer ────────────────────────────────────────────────────────
 
 // Pick instances by status rather than by row position: the seeds create one

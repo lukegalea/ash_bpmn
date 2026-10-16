@@ -173,8 +173,11 @@ defmodule AshBpmn.Web.DesignerLive do
 
       @ash_bpmn_designer_domain unquote(domain)
       @ash_bpmn_designer_process_key unquote(process_key)
-      # See the note in task_list_live.ex: escaping an option that is already AST stores
-      # the alias unexpanded, and it reaches `apply/3` as a tuple rather than a module.
+      # NOT `Macro.escape/1`. The option arrives as AST -- `{{:__aliases__, _, [...]}, :fun,
+      # []}` -- and escaping it stores the AST *of that AST*, so the module reaches
+      # `apply/3` as an unexpanded alias tuple rather than an atom (`ArgumentError: 2nd
+      # argument: not an atom`, with nothing pointing at the option). Unquoting injects the
+      # AST where it is evaluated, which resolves the alias against the using module.
       @ash_bpmn_designer_actor_mfa unquote(actor_mfa)
       @ash_bpmn_designer_decisions_mfa unquote(decisions_mfa)
       @ash_bpmn_designer_actions_mfa unquote(actions_mfa)
@@ -891,9 +894,8 @@ defmodule AshBpmn.Web.DesignerLive do
   appended to `args`. Any failure degrades to an empty list rather than a broken
   page.
 
-  Public and living here rather than in the `use`-injected module for the same
-  reason as `AshBpmn.Web.TaskListLive.resolve_principal_ids/2`: the option is a
-  compile-time constant in the generated module, so an inline `case` there
+  Public and living here rather than in the `use`-injected module because the
+  option is a compile-time constant in the generated module, so an inline `case` there
   leaves the tuple clause provably dead for every host that omits the option,
   and dialyzer rightly complains about it.
   """
