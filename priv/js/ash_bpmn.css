@@ -105,9 +105,9 @@ the element's <g>, so the rules target its shape children.
 }
 
 /*
- * LiveView chrome — toolbar buttons, task forms, error jumps.
+ * LiveView chrome — toolbar buttons, panel forms, error jumps.
  *
- * The designer/task LiveViews ride this vocabulary instead of Tailwind
+ * The designer and viewer LiveViews ride this vocabulary instead of Tailwind
  * classes: framework markup is outside any host's Tailwind content scan,
  * so utility classes compile to nothing there (the "bare buttons" bug).
  * These are token-driven: hosts that define the --a2ui-* vocabulary (the
@@ -346,20 +346,6 @@ the element's <g>, so the rules target its shape children.
   white-space: nowrap;
 }
 
-.ash-bpmn-heading--lg {
-  font-size: 1.125rem;
-  margin-bottom: 1rem;
-}
-
-.ash-bpmn-overline {
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: var(--ash-bpmn-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin: 0 0 0.5rem;
-}
-
 .ash-bpmn-subtle {
   font-size: 0.75rem;
   color: var(--ash-bpmn-muted);
@@ -391,7 +377,7 @@ the element's <g>, so the rules target its shape children.
   text-decoration: underline;
 }
 
-/* The properties panel and the cards of the task list. */
+/* The properties panel. */
 .ash-bpmn-panel {
   width: 18rem;
   flex-shrink: 0;
@@ -408,29 +394,6 @@ the element's <g>, so the rules target its shape children.
   font-size: 0.75rem;
   color: var(--ash-bpmn-muted);
   margin: 0 0 1rem;
-}
-
-.ash-bpmn-page {
-  padding: 1rem;
-  background: var(--ash-bpmn-surface);
-}
-
-.ash-bpmn-section {
-  margin-bottom: 1.5rem;
-}
-
-.ash-bpmn-card {
-  margin-bottom: 0.75rem;
-  padding: 0.75rem;
-  border: 1px solid var(--ash-bpmn-hairline);
-  border-radius: 0.5rem;
-}
-
-.ash-bpmn-card__title {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--ash-bpmn-on-surface);
-  margin-bottom: 0.5rem;
 }
 
 .ash-bpmn-callout {
@@ -530,28 +493,9 @@ the element's <g>, so the rules target its shape children.
   justify-content: space-between;
 }
 
-.ash-bpmn-form-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.ash-bpmn-form-row + .ash-bpmn-form-row {
-  margin-top: 0.5rem;
-}
-
-/*
- * Inputs and selects. width: 100% serves the designer's block-flow panel;
- * in a flex row (the task forms) flex-basis 0 from `flex: 1` overrides it,
- * so both contexts share one class.
- */
+/* Inputs and selects, sized for the designer's block-flow panel. */
 .ash-bpmn-input {
   width: 100%;
-}
-
-.ash-bpmn-input--sm {
-  flex: 0 1 auto;
-  width: 8rem;
 }
 
 .ash-bpmn-field--mono {

@@ -36,8 +36,8 @@ defmodule AshBpmn.MixProject do
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]
-  # `dev/` is the demo host app: a real Phoenix server that mounts the designer,
-  # viewer and task list against a real database. It is how the screenshots in
+  # `dev/` is the demo host app: a real Phoenix server that mounts the designer
+  # and viewer against a real database. It is how the screenshots in
   # the docs are produced, and the only way to exercise the bpmn-js hook.
   defp elixirc_paths(:dev), do: ["lib", "dev/lib"]
   defp elixirc_paths(_), do: ["lib"]

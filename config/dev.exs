@@ -4,7 +4,7 @@
 import Config
 
 # Configuration for the demo host app in dev/ — the runnable Phoenix server
-# that mounts the designer, viewer and task list. Never shipped: `files:` in
+# that mounts the designer and viewer. Never shipped: `files:` in
 # mix.exs excludes config/, and a consuming application writes its own.
 
 config :ash_bpmn, ecto_repos: [AshBpmnDev.Repo]

@@ -79,7 +79,7 @@ defmodule AshBpmn.PoliciesTest do
       # host with tenancy of its own but untenanted BPMN tables sends a tenant to
       # a resource that has no strategy for one. Ash stores it and the data layer
       # ignores it -- worth pinning, because the alternative would be a break in
-      # every task list of every such host.
+      # every designer and viewer of every such host.
       assert {:ok, _} =
                AshBpmn.Test.HumanTask
                |> Ash.Query.for_read(:read)

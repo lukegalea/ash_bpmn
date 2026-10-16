@@ -28,7 +28,6 @@ defmodule AshBpmnDevWeb.Layout do
           <nav class="mx-auto flex max-w-7xl items-center gap-6 px-6 py-3">
             <span class="text-sm font-semibold tracking-tight">AshBpmn</span>
             <.nav_link href="/designer" label="Designer" />
-            <.nav_link href="/tasks" label="My tasks" />
             <.nav_link href="/instances" label="Instances" />
           </nav>
         </header>
@@ -80,16 +79,6 @@ defmodule AshBpmnDevWeb.ViewerLive do
   @moduledoc false
 
   use AshBpmn.Web.ViewerLive, domain: AshBpmnDev.Bpmn
-end
-
-defmodule AshBpmnDevWeb.TaskListLive do
-  @moduledoc false
-
-  # The manager is the signed-in user for the demo, so the task list has
-  # something in it — a host would resolve this from the session.
-  use AshBpmn.Web.TaskListLive,
-    domain: AshBpmnDev.Bpmn,
-    principal_ids: ["22222222-2222-2222-2222-222222222222"]
 end
 
 defmodule AshBpmnDevWeb.InstanceListLive do
@@ -164,9 +153,8 @@ defmodule AshBpmnDevWeb.Router do
   scope "/", AshBpmnDevWeb do
     pipe_through :browser
 
-    live "/", TaskListLive, :index
+    live "/", DesignerLive, :index
     live "/designer", DesignerLive, :index
-    live "/tasks", TaskListLive, :index
     live "/instances", InstanceListLive, :index
     live "/instances/:id", ViewerLive, :show
   end

@@ -201,6 +201,19 @@ gateway conditions, never in resolver specs, never in the invoker.
     `token_positions/2` instead. Even with it, a broadcast is a hint — views that
     must be exact re-fetch `token_positions/2`. See
     [the flight view](documentation/topics/flight-view.md).
+26. **Present tasks from your own `HumanTask`, as the person.** ash_bpmn ships no
+    task list screen and does not depend on a UI library. Give your `HumanTask` a
+    candidacy read (open tasks the actor is a candidate for, claimed tasks the
+    actor holds; nothing when nobody is acting) and make claim, complete and
+    delegate actions on it that call `AshBpmn.claim_task/2`, `complete_task/2`
+    and `delegate_task/2` with the person as `actor:`. Those functions write with
+    the engine's authority and check little: claim matches `:user` candidate
+    rows only, complete does not check candidacy or the assignee, delegate
+    checks neither the holder nor the delegate. So your action checks candidacy
+    (teams included), that the actor holds a task before completing or
+    delegating it, and that the delegate is a candidate; and it filters the
+    claim's update on `status == :open` so a concurrent claim loses. See
+    [presenting tasks to people](documentation/topics/assignment-and-maker-checker.md#presenting-tasks-to-people).
 
 ## Testing
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 # Seeds the demo app with a published process and a few instances in different
-# states, so the designer, viewer and task list all have something real to show.
+# states, so the designer and viewer both have something real to show.
 #
 #     mix dev.setup
 
@@ -96,8 +96,8 @@ if open_instances == [] do
   {:ok, privileged_instance} =
     AshBpmn.start_instance(AshBpmnDev.Bpmn, process: "access_request", subject: privileged)
 
-  # Claim one of the two parallel reviews, so the task list shows both an open
-  # and a claimed item rather than a half-empty board.
+  # Claim one of the two parallel reviews, so the viewer shows both an open and
+  # a claimed task on the same instance.
   privileged_task =
     HumanTask
     |> Ash.Query.for_read(:read)

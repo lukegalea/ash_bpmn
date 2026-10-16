@@ -67,7 +67,7 @@ Nothing has been released yet. Everything below is the initial body of work.
 - An embedded bpmn-js designer (LiveView hook + server-rendered config panel)
   and read-only instance viewer.
 - A runnable demo application under `dev/` — a real Phoenix server mounting the
-  designer, viewer and task list against Postgres — plus the screenshot script
+  designer and viewer against Postgres — plus the screenshot script
   that produces the images in the documentation.
 
 ### Fixes:
@@ -167,6 +167,21 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Breaking changes:
 
+- **`AshBpmn.Web.TaskListLive` is removed**, with `AshBpmn.Web.TaskActions` and
+  `AshBpmn.Web.DefaultTaskActions`, which existed only to serve it, and the
+  stylesheet rules only it used (`.ash-bpmn-page`, `-section`, `-card`,
+  `-card__title`, `-overline`, `-heading--lg`, `-form-row`, `-input--sm`). It
+  read every task with the engine's authority and claimed, completed and
+  delegated through the resource's own update actions with no actor, not
+  through `AshBpmn.claim_task/2` and friends: no process event recorded who
+  acted, and a completion cancelled no timers and never advanced the token.
+  Both reference hosts had already replaced it.
+  Present tasks from your own `HumanTask` instead: a candidacy read for the
+  lanes, and claim/complete/delegate actions run as the person, calling
+  `AshBpmn.claim_task/2`, `complete_task/2` and `delegate_task/2`. ash_bpmn
+  takes no UI dependency for this. See
+  [presenting tasks to people](documentation/topics/assignment-and-maker-checker.md#presenting-tasks-to-people)
+  for the pattern and the checks the engine leaves to the host.
 - `cancel_instance/1`, `cancel_instance!/1`, `retry_instance/1`,
   `retry_instance!/1` and `instance_report/1` take an options keyword as a second
   argument, for `:actor` and `:tenant`. Nothing has been released, so these

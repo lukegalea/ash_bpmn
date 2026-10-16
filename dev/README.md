@@ -8,7 +8,7 @@ SPDX-License-Identifier: MIT
 A small Phoenix application that hosts ash_bpmn the way a real application
 would: it owns the repo, instantiates the six BPMN resources into its own
 domain, implements `AshBpmn.AssignmentResolver` and `AshBpmn.ActionInvoker`, and
-mounts the designer, viewer and task list LiveViews.
+mounts the designer and viewer LiveViews.
 
 It exists for two reasons. The test suite can exercise the LiveView contracts,
 but only a browser exercises bpmn-js — so a change to the hook or the properties
@@ -38,9 +38,11 @@ edit, and leave three instances behind:
 | `prod-db-admin` | running | privileged: forked into two parallel reviews, one claimed |
 | `staging-deploy` | completed | a finished audit trail |
 
-The signed-in user is hard-coded to Priya Raman, the requester's manager, so the
-task list has candidate rows to show. The org chart lives in
-`lib/ash_bpmn_dev/people.ex`.
+The seeded tasks' candidates come from a hard-coded org chart in
+`lib/ash_bpmn_dev/people.ex`; the viewer lists each instance's tasks and their
+status. The demo has no task board: ash_bpmn leaves presenting tasks to the
+host (see "Presenting tasks to people" in
+`documentation/topics/assignment-and-maker-checker.md`).
 
 There is no Oban instance: `config :ash_bpmn, oban_testing: :inline` in
 `config/dev.exs` runs advance jobs synchronously and parks timers in ETS, so the

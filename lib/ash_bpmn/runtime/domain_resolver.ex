@@ -51,8 +51,9 @@ defmodule AshBpmn.Runtime.DomainResolver do
   first's tables.
 
   So every job this package enqueues now carries its domain, and workers pass it
-  here. `nil` keeps the old search, which is what a host calling
-  `AshBpmn.Web.DefaultTaskActions` without a domain still relies on.
+  here. `nil` keeps the old search, which is what the task operations
+  (`AshBpmn.complete_task/2`, `claim_task/2`, `delegate_task/2`) and
+  `instance_report/2` still rely on: they take no domain.
   """
   @spec resolve!(module() | String.t() | nil) :: map()
   def resolve!(domain \\ nil)

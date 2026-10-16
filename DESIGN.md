@@ -688,12 +688,13 @@ only — the host picks layout via its own router `layout:` opt or wrapper. No
   tasks (name/status/assignee/outcome), events (kind/node/time). Pushes highlight
   on update (poll via `Process.send_after` every 5s while running, stopped on
   completed/failed/cancelled).
-- `AshBpmn.Web.TaskListLive` — opts `domain:`, `principal_ids: {m,f,a}` (called
-  with socket; enterprise: `&__MODULE__.scopeless`? no — enterprise passes a
-  `{Module, :fun, [args]}` returning principal_ids, or the LV accepts a
-  `principal_ids` assign set via `send_update` — keep `{m,f,a}`). Lists my_tasks
-  grouped open/claimed, buttons claim/complete(outcome select)/delegate(select
-  user input) — minimal generic forms.
+- No task list LiveView. One shipped (`AshBpmn.Web.TaskListLive`) and was
+  removed: it ran claim/complete/delegate through the resource's update actions
+  with the engine's authority and no actor, so nothing recorded who acted and a
+  completion never advanced the token. Hosts present tasks
+  from their own `HumanTask` with a candidacy read and actions run as the
+  person — see "Presenting tasks to people" in
+  `documentation/topics/assignment-and-maker-checker.md`.
 
 Styling: Tailwind utility classes only, no component library, dark-neutral palette
 that reads fine inside any host layout (`bg-white dark:bg-zinc-900` etc.), scoped

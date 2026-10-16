@@ -68,12 +68,13 @@ currently holds tokens on, and lists the tokens, tasks and events behind it:
 
 ![The instance viewer showing a running instance](documentation/assets/viewer-running.png)
 
-And the task list is the candidate rows, queried:
-
-![The task list](documentation/assets/task-list.png)
-
-All three are real screenshots of the demo app in [`dev/`](https://github.com/lukegalea/ash_bpmn/tree/main/dev), which you can
+Both are real screenshots of the demo app in [`dev/`](https://github.com/lukegalea/ash_bpmn/tree/main/dev), which you can
 run yourself — see [running the demo](#running-the-demo).
+
+There is no built-in task list. Human tasks are rows on your own `HumanTask`
+resource, so your application presents them the way it presents everything else,
+and claims, completes and delegates them as the person doing it — see
+[presenting tasks to people](documentation/topics/assignment-and-maker-checker.md#presenting-tasks-to-people).
 
 The engine orchestrates and never decides: every node resolves to a host callback,
 every mutation runs through ordinary Ash actions with their own policies and
@@ -138,7 +139,7 @@ The candidate list of a human task is materialized as `TaskCandidate` rows when 
 task is created. That single decision buys three things the "just evaluate a policy"
 answer cannot:
 
-- **The task list is one query.** Join tasks to candidates on the actor's principal
+- **A task list is one query.** Join tasks to candidates on the actor's principal
   ids. No policy evaluation per row.
 - **The authorization model stays additive.** Maker-checker is inherently
   subtractive — *except the person who raised it* — and a `forbid_if` is a
@@ -205,7 +206,7 @@ the rest, step by step.
 
 `dev/` is a small Phoenix application that instantiates the six core resources,
 implements the two callback modules against a hard-coded org chart, and mounts
-the designer, viewer and task list. It is the fastest way to see the whole thing
+the designer and viewer. It is the fastest way to see the whole thing
 working, and it is where the screenshots above come from.
 
 ```bash
@@ -233,7 +234,8 @@ node dev/screenshots/capture.mjs
 - [Running processes](documentation/topics/running-processes.md) — the engine:
   workers, timers, joins, the reconciliation sweep, failure semantics.
 - [Assignment and maker-checker](documentation/topics/assignment-and-maker-checker.md)
-  — candidates as rows, exclusion at resolution, delegation with accountability.
+  — candidates as rows, exclusion at resolution, delegation with accountability,
+  and presenting tasks to people from your own application.
 - [Authorization and tenancy](documentation/topics/authorization-and-tenancy.md)
   — the engine's own authority as one named policy, the tenant through jobs, and
   sitting a work item on your base resource.

@@ -564,6 +564,48 @@ defmodule AshBpmn.EngineTest do
     end
   end
 
+  describe "a task's outcome from the wire" do
+    test "a junk outcome string costs no atoms and is stored as text" do
+      # A host's task board hands `complete_task/2` whatever the person typed.
+      # The outcome must reach the `:string` attribute as that same text: an
+      # atom made from it would grow the atom table with a value anyone who can
+      # see the board chooses.
+      actor = %{id: Ash.UUID.generate()}
+
+      # Warm the path's first-touch atoms so the window below measures the
+      # outcome string's own journey and nothing else.
+      assert {:ok, _} =
+               AshBpmn.complete_task(claimed_task(actor), outcome: "warmup-outcome", actor: actor)
+
+      task = claimed_task(actor)
+      junk = "not-a-declared-outcome-#{System.unique_integer([:positive])}"
+      before = :erlang.system_info(:atom_count)
+
+      assert {:ok, completed} = AshBpmn.complete_task(task, outcome: junk, actor: actor)
+
+      assert :erlang.system_info(:atom_count) == before
+      assert completed.status == :completed
+      assert completed.outcome == junk
+    end
+  end
+
+  defp claimed_task(actor) do
+    task =
+      HumanTask.create!(%{
+        node_id: "approval_wire",
+        name: "Approve request",
+        status: :claimed,
+        assignee_type: :user,
+        assignee_id: actor.id,
+        subject_type: "AshBpmn.Test.Subject",
+        subject_id: Ash.UUID.generate()
+      })
+
+    TaskCandidate.create!(%{task_id: task.id, principal_type: :user, principal_id: actor.id})
+
+    task
+  end
+
   defp fetch_instance(id) do
     instance =
       Instance
