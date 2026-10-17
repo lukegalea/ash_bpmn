@@ -12,6 +12,7 @@ defmodule AshBpmn do
   require Ash.Query
   require Ash.Expr
 
+  alias AshBpmn.Candidacy
   alias AshBpmn.Config
   alias AshBpmn.FlightView
   alias AshBpmn.Runtime.{AdvanceWorker, DomainResolver, Oban, Routing, Step}
@@ -189,10 +190,21 @@ defmodule AshBpmn do
   @doc """
   Completes a human task (process-bound or standalone).
 
+  Who may complete it depends on its state (see `AshBpmn.Candidacy`):
+
+    * **open** — a candidate: a candidate row names the actor or one of their
+      teams, and the task does not exclude them. The task is claimed for the
+      actor on the way, with its `:task_claimed` event.
+    * **claimed** — the holder: the actor, or one of their teams, is the
+      assignee.
+
+  Anyone else is refused with an `ArgumentError`, and nothing is written.
+
   Options:
     * `:outcome` — required outcome (an atom or a string; stored and read back as a string)
     * `:comment` — optional comment
     * `:actor` — required, the user completing the task
+    * `:tenant` — see `AshBpmn.Scope`; defaults to the task's own
   """
   @spec complete_task!(map(), keyword()) :: map()
   def complete_task!(task, opts) do
@@ -236,21 +248,24 @@ defmodule AshBpmn do
     # have been holding since before the task's timers were attached.
     task = reload_task!(resources, task, scope)
 
-    # A task may be completed without an explicit claim; record the implicit
-    # claim so the event log still shows who took it before deciding.
-    task =
-      if task.status == :open do
-        {:ok, claimed} =
-          resources.human_task.claim(
-            task,
-            %{assignee_type: :user, assignee_id: actor.id},
-            Scope.engine(scope)
-          )
+    principals = Candidacy.for_actor(actor, scope)
 
-        record_claim_event(resources, claimed, actor, scope)
-        claimed
-      else
-        task
+    # A task may be completed without an explicit claim, by a candidate; record the implicit
+    # claim so the event log still shows who took it before deciding. A claimed task is
+    # completed only by whoever holds it.
+    task =
+      case task.status do
+        :open ->
+          ensure_candidate!(resources, task, principals, scope)
+          claim_for!(resources, task, actor, scope)
+
+        :claimed ->
+          ensure_holder!(task, principals)
+          task
+
+        # Decided or cancelled: the `:complete` action refuses it with the reason.
+        _other ->
+          task
       end
 
     completed =
@@ -334,9 +349,20 @@ defmodule AshBpmn do
   end
 
   @doc """
-  Claims a human task, asserting the actor is a candidate.
+  Claims an open human task for the actor.
 
-  Raises if the actor's principal id is not in the TaskCandidate rows.
+  The actor must be a candidate: a `:user` candidate row names them, or a
+  `:team` row names one of their teams (`c:AshBpmn.AssignmentResolver.team_ids/2`),
+  and the task does not exclude them. Otherwise the claim is refused with an
+  `ArgumentError`.
+
+  The claim and its `:task_claimed` event are written in one transaction, and
+  the claim's UPDATE only matches a row that is still `:open`. Of two people
+  claiming at once exactly one wins; the other gets an error
+  (`Ash.Error.Changes.StaleRecord`, or a "no longer open" validation error when
+  the other claim had already committed) and nothing is written for them.
+
+  Options: `:actor` (required) and `:tenant` (defaults to the task's own).
   """
   @spec claim_task!(map(), keyword()) :: map()
   def claim_task!(task, opts) do
@@ -349,39 +375,52 @@ defmodule AshBpmn do
     resources = DomainResolver.resolve!()
     scope = Scope.from_record(task, opts)
 
-    # Check candidacy
-    candidates =
-      resources.task_candidate
-      |> Ash.Query.for_read(:read)
-      |> Ash.Query.filter(task_id == ^task.id)
-      |> Ash.read!(Scope.engine(scope))
+    Step.transaction(resources, fn ->
+      task = reload_task!(resources, task, scope)
+      ensure_candidate!(resources, task, Candidacy.for_actor(actor, scope), scope)
+      claim_for!(resources, task, actor, scope)
+    end)
+  rescue
+    e -> {:error, e}
+  end
 
-    principal_ids = gather_principal_ids(actor)
-
-    candidate_match =
-      Enum.any?(candidates, fn c ->
-        c.principal_type == :user && c.principal_id in principal_ids
-      end)
-
-    unless candidate_match do
-      raise ArgumentError,
-            "actor is not a candidate for task #{task.id}. " <>
-              "Actor principal ids: #{inspect(principal_ids)}, " <>
-              "Candidates: #{inspect(Enum.map(candidates, &{&1.principal_type, &1.principal_id}))}"
-    end
-
+  # The claim and its event, written together. Callers are inside a step, so a failed event
+  # write takes the claim back with it.
+  defp claim_for!(resources, task, actor, scope) do
     claimed =
       resources.human_task.claim!(
-        reload_task!(resources, task, scope),
+        task,
         %{assignee_type: :user, assignee_id: actor.id},
         Scope.engine(scope)
       )
 
     record_claim_event(resources, claimed, actor, scope)
+    claimed
+  end
 
-    {:ok, claimed}
-  rescue
-    e -> {:error, e}
+  defp ensure_candidate!(resources, task, principals, scope) do
+    unless Candidacy.candidate?(resources, task, principals, scope) do
+      raise ArgumentError,
+            "actor is not a candidate for task #{task.id}" <> excluded_note(task, principals)
+    end
+
+    :ok
+  end
+
+  defp ensure_holder!(task, principals) do
+    unless Candidacy.holds?(task, principals) do
+      raise ArgumentError,
+            "actor does not hold task #{task.id}: it is claimed by " <>
+              "#{task.assignee_type} #{task.assignee_id}" <> excluded_note(task, principals)
+    end
+
+    :ok
+  end
+
+  defp excluded_note(task, principals) do
+    if Candidacy.excluded?(task, principals),
+      do: " (the task excludes them: maker-checker)",
+      else: ""
   end
 
   # Events are recorded for standalone approvals too — they have no instance,
@@ -487,7 +526,28 @@ defmodule AshBpmn do
     |> Ash.read_one!(Scope.engine(scope))
   end
 
-  @doc "Delegates a claimed task to another principal."
+  @doc """
+  Delegates a claimed task to another principal.
+
+  The actor must hold the task (they, or one of their teams, are its assignee),
+  and the delegate must be one of its candidates: for a `:user` delegate, a
+  candidate row names them or one of their teams; for a `:team` delegate, a
+  `:team` row names that team. A delegate the task excludes (maker-checker) is
+  refused even when a candidate team would otherwise admit them. The delegate
+  becomes the assignee and can complete the task, so an unchecked delegation
+  would be a way around the candidate set.
+
+  The delegation and its `:task_delegated` event are written in one
+  transaction, and the UPDATE only matches a task that is still `:claimed`.
+  Refusals raise `ArgumentError` (returned as `{:error, exception}`).
+
+  Options:
+    * `:to_principal` — required, `%{type: :user | :team, id: id}`. A `:user`
+      delegate's teams come from `c:AshBpmn.AssignmentResolver.team_ids/2`
+      (or a `:team_ids` list on this map).
+    * `:actor` — required, the person delegating.
+    * `:tenant` — defaults to the task's own.
+  """
   @spec delegate_task!(map(), keyword()) :: map()
   def delegate_task!(task, opts) do
     task |> delegate_task(opts) |> unwrap!()
@@ -500,29 +560,50 @@ defmodule AshBpmn do
     resources = DomainResolver.resolve!()
     scope = Scope.from_record(task, opts)
 
-    # The action's RecordDelegatedFrom change captures the outgoing assignee as
-    # `delegated_from_id` — the accountability trail delegation exists for.
-    delegated =
-      resources.human_task.delegate!(
-        reload_task!(resources, task, scope),
-        to_principal.type,
-        to_principal.id,
-        Scope.engine(scope)
+    Step.transaction(resources, fn ->
+      task = reload_task!(resources, task, scope)
+
+      if task.status == :claimed do
+        ensure_holder!(task, Candidacy.for_actor(actor, scope))
+
+        unless Candidacy.candidate?(
+                 resources,
+                 task,
+                 Candidacy.for_principal(to_principal, scope),
+                 scope
+               ) do
+          raise ArgumentError,
+                "the delegate #{to_principal.type} #{to_principal.id} is not a candidate " <>
+                  "for task #{task.id}" <>
+                  excluded_note(task, Candidacy.for_principal(to_principal, scope))
+        end
+      end
+
+      # The action's RecordDelegatedFrom change captures the outgoing assignee as
+      # `delegated_from_id` — the accountability trail delegation exists for. A task that is
+      # not claimed is refused by the action's own validation.
+      delegated =
+        resources.human_task.delegate!(
+          task,
+          to_principal.type,
+          to_principal.id,
+          Scope.engine(scope)
+        )
+
+      record_task_event(
+        resources,
+        delegated,
+        :task_delegated,
+        %{
+          "from_id" => actor.id,
+          "to_type" => to_principal.type,
+          "to_id" => to_principal.id
+        },
+        scope
       )
 
-    record_task_event(
-      resources,
-      delegated,
-      :task_delegated,
-      %{
-        "from_id" => actor.id,
-        "to_type" => to_principal.type,
-        "to_id" => to_principal.id
-      },
-      scope
-    )
-
-    {:ok, delegated}
+      delegated
+    end)
   rescue
     e -> {:error, e}
   end
@@ -637,17 +718,28 @@ defmodule AshBpmn do
     as: :restart!
 
   @doc """
-  Returns tasks where the given principal is a candidate.
+  Returns the open and claimed tasks the given principals are candidates for.
 
   Options:
-    * `:principal_ids` — list of UUIDs (required)
-    * `:actor`, `:tenant` — see `AshBpmn.Scope`. On a tenant-scoped install
-      `:tenant` is what stops this returning another organization's work.
+    * `:principal_ids` — user ids, matched against `:user` candidate rows
+    * `:team_ids` — team ids, matched against `:team` candidate rows
+    * `:actor` — when `:principal_ids` is not given, the actor's id and their
+      teams (`c:AshBpmn.AssignmentResolver.team_ids/2`) are used instead
+    * `:tenant` — see `AshBpmn.Scope`. On a tenant-scoped install `:tenant` is
+      what stops this returning another organization's work.
+
+  A task whose recorded exclusions name any of the ids is left out. This is
+  every task the principals could pick up or are working on, claimed by anyone;
+  for "what may this person act on now", read the generated `HumanTask`'s
+  `:awaiting_actor` action as them.
   """
   @spec my_tasks(module(), keyword()) :: [map()]
   def my_tasks(domain, opts) do
-    principal_ids = Keyword.fetch!(opts, :principal_ids)
     scope = Scope.from_opts(opts)
+    principals = my_tasks_principals(opts, scope)
+    user_ids = Keyword.get(opts, :principal_ids) || List.wrap(principals.user_id)
+    team_ids = Keyword.get(opts, :team_ids) || principals.team_ids
+    all_ids = user_ids ++ team_ids
 
     {:ok, resources} = AshBpmn.Resources.for_domain(domain)
 
@@ -663,8 +755,9 @@ defmodule AshBpmn do
       related?: false,
       expr:
         Ash.Expr.expr(
-          task_id == parent(id) and principal_type == :user and
-            principal_id in ^principal_ids
+          task_id == parent(id) and
+            ((principal_type == :user and principal_id in ^user_ids) or
+               (principal_type == :team and principal_id in ^team_ids))
         )
     }
 
@@ -672,7 +765,19 @@ defmodule AshBpmn do
     |> Ash.Query.for_read(:read)
     |> Ash.Query.filter(status in [:open, :claimed])
     |> Ash.Query.filter(^candidate_is_mine)
+    |> Ash.Query.filter(
+      not fragment("? && ?", excluded_principal_ids, type(^all_ids, {:array, :uuid}))
+    )
     |> Ash.read!(Scope.engine(scope))
+  end
+
+  # The actor stands in for the ids only when the caller named none.
+  defp my_tasks_principals(opts, scope) do
+    if Keyword.has_key?(opts, :principal_ids) do
+      %{user_id: nil, team_ids: []}
+    else
+      Candidacy.for_actor(Keyword.get(opts, :actor), scope)
+    end
   end
 
   @doc "Returns a full report of an instance (tokens, tasks, events)."
@@ -1139,26 +1244,6 @@ defmodule AshBpmn do
         :ok
     end
   end
-
-  defp gather_principal_ids(%{id: id} = actor) do
-    base = [id]
-
-    # Check for team_ids on the actor struct
-    base ++
-      case Map.get(actor, :team_ids) do
-        ids when is_list(ids) -> ids
-        _ -> []
-      end
-  end
-
-  defp gather_principal_ids(ctx) when is_map(ctx) do
-    case Map.get(ctx, :id) do
-      nil -> []
-      id -> [id]
-    end
-  end
-
-  defp gather_principal_ids(_), do: []
 
   # Consumes a token through its own action, which is the only way the claim/consume state
   # machine means anything.

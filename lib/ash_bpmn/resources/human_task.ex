@@ -24,12 +24,35 @@ defmodule AshBpmn.Resources.HumanTask do
     * `:policies?` — emit the engine bypass policy (default `true`). Setting it
       to `false` hands the host the entire policy set, including whatever the
       engine needs to function. See `AshBpmn.Checks.AshBpmnInteraction`.
+    * `:task_candidate` — the TaskCandidate resource module. When given, the
+      task gets a `has_many :candidates` relationship to it. Omit it if your
+      resource already declares one.
+
+  ## What the generated resource gives a host's task board
+
+    * **`read :awaiting_actor`** — the candidacy read: open tasks the actor is
+      a candidate for (a `:user` row for them, or a `:team` row for one of
+      their teams; see `c:AshBpmn.AssignmentResolver.team_ids/2`), and claimed
+      tasks they hold. Neither includes a task that excludes the actor. With
+      no actor, or an actor with no id, it returns nothing. The actor is read
+      when the query runs, so a query built without one and read with one
+      still narrows. The candidate rows are matched with an `exists` over the
+      TaskCandidate resource, which is authorized as the actor: they must be
+      able to read their own candidate rows.
+    * **`calculate :outcomes`** — the outcomes the task's BPMN step declares
+      (`<ash:outcomes>`), read from the definition the instance pinned, so a
+      board can offer a picker. `nil` for a standalone approval: the outcomes
+      a `RequireApproval` change declares are not stored on the task.
+    * **`excluded_principal_ids`** — the principals maker-checker subtracted
+      from the candidate set when the task was created. See
+      `AshBpmn.Candidacy` for why the task keeps them.
   """
 
   defmacro __using__(opts) do
     repo = Keyword.fetch!(opts, :repo)
     instance = Keyword.fetch!(opts, :instance)
     token = Keyword.fetch!(opts, :token)
+    task_candidate = Keyword.get(opts, :task_candidate)
     table = Keyword.get(opts, :table, "bpmn_human_tasks")
     tenant? = AshBpmn.Resources.Base.own_tenancy?(opts)
     policies? = Keyword.get(opts, :policies?, true)
@@ -159,6 +182,16 @@ defmodule AshBpmn.Resources.HumanTask do
           public? true
         end
 
+        # The principals maker-checker subtracted when the task was created. The
+        # subtraction already removed their candidate rows; kept here as well so a
+        # person excluded by id cannot act through a candidate team they belong to.
+        # See `AshBpmn.Candidacy`.
+        attribute :excluded_principal_ids, {:array, :uuid} do
+          default []
+          allow_nil? false
+          public? true
+        end
+
         if unquote(tenant?) do
           attribute :organization_id, :uuid do
             allow_nil? false
@@ -178,11 +211,32 @@ defmodule AshBpmn.Resources.HumanTask do
         belongs_to :token, unquote(token) do
           public? true
         end
+
+        if unquote(task_candidate) do
+          has_many :candidates, unquote(task_candidate) do
+            destination_attribute :task_id
+            public? true
+          end
+        end
+      end
+
+      calculations do
+        calculate :outcomes,
+                  {:array, :string},
+                  {AshBpmn.Resources.HumanTask.DeclaredOutcomes, instance: unquote(instance)} do
+          public? true
+          description "The outcomes the task's BPMN step declares; nil for a standalone approval."
+        end
       end
 
       actions do
         read :read do
           primary? true
+        end
+
+        read :awaiting_actor do
+          description "Open tasks the actor is a candidate for, and claimed tasks the actor holds."
+          prepare AshBpmn.Resources.HumanTask.AwaitingActor
         end
 
         create :create do
@@ -197,7 +251,8 @@ defmodule AshBpmn.Resources.HumanTask do
             :due_at,
             :on_complete,
             :subject_type,
-            :subject_id
+            :subject_id,
+            :excluded_principal_ids
           ]
         end
 
@@ -206,6 +261,7 @@ defmodule AshBpmn.Resources.HumanTask do
           require_atomic? false
 
           validate AshBpmn.Resources.HumanTask.StatusIsOpen
+          change AshBpmn.Resources.HumanTask.EnsureOpenInDb
           change set_attribute(:status, :claimed)
           change set_attribute(:claimed_at, &DateTime.utc_now/0)
         end
@@ -234,6 +290,7 @@ defmodule AshBpmn.Resources.HumanTask do
           require_atomic? false
 
           validate AshBpmn.Resources.HumanTask.StatusIsClaimed
+          change AshBpmn.Resources.HumanTask.EnsureClaimedInDb
           change AshBpmn.Resources.HumanTask.RecordDelegatedFrom
         end
 
@@ -341,9 +398,19 @@ defmodule AshBpmn.Resources.HumanTask.EnsureStatusInDb do
   `AshBpmn.Resources.Token.EnsureStatusInDb`.
 
   Applied to `:cancel`, `:complete` and `:force_complete` together on purpose: guarding only
-  the cancel would let a completion overwrite a cancel that had already won.
+  the cancel would let a completion overwrite a cancel that had already won. `:claim` and
+  `:delegate` have it too.
+
+  The re-read alone does not settle a race: two transactions can both read the row before
+  either writes it. So the guard is also a filter on the UPDATE itself (`status IN (...)` in
+  its WHERE clause). The second writer waits on the first's row lock, finds the row no longer
+  matches, updates nothing and gets `Ash.Error.Changes.StaleRecord`. Of two concurrent claims,
+  exactly one wins. The re-read stays because it gives the ordinary case, a stale struct
+  after the other write has committed, an error that says what happened.
   """
   use Ash.Resource.Change
+
+  require Ash.Expr
 
   @impl true
   def init(opts) do
@@ -358,7 +425,9 @@ defmodule AshBpmn.Resources.HumanTask.EnsureStatusInDb do
   def change(changeset, opts, _context) do
     allowed = opts[:status]
 
-    Ash.Changeset.before_action(changeset, fn changeset ->
+    changeset
+    |> Ash.Changeset.filter(Ash.Expr.expr(status in ^allowed))
+    |> Ash.Changeset.before_action(fn changeset ->
       pk = Map.get(changeset.data, :id)
 
       if is_nil(pk) do
@@ -398,6 +467,16 @@ defmodule AshBpmn.Resources.HumanTask.EnsureOpenOrClaimedInDb do
       [status: [:open, :claimed]],
       context
     )
+  end
+end
+
+defmodule AshBpmn.Resources.HumanTask.EnsureOpenInDb do
+  @moduledoc false
+  use Ash.Resource.Change
+
+  @impl true
+  def change(changeset, _opts, context) do
+    AshBpmn.Resources.HumanTask.EnsureStatusInDb.change(changeset, [status: [:open]], context)
   end
 end
 

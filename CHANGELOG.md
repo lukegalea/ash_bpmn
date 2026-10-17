@@ -16,6 +16,21 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Features:
 
+- **Who acts on a human task is checked by the engine.** `claim_task/2`,
+  `complete_task/2` and `delegate_task/2` check candidacy and holding (see
+  Breaking changes), team candidates included: a resolver's optional
+  `team_ids/2` callback (or a `:team_ids` list on the actor) tells the engine
+  which teams a person is in. The checks live in `AshBpmn.Candidacy`. Both
+  reference hosts had rebuilt them; they no longer need to.
+- **A candidacy read on the generated `HumanTask`.** `:awaiting_actor` returns
+  the open tasks the actor or one of their teams is a candidate for and the
+  claimed tasks they hold, leaves out tasks that exclude them, and returns
+  nothing with no actor. The actor is read when the query runs.
+- **`has_many :candidates`** on the generated `HumanTask` when the macro is
+  given `task_candidate: MyApp.TaskCandidate`.
+- **`HumanTask.outcomes`**, a calculation: the outcomes the task's BPMN step
+  declares, read from the definition its instance pinned, for an outcome
+  picker. `nil` for a standalone approval, whose outcomes are not stored.
 - **Discarding a draft.** Definitions gain a `:discard` destroy action (code
   interface `discard/2`) that removes a draft and refuses everything else: the
   validation names the problem, and a `status = 'draft'` filter on the delete
@@ -72,6 +87,17 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Fixes:
 
+- **Concurrent claims: exactly one wins.** `:claim` validated the status of the
+  struct it was given and nothing else, so two people claiming one task at once
+  both succeeded, and the second overwrote the first's assignee. The claim's
+  UPDATE now matches only an `:open` row, and `claim_task/2` writes the claim
+  and its `:task_claimed` event in one transaction. `delegate_task/2` writes the
+  delegation and its event in one transaction too.
+- **Team candidates can claim.** `claim_task/2` gathered the actor's team ids
+  and then matched only `:user` rows; `my_tasks/2` had the same filter.
+- **The demo app's migrations match its resources.** `mix dev.setup` failed in
+  the seeds on a fresh database (`column b0.parent_instance_id does not
+  exist`) and `/instances` returned 500.
 - **A failed service task no longer wedges its instance.** The advance job
   claimed the token, the node raised, and nothing handed the claim back: every
   Oban retry found no `:active` token and crashed on it (`BadMapError` /
@@ -167,6 +193,32 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Breaking changes:
 
+- **`AshBpmn.complete_task/2` and `decide/2` check who is completing.** On an
+  open task the actor must be a candidate (a candidate row for them or one of
+  their teams, and not excluded); on a claimed task they must hold it. Before,
+  anyone passed as `actor:` could decide any task, the requester included. A
+  task with no candidate rows can now be decided by nobody through these
+  functions. Refusals are `{:error, %ArgumentError{}}` and write nothing.
+- **`AshBpmn.delegate_task/2` checks the holder and the delegate.** The actor
+  must hold the task, and the delegate must be a candidate (for a `:team`
+  delegate, a `:team` row for that team) whom the task does not exclude.
+  Before, it checked neither, so delegating was a way around the candidate set,
+  maker-checker exclusion included.
+- **`HumanTask` gains `excluded_principal_ids`** (`{:array, :uuid}`, not null,
+  default `[]`): the principals maker-checker subtracted when the task was
+  created, kept so an excluded person cannot act through a candidate team.
+  Hosts need the column: run `mix ash.codegen` (or add it by hand,
+  `uuid[] NOT NULL DEFAULT '{}'`). Tasks created before have `[]`.
+- **`:claim` and `:delegate` refuse a row that has moved on.** `:claim` now
+  re-reads the row and filters its UPDATE on `status = 'open'`, and `:delegate`
+  on `status = 'claimed'`; `:complete`, `:cancel` and `:force_complete` filter
+  their UPDATE the same way as well as re-reading. A write from a stale struct
+  that used to succeed now fails (`Ash.Error.Changes.StaleRecord`, or a "no
+  longer open" validation error).
+- **`AshBpmn.my_tasks/2` options.** `:principal_ids` is still matched against
+  `:user` rows; team ids go in the new `:team_ids` option (matched against
+  `:team` rows), or pass `:actor` instead of either. Tasks that exclude any of
+  the ids are left out.
 - **`AshBpmn.Web.TaskListLive` is removed**, with `AshBpmn.Web.TaskActions` and
   `AshBpmn.Web.DefaultTaskActions`, which existed only to serve it, and the
   stylesheet rules only it used (`.ash-bpmn-page`, `-section`, `-card`,

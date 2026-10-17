@@ -133,7 +133,7 @@ defmodule AshBpmn.BoundaryTimerTest do
       {:ok, _} =
         AshBpmn.complete_task(reload_task(task),
           outcome: :approved,
-          actor: %{id: Ash.UUID.generate()}
+          actor: candidate_actor(task)
         )
 
       assert reload(instance).status == :completed
@@ -185,7 +185,7 @@ defmodule AshBpmn.BoundaryTimerTest do
       {instance, task} = start!()
 
       {:ok, _} =
-        AshBpmn.complete_task(task, outcome: :approved, actor: %{id: Ash.UUID.generate()})
+        AshBpmn.complete_task(task, outcome: :approved, actor: candidate_actor(task))
 
       assert TestJobs.fire_due!(DateTime.add(DateTime.utc_now(), 5 * 3600, :second)) >= 0
 
@@ -238,7 +238,7 @@ defmodule AshBpmn.BoundaryTimerTest do
       assert boundary_job()
 
       {:ok, _} =
-        AshBpmn.complete_task(task, outcome: :approved, actor: %{id: Ash.UUID.generate()})
+        AshBpmn.complete_task(task, outcome: :approved, actor: candidate_actor(task))
 
       refute boundary_job(),
              "the boundary timer should be cancelled with the task it was watching"
@@ -301,7 +301,12 @@ defmodule AshBpmn.BoundaryTimerTest do
     defn = Definition.publish!(defn)
 
     {:ok, subject} =
-      AshBpmn.Test.Subject.create!(%{name: "boundary", amount: 0, is_privileged: false})
+      AshBpmn.Test.Subject.create!(%{
+        name: "boundary",
+        amount: 0,
+        is_privileged: false,
+        created_by_id: Ash.UUID.generate()
+      })
 
     {:ok, instance} =
       AshBpmn.start_instance(AshBpmn.Test.Domain, definition: defn, subject: subject)

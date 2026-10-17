@@ -594,7 +594,10 @@ defmodule AshBpmn.Runtime.Interpreter do
       token_id: token.id,
       node_id: node_id,
       name: node["name"] || node_id,
-      status: :open
+      status: :open,
+      # The subtraction above removed their rows; kept with the task as well so an excluded
+      # person cannot act through a candidate team they belong to. See `AshBpmn.Candidacy`.
+      excluded_principal_ids: exclusions |> Enum.reject(&is_nil/1) |> Enum.uniq()
     }
 
     candidate_attrs =

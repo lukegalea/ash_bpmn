@@ -143,6 +143,7 @@ defmodule AshBpmn.Changes.RequireApproval do
         escalate_in: escalate_in,
         expire_in: expire_in,
         candidates: filtered_candidates,
+        exclusions: exclusions,
         result: result
       })
     end
@@ -170,6 +171,7 @@ defmodule AshBpmn.Changes.RequireApproval do
       escalate_in: escalate_in,
       expire_in: expire_in,
       candidates: filtered_candidates,
+      exclusions: exclusions,
       result: result
     } = spec
 
@@ -184,7 +186,9 @@ defmodule AshBpmn.Changes.RequireApproval do
             on_complete: stringify_map_keys(on_complete),
             subject_type: subject_type,
             subject_id: subject_id,
-            due_at: due_at
+            due_at: due_at,
+            # Kept with the task so an excluded person cannot act through a candidate team.
+            excluded_principal_ids: exclusions |> Enum.reject(&is_nil/1) |> Enum.uniq()
           },
           AshBpmn.Scope.engine(scope)
         )

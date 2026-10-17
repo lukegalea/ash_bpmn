@@ -112,9 +112,48 @@ defmodule AshBpmn.Test.Resolver do
     Enum.join([a, b, c, d, e], "-")
   end
 
+  @doc """
+  The synthetic member of a role, derived from the role name as `manager_of/1` is from a
+  principal id: a `kind="role"` clause resolves to this one user.
+  """
+  @spec role_member(String.t()) :: Ash.UUID.t()
+  def role_member(role), do: manager_of("role:" <> role)
+
+  @doc """
+  The teams a principal acts for: a `:team_ids` list on it, else whatever
+  `put_team_ids/2` staged for its id in this process.
+
+  Callback: `team_ids(principal :: map(), ctx :: map()) :: [Ash.UUID.t()]`
+  """
+  def team_ids(principal, _ctx) do
+    Map.get(principal, :team_ids) || Process.get({__MODULE__, :team_ids, principal.id}, [])
+  end
+
+  @doc "Stages the teams `team_ids/2` reports for `principal_id` in this process."
+  def put_team_ids(principal_id, team_ids),
+    do: Process.put({__MODULE__, :team_ids, principal_id}, team_ids)
+
   # Both callers normalize to this one shape before reaching a resolver.
   defp resolve_spec(%{"kind" => "manager_of", "of" => path}, subject) do
     manager_for(path, subject)
+  end
+
+  defp resolve_spec(%{"kind" => "role", "of" => role}, _subject) when role not in [nil, ""] do
+    [%{type: :user, id: role_member(role)}]
+  end
+
+  # `kind="team" of="<team id>"`: the team itself is the candidate.
+  defp resolve_spec(%{"kind" => "team", "of" => team_id}, _subject)
+       when team_id not in [nil, ""] do
+    [%{type: :team, id: team_id}]
+  end
+
+  # `kind="user" of="subject.<field>"`: the person a subject field names.
+  defp resolve_spec(%{"kind" => "user", "of" => path}, subject) do
+    case subject_field(subject, path) do
+      nil -> []
+      id -> [%{type: :user, id: id}]
+    end
   end
 
   defp resolve_spec(_spec, _subject) do

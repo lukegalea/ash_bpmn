@@ -48,12 +48,13 @@ defmodule AshBpmn.Phase3ExitTest do
     test "the same diagram decided by a person routes the other way" do
       {instance, task} = start_expiry!()
 
-      HumanTask.claim!(task, %{assignee_type: :user, assignee_id: Ash.UUID.generate()})
+      actor = candidate_actor(task)
+      HumanTask.claim!(task, %{assignee_type: :user, assignee_id: actor.id})
 
       {:ok, _} =
         AshBpmn.complete_task(reload_task(task),
           outcome: :approved,
-          actor: %{id: Ash.UUID.generate()}
+          actor: actor
         )
 
       assert invoked?("grant")
@@ -113,7 +114,12 @@ defmodule AshBpmn.Phase3ExitTest do
 
   defp subject! do
     {:ok, subject} =
-      AshBpmn.Test.Subject.create!(%{name: "p3", amount: 0, is_privileged: false})
+      AshBpmn.Test.Subject.create!(%{
+        name: "p3",
+        amount: 0,
+        is_privileged: false,
+        created_by_id: Ash.UUID.generate()
+      })
 
     subject
   end

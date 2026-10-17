@@ -68,7 +68,7 @@ defmodule AshBpmn.CallActivityTest do
       |> Ash.read!(authorize?: false)
       |> List.first()
 
-    {:ok, _} = AshBpmn.complete_task(task, outcome: :approved, actor: %{id: Ash.UUID.generate()})
+    {:ok, _} = AshBpmn.complete_task(task, outcome: :approved, actor: candidate_actor(task))
 
     assert reload(parent).status == :completed
     assert invoked?("after_child")
@@ -134,7 +134,12 @@ defmodule AshBpmn.CallActivityTest do
     parent_defn = Definition.publish!(parent_defn)
 
     {:ok, subject} =
-      AshBpmn.Test.Subject.create!(%{name: "ca", amount: 0, is_privileged: true})
+      AshBpmn.Test.Subject.create!(%{
+        name: "ca",
+        amount: 0,
+        is_privileged: true,
+        created_by_id: Ash.UUID.generate()
+      })
 
     {:ok, parent} =
       AshBpmn.start_instance(AshBpmn.Test.Domain, definition: parent_defn, subject: subject)

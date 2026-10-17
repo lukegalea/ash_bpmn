@@ -52,7 +52,8 @@ defmodule AshBpmn.Test.HumanTask do
     domain: AshBpmn.Test.Domain,
     repo: AshBpmn.TestRepo,
     instance: AshBpmn.Test.Instance,
-    token: AshBpmn.Test.Token
+    token: AshBpmn.Test.Token,
+    task_candidate: AshBpmn.Test.TaskCandidate
 
   policies do
     bypass do

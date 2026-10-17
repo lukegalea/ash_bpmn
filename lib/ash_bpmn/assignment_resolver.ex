@@ -40,6 +40,22 @@ defmodule AshBpmn.AssignmentResolver do
     * `candidates/2` — resolve specs into principal records.
     * `exclusions/2` — resolve exclusion specs into principal ids to remove.
     * `escalate/2` — (optional) handle escalation for a task.
+    * `team_ids/2` — (optional) the teams a person acts for, so a `:team`
+      candidate row is matched. See "Team candidates" below.
+
+  ## Team candidates
+
+  A resolver may answer a clause with `%{type: :team, id: team_id}`, and the
+  engine writes it as a `:team` candidate row. To match that row when someone
+  claims, completes or delegates, or in the `HumanTask` candidacy read, the
+  engine has to know which teams the person is in. It asks `team_ids/2`:
+
+      @impl true
+      def team_ids(%{id: user_id}, %{tenant: tenant}), do: MyApp.Teams.ids_for(user_id, tenant)
+
+  The first argument is the actor (or, when checking a delegate, the
+  `to_principal` map the caller passed). Without the callback the engine reads
+  a `:team_ids` list off that map, and anything else counts as no teams.
   """
 
   @typedoc "A candidate clause, as the resolver receives it."
@@ -62,7 +78,15 @@ defmodule AshBpmn.AssignmentResolver do
   @doc "Handles escalation for a task (e.g. notify manager's manager)."
   @callback escalate(task :: map(), ctx :: map()) :: :ok | {:ok, map()} | {:error, term()}
 
-  @optional_callbacks escalate: 2
+  @doc """
+  The team ids a person acts for, matched against `:team` candidate rows.
+
+  `ctx` carries `:tenant`. Called once per claim, completion, delegation or
+  candidacy read, never per row.
+  """
+  @callback team_ids(principal :: map(), ctx :: map()) :: [Ash.UUID.t()]
+
+  @optional_callbacks escalate: 2, team_ids: 2
 
   @doc """
   Normalizes a candidate spec into the string-keyed map resolvers receive.

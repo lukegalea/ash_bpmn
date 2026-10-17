@@ -50,6 +50,7 @@ defmodule AshBpmn.TenantTest.HumanTask do
     repo: AshBpmn.TestRepo,
     instance: AshBpmn.TenantTest.Instance,
     token: AshBpmn.TenantTest.Token,
+    task_candidate: AshBpmn.TenantTest.TaskCandidate,
     table: "tenant_bpmn_human_tasks",
     tenant?: true
 end

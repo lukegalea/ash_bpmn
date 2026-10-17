@@ -497,7 +497,7 @@ AshBpmn.decide!(task, outcome: :approved, comment: "...", actor: user) :: task
 AshBpmn.claim_task!(task, actor: user) :: task
 AshBpmn.delegate_task!(task, to_principal: %{type: :user, id: id}, actor: user) :: task
 AshBpmn.cancel_instance!(instance, actor: user) :: instance
-AshBpmn.my_tasks(domain, principal_ids: [id], opts) :: [task]   # candidates join, status in open/claimed, claimed by actor OR open
+AshBpmn.my_tasks(domain, principal_ids: [id], team_ids: [id]) :: [task]   # candidates join (:user rows on principal_ids, :team rows on team_ids), status in open/claimed
 AshBpmn.instance_report(instance) :: %{instance:, tokens: [], tasks: [], events: []}
 AshBpmn.retry_instance!(instance) :: instance                   # reactivate dead tokens, re-enqueue
 ```
@@ -613,9 +613,13 @@ Task completion path (`complete_task!`): validates outcome ∈ node outcomes;
 task `:complete`; cancel timers; ProcessEvent `:task_completed`; advance token with
 assigns.
 
-**Candidate re-check at claim (plan §6.3):** `claim_task!` asserts the actor's
-principal appears in TaskCandidate rows for the task; on mismatch raises
-`Ash.Error.Forbidden`. Rows are the index, the rule is the resolver — the engine
+**Candidate re-check at claim (plan §6.3):** `claim_task!` asserts a
+TaskCandidate row names the actor (`:user`) or one of their teams (`:team`, from
+the resolver's optional `team_ids/2`) and that the task's `excluded_principal_ids`
+name neither; on mismatch it raises `ArgumentError`. `complete_task!` makes the
+same check on an open task and requires the holder on a claimed one;
+`delegate_task!` requires the holder and a candidate delegate (see
+`AshBpmn.Candidacy`). Rows are the index, the rule is the resolver — the engine
 does NOT re-run the resolver at claim (documented: staleness handled by sweep +
 host may re-materialize by destroying/creating candidate rows).
 
