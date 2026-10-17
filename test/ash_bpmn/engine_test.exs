@@ -264,7 +264,8 @@ defmodule AshBpmn.EngineTest do
         |> Ash.Query.filter(node_id == "ManagerApproval")
         |> Ash.read_one!(authorize?: false)
 
-      actor = %{id: manager_id}
+      # The manager of the requester decides; the requester is excluded (maker-checker).
+      actor = %{id: AshBpmn.Test.Resolver.manager_of(manager_id)}
 
       {:ok, _} = AshBpmn.complete_task(mgr_task, outcome: :rejected, actor: actor)
 
@@ -374,8 +375,8 @@ defmodule AshBpmn.EngineTest do
       # Count timers before completion
       timers_before = length(TestJobs.all())
 
-      # Complete the task
-      actor = %{id: manager_id}
+      # Complete the task, as the requester's manager (the requester is excluded).
+      actor = %{id: AshBpmn.Test.Resolver.manager_of(manager_id)}
       {:ok, completed} = AshBpmn.complete_task(task, outcome: :approved, actor: actor)
 
       assert completed.status == :completed
@@ -526,7 +527,7 @@ defmodule AshBpmn.EngineTest do
       defn = create_published_definition!("consume_check", xml)
       _ = defn
 
-      subject = create_test_subject!("consume_check")
+      subject = create_test_subject!("consume_check", created_by_id: Ash.UUID.generate())
 
       {:ok, instance} =
         AshBpmn.start_instance(AshBpmn.Test.Domain, process: "consume_check", subject: subject)
@@ -551,7 +552,7 @@ defmodule AshBpmn.EngineTest do
       assert token_before.parked_at, "a parked token records when the wait began"
 
       {:ok, _} =
-        AshBpmn.complete_task(task, outcome: :approved, actor: %{id: Ash.UUID.generate()})
+        AshBpmn.complete_task(task, outcome: :approved, actor: candidate_actor(task))
 
       token_after =
         Token

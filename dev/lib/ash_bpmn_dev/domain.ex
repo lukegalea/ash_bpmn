@@ -67,7 +67,8 @@ defmodule AshBpmnDev.Bpmn.HumanTask do
     domain: AshBpmnDev.Bpmn,
     repo: AshBpmnDev.Repo,
     instance: AshBpmnDev.Bpmn.Instance,
-    token: AshBpmnDev.Bpmn.Token
+    token: AshBpmnDev.Bpmn.Token,
+    task_candidate: AshBpmnDev.Bpmn.TaskCandidate
 
   policies do
     bypass do

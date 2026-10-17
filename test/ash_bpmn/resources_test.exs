@@ -326,7 +326,7 @@ defmodule AshBpmn.ResourcesTest do
       user_id = Ash.UUID.generate()
 
       claimed =
-        HumanTask.claim!(task, %{assignee_type: :user, assignee_id: user_id})
+        HumanTask.claim!(task, %{assignee_type: :user, assignee_id: user_id}, engine())
 
       assert claimed.status == :claimed
       assert claimed.assignee_type == :user
@@ -347,10 +347,10 @@ defmodule AshBpmn.ResourcesTest do
         })
 
       user_id = Ash.UUID.generate()
-      claimed = HumanTask.claim!(task, %{assignee_type: :user, assignee_id: user_id})
+      claimed = HumanTask.claim!(task, %{assignee_type: :user, assignee_id: user_id}, engine())
 
       assert_raise Ash.Error.Invalid, ~r/outcome.*required/i, fn ->
-        HumanTask.complete!(claimed, %{})
+        HumanTask.complete!(claimed, %{}, engine())
       end
     end
 
@@ -367,15 +367,15 @@ defmodule AshBpmn.ResourcesTest do
         })
 
       user_id = Ash.UUID.generate()
-      claimed = HumanTask.claim!(task, %{assignee_type: :user, assignee_id: user_id})
+      claimed = HumanTask.claim!(task, %{assignee_type: :user, assignee_id: user_id}, engine())
       decider_id = Ash.UUID.generate()
 
       completed =
-        HumanTask.complete!(claimed, %{
-          outcome: :approved,
-          comment: "Looks good",
-          decided_by_id: decider_id
-        })
+        HumanTask.complete!(
+          claimed,
+          %{outcome: :approved, comment: "Looks good", decided_by_id: decider_id},
+          engine()
+        )
 
       assert completed.status == :completed
       assert completed.outcome == "approved"
@@ -393,13 +393,18 @@ defmodule AshBpmn.ResourcesTest do
           name: "Approve"
         })
 
-      claimed = HumanTask.claim!(task, %{assignee_type: :user, assignee_id: Ash.UUID.generate()})
+      claimed =
+        HumanTask.claim!(
+          task,
+          %{assignee_type: :user, assignee_id: Ash.UUID.generate()},
+          engine()
+        )
 
-      HumanTask.complete!(claimed, %{
-        outcome: :approved,
-        comment: "Looks good",
-        decided_by_id: Ash.UUID.generate()
-      })
+      HumanTask.complete!(
+        claimed,
+        %{outcome: :approved, comment: "Looks good", decided_by_id: Ash.UUID.generate()},
+        engine()
+      )
 
       # The regression: `outcome` used to be an unconstrained :atom, which Ash stores as
       # text but refuses to cast back into an atom on load (there is no `one_of` to match
@@ -451,10 +456,10 @@ defmodule AshBpmn.ResourcesTest do
       new_user = Ash.UUID.generate()
 
       claimed =
-        HumanTask.claim!(task, %{assignee_type: :user, assignee_id: original_user})
+        HumanTask.claim!(task, %{assignee_type: :user, assignee_id: original_user}, engine())
 
       delegated =
-        HumanTask.delegate!(claimed, :user, new_user)
+        HumanTask.delegate!(claimed, :user, new_user, engine())
 
       assert delegated.assignee_id == new_user
       assert delegated.delegated_from_id == original_user
@@ -635,6 +640,8 @@ defmodule AshBpmn.ResourcesTest do
   end
 
   # ── Helpers ──────────────────────────────────────────────────────────
+
+  defp engine, do: AshBpmn.Scope.engine(%AshBpmn.Scope{})
 
   defp create_test_definition!(key) do
     Definition.create!(%{

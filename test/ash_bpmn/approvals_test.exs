@@ -302,7 +302,12 @@ defmodule AshBpmn.ApprovalsTest do
       # Claim by manager
       {:ok, claimed} = AshBpmn.claim_task(task, actor: manager)
 
-      # Delegate to another user
+      # Delegate to another of the task's candidates: a delegate must be one.
+      TaskCandidate.create!(
+        %{task_id: task.id, principal_type: :user, principal_id: delegate_to_id},
+        authorize?: false
+      )
+
       {:ok, delegated} =
         AshBpmn.delegate_task(claimed,
           to_principal: %{type: :user, id: delegate_to_id},

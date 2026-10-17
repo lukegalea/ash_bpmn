@@ -52,7 +52,7 @@ defmodule AshBpmn.TimerLedgerWiringTest do
       {instance, task} = start_with_approval!()
 
       {:ok, _} =
-        AshBpmn.complete_task(task, outcome: :approved, actor: %{id: Ash.UUID.generate()})
+        AshBpmn.complete_task(task, outcome: :approved, actor: candidate_actor(task))
 
       rows = rows_for(instance)
       assert Enum.all?(rows, &(&1.status == :cancelled))
@@ -156,7 +156,8 @@ defmodule AshBpmn.TimerLedgerWiringTest do
       AshBpmn.Test.Subject.create!(%{
         name: "ledger",
         amount: 0,
-        is_privileged: privileged
+        is_privileged: privileged,
+        created_by_id: Ash.UUID.generate()
       })
 
     subject

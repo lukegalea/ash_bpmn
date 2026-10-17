@@ -389,7 +389,7 @@ defmodule AshBpmn.FlightViewTest do
     task = fetch_task!(instance.id, "ManagerApproval")
 
     {:ok, _} =
-      AshBpmn.complete_task(task, outcome: :approved, actor: %{id: Ash.UUID.generate()})
+      AshBpmn.complete_task(task, outcome: :approved, actor: candidate_actor(task))
   end
 
   defp fetch_task!(instance_id, node_id) do
@@ -426,7 +426,9 @@ defmodule AshBpmn.FlightViewTest do
     attrs = %{
       name: name,
       amount: Keyword.get(overrides, :amount, 0),
-      is_privileged: Keyword.get(overrides, :is_privileged, false)
+      is_privileged: Keyword.get(overrides, :is_privileged, false),
+      # Someone whose manager the task's candidate clause resolves, so it has a decider.
+      created_by_id: Ash.UUID.generate()
     }
 
     case AshBpmn.Test.Subject.create!(attrs) do
