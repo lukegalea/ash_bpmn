@@ -25,7 +25,10 @@ Nothing has been released yet. Everything below is the initial body of work.
 - **A candidacy read on the generated `HumanTask`.** `:awaiting_actor` returns
   the open tasks the actor or one of their teams is a candidate for and the
   claimed tasks they hold, leaves out tasks that exclude them, and returns
-  nothing with no actor. The actor is read when the query runs.
+  nothing with no actor. The narrowing is a filter on the query, so counts,
+  counted pages and aggregates over the read agree with it, and the read
+  paginates (offset or keyset, optional). It uses the actor the query runs as,
+  so a query built without one and read or counted with one still narrows.
 - **`has_many :candidates`** on the generated `HumanTask` when the macro is
   given `task_candidate: MyApp.TaskCandidate`.
 - **`HumanTask.outcomes`**, a calculation: the outcomes the task's BPMN step
@@ -93,6 +96,13 @@ Nothing has been released yet. Everything below is the initial body of work.
   UPDATE now matches only an `:open` row, and `claim_task/2` writes the claim
   and its `:task_claimed` event in one transaction. `delegate_task/2` writes the
   delegation and its event in one transaction too.
+- **Counting `:awaiting_actor` counts the actor's tasks.** The read narrowed
+  in a `before_action` hook, which `Ash.count/2`, a page's count and query
+  aggregates never run, so they counted every open or claimed task in the
+  tenant: a board in the clinic demo showed "Open 288" above one card. The
+  candidacy test is now the private `:awaits_actor?` expression calculation,
+  which the read's preparation filters on and Ash builds for the actor the
+  query runs as.
 - **Team candidates can claim.** `claim_task/2` gathered the actor's team ids
   and then matched only `:user` rows; `my_tasks/2` had the same filter.
 - **The demo app's migrations match its resources.** `mix dev.setup` failed in

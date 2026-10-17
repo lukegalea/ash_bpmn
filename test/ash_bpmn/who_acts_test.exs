@@ -393,6 +393,81 @@ defmodule AshBpmn.WhoActsTest do
       assert ids(tasks) == [mine.id]
     end
 
+    # The clinic demo's board showed "Open 288" above one card: its lane totals were
+    # `Ash.count/2` over this read, and the read narrowed in a hook that a count never runs.
+    test "a count, a counted page and an aggregate agree with the read, for each actor" do
+      team_id = Ash.UUID.generate()
+      maker = %{id: Ash.UUID.generate(), team_ids: [team_id]}
+      checker = %{id: Ash.UUID.generate(), team_ids: [team_id]}
+      solo = %{id: Ash.UUID.generate()}
+      outsider = %{id: Ash.UUID.generate()}
+
+      # The maker's own request: offered to their team, the maker excluded.
+      _request = task!(candidates: [{:team, team_id}], excluded: [maker.id])
+      _team_open = task!(candidates: [{:team, team_id}])
+      _shared_open = task!(candidates: [{:user, solo.id}, {:team, team_id}])
+      _solo_open = task!(candidates: [{:user, solo.id}])
+
+      claimed_by_checker = task!(candidates: [{:user, checker.id}, {:user, solo.id}])
+      {:ok, _} = AshBpmn.claim_task(claimed_by_checker, actor: checker)
+
+      held_by_team = task!(candidates: [{:team, team_id}])
+      {:ok, _} = AshBpmn.claim_task(held_by_team, actor: checker)
+
+      {:ok, _} =
+        AshBpmn.delegate_task(held_by_team,
+          to_principal: %{type: :team, id: team_id},
+          actor: checker
+        )
+
+      decided = task!(candidates: [{:user, solo.id}])
+      {:ok, _} = AshBpmn.complete_task(decided, outcome: :approved, actor: solo)
+
+      # maker: the team's two open tasks they are not excluded from, and the team's claim.
+      # checker: the team's three open tasks, their own claim and the team's claim.
+      # solo: their two open tasks; the checker holds the third.
+      expected = %{maker: 3, checker: 5, solo: 2, outsider: 0}
+
+      for {name, actor} <- [maker: maker, checker: checker, solo: solo, outsider: outsider] do
+        query = Ash.Query.for_read(HumanTask, :awaiting_actor, %{}, actor: actor)
+        read = Ash.read!(query)
+
+        assert length(read) == expected[name], "#{name} reads #{length(read)} tasks"
+        assert Ash.count!(query) == length(read), "#{name}'s count"
+        assert Ash.count!(query, actor: actor) == length(read), "#{name}'s count with the actor"
+
+        %{ids: aggregated, n: n} =
+          Ash.aggregate!(query, [{:ids, :list, field: :id}, {:n, :count}])
+
+        assert Enum.sort(aggregated) == Enum.sort(ids(read)), "#{name}'s list aggregate"
+        assert n == length(read), "#{name}'s count aggregate"
+
+        page = Ash.read!(query, page: [limit: 2, count: true])
+        assert page.count == length(read), "#{name}'s page count"
+        assert length(page.results) == min(2, length(read)), "#{name}'s first page"
+      end
+    end
+
+    test "with no actor the read, the count and a counted page are all empty" do
+      _task = task!(candidates: [{:user, Ash.UUID.generate()}])
+      query = Ash.Query.for_read(HumanTask, :awaiting_actor)
+
+      assert Ash.read!(query) == []
+      assert Ash.count!(query) == 0
+      assert Ash.read!(query, page: [limit: 5, count: true]).count == 0
+    end
+
+    test "an actor given only when the query is counted still narrows the count" do
+      me = %{id: Ash.UUID.generate()}
+      _mine = task!(candidates: [{:user, me.id}])
+      _theirs = task!(candidates: [{:user, Ash.UUID.generate()}])
+
+      query = Ash.Query.for_read(HumanTask, :awaiting_actor)
+
+      assert Ash.count!(query, actor: me) == 1
+      assert Ash.count!(query) == 0
+    end
+
     test "a task's candidates load through its relationship" do
       user_id = Ash.UUID.generate()
       team_id = Ash.UUID.generate()

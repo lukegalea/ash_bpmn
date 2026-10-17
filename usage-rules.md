@@ -207,8 +207,9 @@ gateway conditions, never in resolver specs, never in the invoker.
     task list screen and does not depend on a UI library. Read the generated
     `:awaiting_actor` action as the person for the board's lanes (open tasks they
     or one of their teams are a candidate for, claimed tasks they hold; nothing
-    when nobody is acting), and make claim, complete and delegate actions on your
-    `HumanTask` that call `AshBpmn.claim_task/2`, `complete_task/2` and
+    when nobody is acting; counts and pages over it count the same tasks), and
+    make claim, complete and delegate actions on your `HumanTask` that call
+    `AshBpmn.claim_task/2`, `complete_task/2` and
     `delegate_task/2` with the person as `actor:`, never a service account. Those
     functions check who acts: claim and an open-task completion need a candidate,
     a claimed-task completion and a delegation need the holder, a delegate must be

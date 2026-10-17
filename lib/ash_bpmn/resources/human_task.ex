@@ -34,9 +34,13 @@ defmodule AshBpmn.Resources.HumanTask do
       a candidate for (a `:user` row for them, or a `:team` row for one of
       their teams; see `c:AshBpmn.AssignmentResolver.team_ids/2`), and claimed
       tasks they hold. Neither includes a task that excludes the actor. With
-      no actor, or an actor with no id, it returns nothing. The actor is read
-      when the query runs, so a query built without one and read with one
-      still narrows. The candidate rows are matched with an `exists` over the
+      no actor, or an actor with no id, it returns nothing. The narrowing is a
+      filter on the query (the private `:awaits_actor?` calculation, see
+      `AshBpmn.Resources.HumanTask.AwaitsActor`), so `Ash.count/2`, a counted
+      page and query aggregates agree with the read. It paginates (offset or
+      keyset, optional). The filter uses the actor the query runs as, so a
+      query built without one and read or counted with one still narrows.
+      The candidate rows are matched with an `exists` over the
       TaskCandidate resource that is not authorized: TaskCandidate read
       policies do not apply to it. It only decides which tasks are returned,
       scoped to the task (`task_id == parent(id)`) and the actor's own ids;
@@ -243,6 +247,15 @@ defmodule AshBpmn.Resources.HumanTask do
           public? true
           description "The outcomes the task's BPMN step declares; nil for a standalone approval."
         end
+
+        # The candidacy test the `:awaiting_actor` read filters on. A calculation so Ash builds
+        # it for the actor the query runs as, and an expression so counts and aggregates over
+        # the read apply it too. See `AshBpmn.Resources.HumanTask.AwaitsActor`.
+        calculate :awaits_actor?,
+                  :boolean,
+                  {AshBpmn.Resources.HumanTask.AwaitsActor, resource: __MODULE__} do
+          public? false
+        end
       end
 
       actions do
@@ -253,6 +266,7 @@ defmodule AshBpmn.Resources.HumanTask do
         read :awaiting_actor do
           description "Open tasks the actor is a candidate for, and claimed tasks the actor holds."
           prepare AshBpmn.Resources.HumanTask.AwaitingActor
+          pagination offset?: true, keyset?: true, countable: true, required?: false
         end
 
         create :create do

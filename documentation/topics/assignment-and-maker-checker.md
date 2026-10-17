@@ -149,15 +149,24 @@ action, `:awaiting_actor`, that returns what the person may act on: open tasks
 with a candidate row for them or one of their teams, and claimed tasks they
 hold (assigned to them, or to one of their teams). Neither includes a task
 that excludes them. With nobody acting it reads nothing rather than
-everything. The actor is read when the query runs, so a query built without
-one and read with one still narrows. The board's lanes are the task's
-`status`.
+everything. The narrowing is a filter on the query, so a lane total from
+`Ash.count/2`, a page with `count: true` and an aggregate over the read count
+the same tasks the read returns. The read paginates (offset or keyset, not
+required). The filter uses the actor the query runs as, so a query built
+without one and read or counted with one still narrows. The board's lanes are
+the task's `status`.
 
 ```elixir
 MyApp.Bpmn.HumanTask
 |> Ash.Query.for_read(:awaiting_actor)
 |> Ash.Query.sort(inserted_at: :asc)
 |> Ash.read!(actor: current_user)
+
+# A lane total: the same tasks, counted.
+MyApp.Bpmn.HumanTask
+|> Ash.Query.for_read(:awaiting_actor)
+|> Ash.Query.filter(status == :open)
+|> Ash.count!(actor: current_user)
 ```
 
 The candidate rows are matched with an `exists` over your `TaskCandidate`
