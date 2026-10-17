@@ -48,16 +48,18 @@ defmodule AshBpmn.ClaimRaceTest do
 
     test_pid = self()
 
+    # The barrier comes before the connection checkout: a claimer holding a connection while
+    # it waits would starve the others on a small pool (CI's is the runner's core count).
+    # Released together, as many claim at once as the pool has connections, and the rest
+    # queue behind them, which is the same race arriving a moment later.
     claimers =
       for actor <- actors do
         Task.async(fn ->
-          unboxed(fn ->
-            send(test_pid, {:ready, self()})
+          send(test_pid, {:ready, self()})
 
-            receive do
-              :go -> AshBpmn.claim_task(task, actor: actor)
-            end
-          end)
+          receive do
+            :go -> unboxed(fn -> AshBpmn.claim_task(task, actor: actor) end)
+          end
         end)
       end
 
