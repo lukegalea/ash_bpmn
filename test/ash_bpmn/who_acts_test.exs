@@ -39,8 +39,14 @@ defmodule AshBpmn.WhoActsTest do
       assert {:ok, _} = AshBpmn.claim_task(task, actor: first)
 
       # `task` is the struct from before the first claim: still `:open` as far as it knows.
-      assert {:error, _} =
-               HumanTask.claim(task, %{assignee_type: :user, assignee_id: second.id})
+      assert {:error, %Ash.Error.Invalid{} = error} =
+               HumanTask.claim(
+                 task,
+                 %{assignee_type: :user, assignee_id: second.id},
+                 AshBpmn.Scope.engine(%AshBpmn.Scope{})
+               )
+
+      assert Exception.message(error) =~ "no longer open"
 
       assert reload(task).assignee_id == first.id
     end
@@ -408,6 +414,59 @@ defmodule AshBpmn.WhoActsTest do
       task = task!(candidates: [{:user, Ash.UUID.generate()}])
 
       assert Ash.load!(task, :outcomes).outcomes == nil
+    end
+  end
+
+  # ── the actions under the engine functions ──────────────────────────────────────────────
+
+  describe "the claim, complete and delegate actions" do
+    test "refuse any caller but the engine" do
+      holder = %{id: Ash.UUID.generate()}
+      outsider = Ash.UUID.generate()
+      task = task!(candidates: [{:user, holder.id}])
+
+      assert {:error, %Ash.Error.Invalid{} = error} =
+               HumanTask.claim(task, %{assignee_type: :user, assignee_id: outsider})
+
+      assert Exception.message(error) =~ "run by the engine"
+      assert reload(task).status == :open
+
+      {:ok, claimed} = AshBpmn.claim_task(task, actor: holder)
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               HumanTask.complete(claimed, %{outcome: "approved", decided_by_id: outsider})
+
+      assert {:error, %Ash.Error.Invalid{}} = HumanTask.delegate(claimed, :user, outsider)
+
+      reloaded = reload(task)
+      assert reloaded.status == :claimed
+      assert reloaded.assignee_id == holder.id
+      assert reloaded.decided_by_id == nil
+    end
+
+    test "a completion from a struct a delegation has moved past is refused" do
+      holder = %{id: Ash.UUID.generate()}
+      delegate = %{id: Ash.UUID.generate()}
+      task = task!(candidates: [{:user, holder.id}, {:user, delegate.id}])
+      {:ok, claimed} = AshBpmn.claim_task(task, actor: holder)
+
+      {:ok, _} =
+        AshBpmn.delegate_task(task, to_principal: %{type: :user, id: delegate.id}, actor: holder)
+
+      # `claimed` still names the holder; the task has passed to the delegate since.
+      assert {:error, %Ash.Error.Invalid{} = error} =
+               HumanTask.complete(
+                 claimed,
+                 %{outcome: "approved", decided_by_id: holder.id},
+                 AshBpmn.Scope.engine(%AshBpmn.Scope{})
+               )
+
+      assert Exception.message(error) =~ "has passed to"
+
+      reloaded = reload(task)
+      assert reloaded.status == :claimed
+      assert reloaded.assignee_id == delegate.id
+      assert reloaded.decided_by_id == nil
     end
   end
 

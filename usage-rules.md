@@ -214,7 +214,10 @@ gateway conditions, never in resolver specs, never in the invoker.
     a claimed-task completion and a delegation need the holder, a delegate must be
     a candidate, and a task's recorded exclusions refuse the maker even through a
     candidate team. The claim's UPDATE matches only an `:open` row, so a concurrent
-    claim loses. For team candidates, implement the resolver's optional
+    claim loses. Never authorize people on `HumanTask`'s own `:claim`, `:complete`
+    or `:delegate`: they check nobody, and refuse any caller but the engine.
+    `:force_complete` checks nobody either; authorize it for administrators only.
+    For team candidates, implement the resolver's optional
     `team_ids/2` (or put `:team_ids` on the actor). See
     [presenting tasks to people](documentation/topics/assignment-and-maker-checker.md#presenting-tasks-to-people).
 

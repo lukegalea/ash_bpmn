@@ -160,9 +160,11 @@ MyApp.Bpmn.HumanTask
 |> Ash.read!(actor: current_user)
 ```
 
-The candidate rows are matched with an `exists` over your `TaskCandidate`,
-authorized as the person, so they must be able to read their own candidate
-rows. Pass `task_candidate: MyApp.Bpmn.TaskCandidate` to the `HumanTask` macro
+The candidate rows are matched with an `exists` over your `TaskCandidate`
+that is not authorized: your `TaskCandidate` read policies do not apply to it.
+It only decides which tasks come back, matched on the task and the person's
+own ids, and returns no candidate row. Your `HumanTask` read policies apply to
+the read as usual. Pass `task_candidate: MyApp.Bpmn.TaskCandidate` to the `HumanTask` macro
 to get a `has_many :candidates` relationship as well (leave it out if your
 resource already declares one). For an outcome picker, load the `:outcomes`
 calculation: the outcomes the task's BPMN step declares, read from the
@@ -175,6 +177,15 @@ then calls the engine function with `actor:` (and `tenant:` on a tenant-scoped
 install). Pass the person doing it, never a service account: the engine
 checks who may act against the `actor:` you give it, and the process event
 log records that actor as the person who claimed, decided or delegated.
+
+**Do not let people run `HumanTask`'s `:claim`, `:complete` or `:delegate`
+actions themselves.** Those actions take the assignee and the decider as plain
+inputs and check nobody; the checks below are in the engine functions. They
+refuse any caller but the engine, whatever your policies say, so a policy such
+as `policy action_type(:update)` cannot open them to people by accident. Grant
+people your own generic actions instead. `:force_complete` writes an outcome
+with no decider and checks nobody either; it is left open for an
+administrator's override, so authorize it for administrators only.
 
 **What the engine checks.** Each function refuses with an `ArgumentError`
 (returned as `{:error, exception}`) and writes nothing when:
@@ -190,7 +201,9 @@ log records that actor as the person who claimed, decided or delegated.
 A claim is also guarded in the database: its UPDATE matches only a row that is
 still `:open`, so of two people claiming at once exactly one wins and the other
 gets an error, and the claim and its `:task_claimed` event commit together.
-Delegation is guarded the same way on `:claimed`.
+Completion and delegation of a claimed task are guarded the same way, on
+`:claimed` and on the holder the engine checked, so a completion that races a
+delegation is refused once the task has passed to someone else.
 
 What stays yours: whether the person may see the task at all (your read
 policies), how a delegate is named and found (an email they typed, a picker),

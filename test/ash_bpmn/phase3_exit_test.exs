@@ -49,7 +49,12 @@ defmodule AshBpmn.Phase3ExitTest do
       {instance, task} = start_expiry!()
 
       actor = candidate_actor(task)
-      HumanTask.claim!(task, %{assignee_type: :user, assignee_id: actor.id})
+
+      HumanTask.claim!(
+        task,
+        %{assignee_type: :user, assignee_id: actor.id},
+        AshBpmn.Scope.engine(%AshBpmn.Scope{})
+      )
 
       {:ok, _} =
         AshBpmn.complete_task(reload_task(task),

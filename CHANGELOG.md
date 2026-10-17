@@ -208,7 +208,22 @@ Nothing has been released yet. Everything below is the initial body of work.
   default `[]`): the principals maker-checker subtracted when the task was
   created, kept so an excluded person cannot act through a candidate team.
   Hosts need the column: run `mix ash.codegen` (or add it by hand,
-  `uuid[] NOT NULL DEFAULT '{}'`). Tasks created before have `[]`.
+  `uuid[] NOT NULL DEFAULT '{}'`). Tasks created before have `[]`, which
+  means their exclusions were not recorded: on an open or claimed task created
+  before the upgrade, a requester who belongs to a candidate team can still
+  claim, decide or be delegated their own request. If you have team
+  candidates, let those tasks finish before you upgrade, or backfill the
+  column for them from your resolver's maker-checker exclusions.
+- **`HumanTask`'s `:claim`, `:complete` and `:delegate` actions are
+  engine-only.** They refuse any call not made with `AshBpmn.Scope.engine/2`
+  (`Ash.Error.Invalid`, "run by the engine"), whatever the host's policies
+  allow. They take the assignee and the decider as inputs and check nobody, so
+  a policy that let a person run them could get around maker-checker. Call
+  `AshBpmn.claim_task/2`, `complete_task/2` and `delegate_task/2` instead.
+- **`:complete` and `:delegate` refuse a task whose holder has changed.** Their
+  UPDATE also matches on the assignee the action started from, so a completion
+  racing a delegation fails once the task has passed to someone else, rather
+  than recording the old holder as the decider on the new holder's task.
 - **`:claim` and `:delegate` refuse a row that has moved on.** `:claim` now
   re-reads the row and filters its UPDATE on `status = 'open'`, and `:delegate`
   on `status = 'claimed'`; `:complete`, `:cancel` and `:force_complete` filter

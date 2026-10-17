@@ -209,12 +209,17 @@ defmodule AshBpmn.BoundaryTimerTest do
       # task.
       {instance, task} = start!()
 
-      HumanTask.claim!(task, %{assignee_type: :user, assignee_id: Ash.UUID.generate()})
+      HumanTask.claim!(
+        task,
+        %{assignee_type: :user, assignee_id: Ash.UUID.generate()},
+        AshBpmn.Scope.engine(%AshBpmn.Scope{})
+      )
 
-      HumanTask.complete!(reload_task(task), %{
-        outcome: :approved,
-        decided_by_id: Ash.UUID.generate()
-      })
+      HumanTask.complete!(
+        reload_task(task),
+        %{outcome: :approved, decided_by_id: Ash.UUID.generate()},
+        AshBpmn.Scope.engine(%AshBpmn.Scope{})
+      )
 
       # The token is deliberately left `:waiting` -- that is the window.
       assert token_for(task).status == :waiting
