@@ -207,7 +207,9 @@ gateway conditions, never in resolver specs, never in the invoker.
     task list screen and does not depend on a UI library. Read the generated
     `:awaiting_actor` action as the person for the board's lanes (open tasks they
     or one of their teams are a candidate for, claimed tasks they hold; nothing
-    when nobody is acting; counts and pages over it count the same tasks), and
+    when nobody is acting; `Ash.count/2`, `Ash.aggregate/3` and counted pages on
+    an `:awaiting_actor` query count the same tasks, but a relationship aggregate
+    naming it as `read_action` does not narrow), and
     make claim, complete and delegate actions on your `HumanTask` that call
     `AshBpmn.claim_task/2`, `complete_task/2` and
     `delegate_task/2` with the person as `actor:`, never a service account. Those
@@ -219,7 +221,8 @@ gateway conditions, never in resolver specs, never in the invoker.
     or `:delegate`: they check nobody, and refuse any caller but the engine.
     `:force_complete` checks nobody either; authorize it for administrators only.
     For team candidates, implement the resolver's optional
-    `team_ids/2` (or put `:team_ids` on the actor). See
+    `team_ids/2` (or put `:team_ids` on the actor). The candidacy read calls
+    `team_ids/2` several times per read or count, so keep it cheap. See
     [presenting tasks to people](documentation/topics/assignment-and-maker-checker.md#presenting-tasks-to-people).
 
 ## Testing

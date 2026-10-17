@@ -36,8 +36,11 @@ defmodule AshBpmn.Resources.HumanTask do
       tasks they hold. Neither includes a task that excludes the actor. With
       no actor, or an actor with no id, it returns nothing. The narrowing is a
       filter on the query (the private `:awaits_actor?` calculation, see
-      `AshBpmn.Resources.HumanTask.AwaitsActor`), so `Ash.count/2`, a counted
-      page and query aggregates agree with the read. It paginates (offset or
+      `AshBpmn.Resources.HumanTask.AwaitsActor`), so `Ash.count/2`,
+      `Ash.aggregate/3` and a counted page on an `:awaiting_actor` query agree
+      with the read. A relationship aggregate that names `:awaiting_actor` as
+      its `read_action` does not: Ash does not run read-action preparations
+      for it, so it counts tasks that do not await the actor. It paginates (offset or
       keyset, optional). The filter uses the actor the query runs as, so a
       query built without one and read or counted with one still narrows.
       The candidate rows are matched with an `exists` over the
@@ -251,6 +254,9 @@ defmodule AshBpmn.Resources.HumanTask do
         # The candidacy test the `:awaiting_actor` read filters on. A calculation so Ash builds
         # it for the actor the query runs as, and an expression so counts and aggregates over
         # the read apply it too. See `AshBpmn.Resources.HumanTask.AwaitsActor`.
+        # Field policies do not hide it from that filter: Ash checks them for fields a query
+        # loads or selects, and for refs in filters given as input, and the preparation's
+        # filter is neither.
         calculate :awaits_actor?,
                   :boolean,
                   {AshBpmn.Resources.HumanTask.AwaitsActor, resource: __MODULE__} do

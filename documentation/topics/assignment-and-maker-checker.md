@@ -150,11 +150,19 @@ with a candidate row for them or one of their teams, and claimed tasks they
 hold (assigned to them, or to one of their teams). Neither includes a task
 that excludes them. With nobody acting it reads nothing rather than
 everything. The narrowing is a filter on the query, so a lane total from
-`Ash.count/2`, a page with `count: true` and an aggregate over the read count
-the same tasks the read returns. The read paginates (offset or keyset, not
-required). The filter uses the actor the query runs as, so a query built
-without one and read or counted with one still narrows. The board's lanes are
-the task's `status`.
+`Ash.count/2`, `Ash.aggregate/3` or a page with `count: true` on an
+`:awaiting_actor` query counts the same tasks the read returns. The read
+paginates (offset or keyset, not required). The filter uses the actor the
+query runs as, so a query built without one and read or counted with one still
+narrows. The board's lanes are the task's `status`.
+
+Two limits. A relationship aggregate that names the read, such as
+`count :awaiting, :tasks, read_action: :awaiting_actor`, does not narrow: Ash
+does not run a read action's preparations for a relationship aggregate, so it
+counts tasks that do not await the person. Count the lane on an
+`:awaiting_actor` query instead. And the resolver's `team_ids/2` runs each
+time Ash builds the filter, several times per read or count, so keep it cheap
+(work the person's teams out once per request and return them from the actor).
 
 ```elixir
 MyApp.Bpmn.HumanTask

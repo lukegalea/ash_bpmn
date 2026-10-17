@@ -126,8 +126,16 @@ defmodule AshBpmn.Test.Resolver do
   Callback: `team_ids(principal :: map(), ctx :: map()) :: [Ash.UUID.t()]`
   """
   def team_ids(principal, _ctx) do
+    Process.put({__MODULE__, :team_ids_calls}, team_ids_calls() ++ [principal.id])
     Map.get(principal, :team_ids) || Process.get({__MODULE__, :team_ids, principal.id}, [])
   end
+
+  @doc "The principal ids `team_ids/2` has been called with in this process, in order."
+  @spec team_ids_calls() :: [Ash.UUID.t()]
+  def team_ids_calls, do: Process.get({__MODULE__, :team_ids_calls}, [])
+
+  @doc "Forgets the recorded `team_ids/2` calls."
+  def clear_team_ids_calls, do: Process.delete({__MODULE__, :team_ids_calls})
 
   @doc "Stages the teams `team_ids/2` reports for `principal_id` in this process."
   def put_team_ids(principal_id, team_ids),

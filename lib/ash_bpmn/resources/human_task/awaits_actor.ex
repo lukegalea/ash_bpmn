@@ -17,11 +17,21 @@ defmodule AshBpmn.Resources.HumanTask.AwaitsActor do
   the expression is `false`.
 
   An expression, so it becomes part of the query's SQL: a read, a count, a
-  page with a count and an aggregate over the read all filter on it. It is
+  page with a count and `Ash.aggregate/3` on an `:awaiting_actor` query all
+  filter on it. A relationship aggregate naming `:awaiting_actor` as its
+  `read_action` does not, because Ash does not run read-action preparations
+  for it. It is
   a calculation rather than a filter written when the query is prepared
   because Ash fills a calculation's context with the actor the query runs as.
   A UI library may build the query without an actor and pass one only to
   `Ash.read/2` or `Ash.count/2`; the expression is built for that actor.
+
+  Ash builds the expression each time it expands the filter, more than once
+  per read or count, and each build asks the resolver's `team_ids/2` (see
+  `c:AshBpmn.AssignmentResolver.team_ids/2`). It is not memoized here: a
+  calculation has no per-call scope to memoize in, and a process-wide cache
+  would serve stale team memberships to a long-lived process such as a
+  LiveView, in the check that decides which tasks a person sees.
 
   The candidate rows are matched with an `exists` over the TaskCandidate
   resource that is not authorized: TaskCandidate read policies do not apply

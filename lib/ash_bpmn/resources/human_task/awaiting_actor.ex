@@ -15,8 +15,10 @@ defmodule AshBpmn.Resources.HumanTask.AwaitingActor do
   neither (see `AshBpmn.Candidacy`). With no actor, or one with no id, the
   read returns nothing rather than everything.
 
-  The narrowing is a filter on the query, so `Ash.read/2`, `Ash.count/2`, a
-  page that counts and an aggregate over the read all see the same tasks. The
+  The narrowing is a filter on the query, so `Ash.read/2`, `Ash.count/2`,
+  `Ash.aggregate/3` and a page that counts all see the same tasks. (A
+  relationship aggregate naming this read as its `read_action` does not: Ash
+  does not run read-action preparations for it.) The
   filter is the `:awaits_actor?` calculation
   (`AshBpmn.Resources.HumanTask.AwaitsActor`), which Ash builds for the actor
   the query runs as: a query built without an actor and read or counted with

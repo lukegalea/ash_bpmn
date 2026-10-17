@@ -25,8 +25,10 @@ Nothing has been released yet. Everything below is the initial body of work.
 - **A candidacy read on the generated `HumanTask`.** `:awaiting_actor` returns
   the open tasks the actor or one of their teams is a candidate for and the
   claimed tasks they hold, leaves out tasks that exclude them, and returns
-  nothing with no actor. The narrowing is a filter on the query, so counts,
-  counted pages and aggregates over the read agree with it, and the read
+  nothing with no actor. The narrowing is a filter on the query, so
+  `Ash.count/2`, `Ash.aggregate/3` and counted pages on an `:awaiting_actor`
+  query agree with it (a relationship aggregate naming it as `read_action`
+  does not narrow), and the read
   paginates (offset or keyset, optional). It uses the actor the query runs as,
   so a query built without one and read or counted with one still narrows.
 - **`has_many :candidates`** on the generated `HumanTask` when the macro is

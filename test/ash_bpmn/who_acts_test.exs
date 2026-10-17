@@ -468,6 +468,35 @@ defmodule AshBpmn.WhoActsTest do
       assert Ash.count!(query) == 0
     end
 
+    # The candidacy expression is built each time Ash expands the read's filter, and each build
+    # asks the resolver for the actor's teams: three times for a read under Ash 3.34, where
+    # the old hook asked once. Not memoized (see AwaitsActor's moduledoc), so this holds the
+    # number where it is: a rise means Ash expands more often and the resolver docs need
+    # revisiting.
+    test "the resolver's team_ids/2 is asked for the actor, a bounded number of times" do
+      me = %{id: Ash.UUID.generate(), team_ids: [Ash.UUID.generate()]}
+      _mine = task!(candidates: [{:user, me.id}])
+
+      built = Ash.Query.for_read(HumanTask, :awaiting_actor, %{}, actor: me)
+      bare = Ash.Query.for_read(HumanTask, :awaiting_actor)
+
+      for {name, run} <- [
+            read: fn -> Ash.read!(built) end,
+            read_with_actor_at_read: fn -> Ash.read!(bare, actor: me) end,
+            count: fn -> Ash.count!(built) end,
+            count_with_actor_at_count: fn -> Ash.count!(bare, actor: me) end,
+            counted_page: fn -> Ash.read!(built, page: [limit: 1, count: true]) end
+          ] do
+        Resolver.clear_team_ids_calls()
+        run.()
+        calls = Resolver.team_ids_calls()
+
+        assert calls != [], "#{name} never asked the resolver"
+        assert Enum.all?(calls, &(&1 == me.id)), "#{name} asked for someone else"
+        assert length(calls) <= 3, "#{name} asked the resolver #{length(calls)} times"
+      end
+    end
+
     test "a task's candidates load through its relationship" do
       user_id = Ash.UUID.generate()
       team_id = Ash.UUID.generate()
