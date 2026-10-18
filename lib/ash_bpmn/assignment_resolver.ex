@@ -81,8 +81,13 @@ defmodule AshBpmn.AssignmentResolver do
   @doc """
   The team ids a person acts for, matched against `:team` candidate rows.
 
-  `ctx` carries `:tenant`. Called once per claim, completion, delegation or
-  candidacy read, never per row.
+  `ctx` carries `:tenant`. Never called per row. A claim, completion or
+  delegation calls it once. The `HumanTask` candidacy read (`:awaiting_actor`)
+  calls it each time Ash builds the read's filter, which is more than once in
+  a single read, count or counted page (three times for a read under Ash 3.34),
+  and once more for every lane a board counts. Keep it cheap: if it queries
+  memberships, work them out once per request and put them on the actor, then
+  return them from here.
   """
   @callback team_ids(principal :: map(), ctx :: map()) :: [Ash.UUID.t()]
 
