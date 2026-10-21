@@ -41,7 +41,10 @@ config :ash_bpmn,
     AshBpmn.Test.Domain,
     AshBpmn.ApprovalTestSupport.Domain,
     AshBpmn.TenantTest.Domain,
-    AshBpmn.Test.RuntimeCallablesDomain
+    AshBpmn.Test.RuntimeCallablesDomain,
+    # Reached by name only (after the fallback domains): the same tables as
+    # `AshBpmn.Test.Domain`, under a host read policy. See test/support/scoped_resources.ex.
+    AshBpmn.ScopedTest.Domain
   ]
 
 # The web test endpoint (test/support/web_endpoint.ex). Config lives here —

@@ -103,8 +103,14 @@ Narrow with arguments rather than filtering afterwards — every option maps
 onto the engine's own `:in_flight` reads: `:definition` / `:definition_id` /
 `:definition_key`, `:instance_ids`, and the status lists if you need more than
 running instances with live tokens. With no `:actor` the read runs as the
-engine's system actor; pass `:actor`/`:tenant` to run it under a caller's own
-authority and policies instead.
+engine's system actor and sees every instance in the tenant; pass
+`:actor`/`:tenant` to run it under a caller's own authority and policies
+instead. With an actor the reads are not marked as engine work, so the engine's
+bypass does not apply: the host's policies on instances and tokens decide which
+positions come back. A pinned definition the actor may not read leaves
+`definition_key`, `definition_version`, `node_type` and `node_name` nil; the
+tokens are still reported. A view drawn for a signed-in person should always
+pass that person.
 
 ## Live updates
 

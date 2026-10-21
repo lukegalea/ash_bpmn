@@ -92,6 +92,15 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Fixes:
 
+- **`FlightView.token_positions/2` reads as the actor it is given.** The
+  instance and token reads were marked as engine work even with an `:actor`,
+  so `AshBpmn.Checks.AshBpmnInteraction` bypassed the host's policies and a
+  flight view drawn for a signed-in person showed every instance's tokens.
+  With an actor the reads are now that actor's and the host's policies filter
+  them. A pinned definition the actor may not read leaves the definition key,
+  version and node metadata nil. With no actor nothing changes: the read is the
+  engine's own.
+
 - **Concurrent claims: exactly one wins.** `:claim` validated the status of the
   struct it was given and nothing else, so two people claiming one task at once
   both succeeded, and the second overwrote the first's assignee. The claim's
