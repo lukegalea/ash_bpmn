@@ -259,6 +259,20 @@ defmodule AshBpmn.FlightView do
       the read runs as the `:engine` system actor, because a flight view is engine
       work with nobody behind it and `nil` would lose that distinction.
 
+  ## Authorization
+
+  With an `:actor`, every read runs as that actor and is **not** marked as engine
+  work, so the host's policies on the instance and token resources decide what
+  comes back: a person sees the tokens of the instances they may read, and
+  nothing else. The definition each instance pins is loaded under the same
+  policies. A definition the actor may not read degrades `definition_key`,
+  `definition_version`, `node_type` and `node_name` to `nil` and the tokens are
+  still reported.
+
+  With no actor the reads are the engine's own and pass the engine bypass
+  (`AshBpmn.Checks.AshBpmnInteraction`), so they see every instance in the
+  tenant. Never call it that way on a person's behalf.
+
   `subject_type`/`subject_id`/`correlation_id` are the engine's passthrough of
   how the instance references its business record. They are join keys, not
   records: the host resolves the patient or appointment itself, at query time,
@@ -376,14 +390,22 @@ defmodule AshBpmn.FlightView do
       }
       |> drop_nils()
 
-    resources.instance.in_flight!(args, Scope.engine(scope))
+    resources.instance.in_flight!(args, read_opts(scope))
   end
 
   defp read_tokens(_resources, _scope, %{instance_ids: []}), do: []
 
   defp read_tokens(resources, scope, args) do
-    resources.token.in_flight!(drop_nils(args), Scope.engine(scope))
+    resources.token.in_flight!(drop_nils(args), read_opts(scope))
   end
+
+  # With no actor the reads are the engine's own, marked so its bypass admits
+  # them. With an actor they are that actor's, unmarked: the host's policies
+  # decide which instances and tokens come back. Marking them would let
+  # `AshBpmn.Checks.AshBpmnInteraction` bypass every host policy and hand a
+  # signed-in person every instance's tokens.
+  defp read_opts(%Scope{actor: %AshBpmn.SystemActor{}} = scope), do: Scope.engine(scope)
+  defp read_opts(%Scope{} = scope), do: [actor: scope.actor, tenant: scope.tenant]
 
   # An argument that is nil means "do not narrow on this", and the preparations
   # spell that as a nil-matching clause — but only if the argument was never set.

@@ -25,6 +25,7 @@ defmodule AshBpmn.FlightViewTest do
 
   alias AshBpmn.FlightView
   alias AshBpmn.Runtime.Oban.TestJobs
+  alias AshBpmn.ScopedTest.Domain, as: ScopedDomain
   alias AshBpmn.Test.{Definition, Domain, HumanTask}
 
   @position_keys ~w(instance_id instance_status definition_id definition_key definition_version
@@ -224,6 +225,41 @@ defmodule AshBpmn.FlightViewTest do
     end
   end
 
+  describe "token positions for an actor" do
+    # `AshBpmn.ScopedTest.Domain` is the six resources under a host read policy:
+    # an actor reads the instances (and their tokens) whose correlation id is
+    # their own. The engine's reads pass its bypass; the actor's must not.
+    test "with an actor, the host's policies decide which tokens come back" do
+      # The definitions table is shared, so the engine finds this one from either domain.
+      create_published_definition!(
+        "flight_scoped",
+        File.read!("test/fixtures/access_request.bpmn")
+      )
+
+      ours = start_scoped!("flight_scoped", "ours")
+      theirs = start_scoped!("flight_scoped", "theirs")
+
+      everything = FlightView.token_positions!(ScopedDomain, definition_key: "flight_scoped")
+      assert everything |> Enum.map(& &1.instance_id) |> Enum.sort() == Enum.sort([ours, theirs])
+
+      assert [entry] =
+               FlightView.token_positions!(ScopedDomain,
+                 definition_key: "flight_scoped",
+                 actor: %{correlation_id: "ours"}
+               )
+
+      assert entry.instance_id == ours
+      assert entry.node_id == "ManagerApproval"
+      assert entry.node_name == "Manager approval"
+      assert entry.status == "waiting"
+
+      assert FlightView.token_positions!(ScopedDomain,
+               definition_key: "flight_scoped",
+               actor: %{correlation_id: "nobody"}
+             ) == []
+    end
+  end
+
   # ── live updates ─────────────────────────────────────────────────────────
 
   describe "live updates with a PubSub" do
@@ -383,6 +419,20 @@ defmodule AshBpmn.FlightViewTest do
       AshBpmn.start_instance(Domain, process: key, subject: subject)
 
     {definition, instance, subject}
+  end
+
+  # A request started in the policy-bearing domain, correlated to `correlation_id`.
+  defp start_scoped!(key, correlation_id) do
+    subject = create_test_subject!(key, is_privileged: false)
+
+    {:ok, instance} =
+      AshBpmn.start_instance(ScopedDomain,
+        process: key,
+        subject: subject,
+        correlation_id: correlation_id
+      )
+
+    instance.id
   end
 
   defp approve!(instance) do
