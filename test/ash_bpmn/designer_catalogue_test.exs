@@ -509,7 +509,7 @@ defmodule AshBpmn.DesignerCatalogueTest do
       # as the label — a select, not a guess
       assert html =~ ~s(<select id="config-call-ref" name="call_ref")
       assert html =~ ~s(value="#{@record_inputs_ref}" selected)
-      assert html =~ "assess_tier — Assesses the risk tier from the amount"
+      assert html =~ "assess_tier — Assesses the severity level from the amount"
 
       # The input palette is the callable's action arguments, prefilled from
       # the live binding — blank rows here would mean Apply erases them

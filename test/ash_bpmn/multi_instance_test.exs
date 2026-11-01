@@ -5,8 +5,8 @@ defmodule AshBpmn.MultiInstanceTest do
   @moduledoc """
   An activity run once per element of a list.
 
-  Earned by an RFQ awarded per property: one request covers several properties, each award
-  needs its own compliance track, and the count is not known when the diagram is drawn.
+  Earned by a referral covering several patients: one referral names many patients, each one
+  needs its own care track, and the count is not known when the diagram is drawn.
   """
 
   use AshBpmn.DataCase, async: false
