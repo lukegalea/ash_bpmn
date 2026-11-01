@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+A clinic waits for a lab result, but not forever. The receive task waits for the result to be
+recorded; if it has not arrived within four hours the timer boundary interrupts the wait and the
+branch leaves through the boundary's own flow to a follow-up call.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_receive_task_boundary"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_receive_task_boundary" name="Await lab result" isExecutable="true">
+
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>Flow_1</bpmn2:outgoing></bpmn2:startEvent>
+
+    <bpmn2:receiveTask id="AwaitResult" name="Await lab result">
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
+      <bpmn2:extensionElements>
+        <ash:subscribe resource="payment" action="create"
+                       correlate="subject.id" match="data.invoice_id"/>
+      </bpmn2:extensionElements>
+    </bpmn2:receiveTask>
+
+    <bpmn2:boundaryEvent id="Boundary_1" name="No result in time" attachedToRef="AwaitResult">
+      <bpmn2:outgoing>Flow_FollowUp</bpmn2:outgoing>
+      <bpmn2:timerEventDefinition id="Timer_1">
+        <bpmn2:timeDuration xsi:type="bpmn2:tFormalExpression">PT4H</bpmn2:timeDuration>
+      </bpmn2:timerEventDefinition>
+    </bpmn2:boundaryEvent>
+
+    <bpmn2:serviceTask id="Review" name="Review result">
+      <bpmn2:extensionElements><ash:taskConfig action="settle"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_2</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_3</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:serviceTask id="FollowUp" name="Call the lab">
+      <bpmn2:extensionElements><ash:taskConfig action="escalate_it"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_FollowUp</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_FollowUpOut</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>Flow_3</bpmn2:incoming></bpmn2:endEvent>
+    <bpmn2:endEvent id="End_2"><bpmn2:incoming>Flow_FollowUpOut</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="AwaitResult"/>
+    <bpmn2:sequenceFlow id="Flow_2" sourceRef="AwaitResult" targetRef="Review"/>
+    <bpmn2:sequenceFlow id="Flow_3" sourceRef="Review" targetRef="End_1"/>
+    <bpmn2:sequenceFlow id="Flow_FollowUp" sourceRef="Boundary_1" targetRef="FollowUp"/>
+    <bpmn2:sequenceFlow id="Flow_FollowUpOut" sourceRef="FollowUp" targetRef="End_2"/>
+  </bpmn2:process>
+</bpmn2:definitions>

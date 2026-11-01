@@ -458,12 +458,20 @@ defmodule AshBpmn.Compiler.Verify do
   # Everything structural about a boundary event, refused at publish rather than discovered
   # at three in the morning.
   #
-  # Attachment is restricted to `userTask`, and that is a real limit rather than a first cut.
-  # A service task's token is `:executing` inside a running Oban job: Oban cannot interrupt a
+  # A timer boundary attaches to an activity whose token is *parked*: a user task waiting for
+  # a person, a receive task waiting for a message, a call activity waiting for its child. Each
+  # of those waits is a row and a scheduled job, never a running one, so the deadline is one
+  # more scheduled job and firing it is a compare-and-set on the parked token -- the same claim
+  # the wake would have made, so exactly one of them wins.
+  #
+  # Every other attachment is refused, and that is a real limit rather than a first cut. A
+  # service task's token is `:executing` inside a running Oban job: Oban cannot interrupt a
   # running job, and an Ash action that has already committed cannot be un-run -- that is
   # compensation, which this library refuses outright. "Interrupting" such an activity would
   # mean killing the token while the work carried on, which is a lie the diagram would be
   # telling.
+  @timer_attachable ~w(userTask receiveTask callActivity)
+
   defp verify_boundary_events(nodes, flows) do
     nodes
     |> Enum.filter(fn {_id, node} -> node["type"] == "boundaryEvent" end)
@@ -491,15 +499,28 @@ defmodule AshBpmn.Compiler.Verify do
       )
     ]
 
-  defp attachment_errors(_id, _ref, %{"type" => "userTask"}), do: []
+  defp attachment_errors(_id, _ref, %{"type" => type}) when type in @timer_attachable, do: []
+
+  # BPMN attaches boundary events to activities only (BPMN 2.0, 10.5.3), so a deadline on an
+  # intermediate message catch is not a drawing this compiler can honour. The receive task is
+  # the activity form of the same wait, and it runs on the same code.
+  defp attachment_errors(id, ref, %{"type" => "intermediateCatchEvent"}),
+    do: [
+      Errors.error(
+        id,
+        "boundaryEvent '#{id}' is attached to intermediateCatchEvent '#{ref}'; boundary " <>
+          "events attach to activities, not events. To wait for a message with a deadline, " <>
+          "draw the wait as a receiveTask and attach the timer to it"
+      )
+    ]
 
   defp attachment_errors(id, _ref, %{"type" => type}),
     do: [
       Errors.error(
         id,
-        "boundaryEvent '#{id}' is attached to a #{type}; interrupting boundary events are " <>
-          "supported on: userTask. A task whose work is already running cannot be " <>
-          "interrupted without either lying about it or compensating for it"
+        "boundaryEvent '#{id}' is attached to a #{type}; timer boundary events are " <>
+          "supported on: #{Enum.join(@timer_attachable, ", ")}. A task whose work is already " <>
+          "running cannot be interrupted without either lying about it or compensating for it"
       )
     ]
 

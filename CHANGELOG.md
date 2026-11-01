@@ -16,6 +16,15 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Features:
 
+- **Timer boundaries on receive tasks and call activities.** A deadline on a
+  wait for a message or for a child process, interrupting or not, with the
+  same semantics as on a user task. The wait stays a parked token and a
+  scheduled job; whichever of the deadline and the wake claims the token first
+  wins. An interrupting boundary on a call activity cancels the child instance
+  and its own call tree in the same step, each with an `:instance_cancelled`
+  event whose data names the boundary. A boundary on an intermediate message
+  catch event is refused with a pointer to the receive task, since BPMN
+  attaches boundary events to activities only.
 - **Who acts on a human task is checked by the engine.** `claim_task/2`,
   `complete_task/2` and `delegate_task/2` check candidacy and holding (see
   Breaking changes), team candidates included: a resolver's optional

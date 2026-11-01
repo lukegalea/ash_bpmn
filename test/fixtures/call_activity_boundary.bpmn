@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+Calls a child process with a deadline. If the child has not finished within a day the timer
+boundary interrupts the call activity, the child is cancelled, and the parent leaves through the
+boundary's own flow.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_call_activity_boundary"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_call_activity_boundary" name="Call with deadline" isExecutable="true">
+
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>Flow_1</bpmn2:outgoing></bpmn2:startEvent>
+
+    <bpmn2:callActivity id="Onboard" name="Credential check">
+      <bpmn2:extensionElements>
+        <ash:process key="CHILD_KEY"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
+    </bpmn2:callActivity>
+
+    <bpmn2:boundaryEvent id="Boundary_1" name="Took too long" attachedToRef="Onboard">
+      <bpmn2:outgoing>Flow_Escalate</bpmn2:outgoing>
+      <bpmn2:timerEventDefinition id="Timer_1">
+        <bpmn2:timeDuration xsi:type="bpmn2:tFormalExpression">P1D</bpmn2:timeDuration>
+      </bpmn2:timerEventDefinition>
+    </bpmn2:boundaryEvent>
+
+    <bpmn2:serviceTask id="AfterChild" name="After child">
+      <bpmn2:extensionElements><ash:taskConfig action="after_child"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_2</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_3</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:serviceTask id="Escalate" name="Escalate">
+      <bpmn2:extensionElements><ash:taskConfig action="escalate_it"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Escalate</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_EscalateOut</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>Flow_3</bpmn2:incoming></bpmn2:endEvent>
+    <bpmn2:endEvent id="End_2"><bpmn2:incoming>Flow_EscalateOut</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Onboard"/>
+    <bpmn2:sequenceFlow id="Flow_2" sourceRef="Onboard" targetRef="AfterChild"/>
+    <bpmn2:sequenceFlow id="Flow_3" sourceRef="AfterChild" targetRef="End_1"/>
+    <bpmn2:sequenceFlow id="Flow_Escalate" sourceRef="Boundary_1" targetRef="Escalate"/>
+    <bpmn2:sequenceFlow id="Flow_EscalateOut" sourceRef="Escalate" targetRef="End_2"/>
+  </bpmn2:process>
+</bpmn2:definitions>

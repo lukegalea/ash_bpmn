@@ -25,6 +25,17 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
   The interrupted task is **cancelled, never force-completed**. `outcome` is what reporting
   and post-task FEEL conditions read, so inventing one for a task nobody decided makes an
   undecided task indistinguishable from a decided one.
+
+  ## Receive tasks and call activities
+
+  A receive task has no task row: the claim on its parked token is the whole interruption, and
+  it races the message's own claim, so exactly one of a late message and the deadline wins.
+
+  An interrupted call activity stops its child, and the child's own children, in the same step
+  (Camunda terminates the called instance the same way). The child rows are locked before the
+  parent's token is claimed -- see `AshBpmn.Runtime.CallTree` for why that order is the one
+  that cannot deadlock against a child finishing at the same moment. A non-interrupting
+  boundary leaves the child running, as it leaves a user task open.
   """
 
   use Oban.Worker, max_attempts: 3
@@ -33,6 +44,7 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
 
   alias AshBpmn.Config
   alias AshBpmn.FlightView
+  alias AshBpmn.Runtime.CallTree
   alias AshBpmn.Runtime.DomainResolver
   alias AshBpmn.Runtime.Step
   alias AshBpmn.Scope
@@ -138,10 +150,19 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
 
   defp do_interrupt(resources, token, args, scope) do
     task = find_task(resources, token, args["attached_to"], scope)
+    children = CallTree.lock_running(resources, [token.id], scope)
 
     with :ok <- cancel_task(resources, task, scope),
          {:ok, token} <- resources.token.claim_waiting(token, ordinary_loss(scope)) do
       FlightView.token_moved(load_instance(resources, token.instance_id, scope), token)
+
+      CallTree.cancel(
+        resources,
+        children,
+        %{"reason" => "boundary_event", "boundary_id" => args["boundary_id"]},
+        scope
+      )
+
       route(resources, token, task, args, scope)
     else
       # Both losses are ordinary. `:lost_to_completion` means somebody decided the task

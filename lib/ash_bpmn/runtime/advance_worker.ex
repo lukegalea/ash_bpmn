@@ -891,6 +891,9 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
              token,
              Keyword.put(Scope.engine(parent_scope), :rollback_on_error?, false)
            ) do
+      # The call activity's deadlines are moot once its child has finished.
+      AshBpmn.Runtime.Oban.cancel_all(%{"token_id" => token.id, "kind" => "boundary"})
+
       parent =
         resources.instance
         |> Ash.Query.for_read(:read)
@@ -999,8 +1002,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         # This used to raise after the park had committed. The retry then found the token
         # `:waiting`, not `:active`, and skipped, so the parent waited for a child that was
         # never started, forever. A call activity has no error boundary to route to: the
-        # compiler admits boundary events on user tasks only, and error events on end events
-        # only, so the give-up is the whole of what BPMN offers this model.
+        # compiler admits only timer boundaries on it, and error events on end events only,
+        # so the give-up is the whole of what BPMN offers this model.
         raise "call activity #{spec.node_id} could not start #{spec.key}: #{describe_start_error(reason)}"
     end
   end
