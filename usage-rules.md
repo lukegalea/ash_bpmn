@@ -114,8 +114,11 @@ gateway conditions, never in resolver specs, never in the invoker.
     (Oban redelivery, or a claim older than `config :ash_bpmn, claim_timeout:`
     taken back from a worker presumed dead). The token claim gate makes
     double-advance safe; it cannot un-run host work, so your `ActionInvoker`
-    callbacks and callables must tolerate a second invocation. Keep
-    `claim_timeout` above your slowest service task.
+    callbacks and callables must tolerate a second invocation. Key that on the
+    invocation key, `{instance_id, token_id, node_id}`: `ctx[:invocation_key]`
+    for the invoker, `context.ash_bpmn.invocation_key` for an `ash:call`
+    callable. It is the same on every redelivery and new on the next execution
+    of the node. Keep `claim_timeout` above your slowest service task.
 15. **Engine calls go through `AshBpmn.Scope`, never `authorize?: false`.** Every
     internal call passes `AshBpmn.Scope.engine/2`, which carries the actor and the
     tenant and marks the call for the bypass each generated resource declares on

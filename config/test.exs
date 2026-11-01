@@ -11,7 +11,8 @@ config :ash_bpmn, AshBpmn.TestRepo,
   port: String.to_integer(System.get_env("PGPORT", "5432")),
   username: System.get_env("DB_USER", "postgres"),
   password: System.get_env("DB_PASSWORD", "postgres"),
-  database: "ash_bpmn_test",
+  # MIX_TEST_PARTITION keeps concurrent checkouts sharing one cluster apart.
+  database: "ash_bpmn_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online()
 

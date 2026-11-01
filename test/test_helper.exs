@@ -1,8 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Luke Galea
 # SPDX-License-Identifier: MIT
 
-# Ensures the test ETS tables exist for test doubles.
+# Ensures the test ETS tables exist for test doubles, owned by this process so they live for
+# the whole run. A table a double creates lazily belongs to whichever process touched it
+# first -- often a test's `on_exit` -- and vanishes when that process exits, taking a result
+# the next test has just staged with it.
 :ets.new(:ash_bpmn_test_calls, [:set, :public, :named_table])
+AshBpmn.Test.Invoker.clear_calls()
+AshBpmn.Test.CallablesRecorder.clear()
 
 # Storage up the test database (creates it if missing).
 AshBpmn.TestRepo.__adapter__().storage_up(AshBpmn.TestRepo.config())

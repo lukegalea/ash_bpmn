@@ -28,6 +28,13 @@ defmodule AshBpmn.Runtime.Interpreter do
   invoked action itself must tolerate a second invocation — exactly the contract an
   `ActionInvoker` callback owes. A callable that charges a card or sends an email
   on every run will do both twice on redelivery; make it idempotent in the action.
+
+  What makes that possible is the **invocation key**, `{instance_id, token_id, node_id}`:
+  the same on every redelivery of one execution of the node, and different for the
+  next execution of it. The invoker finds it at `ctx[:invocation_key]`; an `ash:call`
+  callable finds it in the action's context, at `context.ash_bpmn.invocation_key`.
+  Record the result under the key and return the recorded result when the key
+  comes back.
   """
 
   alias AshBpmn.Runtime.Promotion
@@ -360,12 +367,20 @@ defmodule AshBpmn.Runtime.Interpreter do
   # Ash action invoked through the engine scope. Both take their arguments from the
   # same declared FEEL inputs and promote onto the token under the same gating.
   defp service_task(graph, node_id, node, ctx) do
+    ctx = Map.put(ctx, :invocation_key, invocation_key(ctx, node_id))
+
     if is_map_key(node, "call") do
       ash_call_task(graph, node_id, node, ctx)
     else
       invoker_service_task(graph, node_id, node, ctx)
     end
   end
+
+  # The token is what a redelivery shares with the attempt it repeats: a retry, a claim taken
+  # back after a crash and `AshBpmn.retry_instance/2` all re-run the same token row, while a
+  # second visit to the node (a loop, a fan-out instance) runs a token of its own. So the key
+  # names the token, and the instance and node beside it make it readable on its own.
+  defp invocation_key(ctx, node_id), do: {ctx[:instance].id, ctx[:token].id, node_id}
 
   # ── serviceTask, ash:call binding ────────────────────────────────────────
 
@@ -476,7 +491,11 @@ defmodule AshBpmn.Runtime.Interpreter do
          ctx
        ) do
     scope = %AshBpmn.Scope{actor: ctx[:actor], tenant: ctx[:tenant]}
-    opts = AshBpmn.Scope.engine(scope)
+
+    opts =
+      scope
+      |> AshBpmn.Scope.engine()
+      |> Keyword.update!(:context, &Map.put(&1, :ash_bpmn, %{invocation_key: ctx.invocation_key}))
 
     case action_type do
       :action ->
