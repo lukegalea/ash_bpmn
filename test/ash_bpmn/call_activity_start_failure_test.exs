@@ -14,8 +14,9 @@ defmodule AshBpmn.CallActivityStartFailureTest do
   Now the start is part of the call activity's step, so its failure rolls the park back with
   it, and the failure takes the service task's path: handed back for a retry, and on the last
   attempt the instance `:failed` with an `:action_failed` event that names the call activity.
-  BPMN would route an error boundary here if the model had one; this subset admits boundary
-  events on user tasks only, so the give-up is the whole answer.
+  An error boundary on the call activity does not catch it: a child that could not start is a
+  fault, and a boundary catches only a business error the child threw, so the give-up is the
+  whole answer.
 
   Inline mode has no Oban between the caller and the node, so retries are driven through
   `AdvanceWorker.perform/1` with the `attempt` a real retry would carry.

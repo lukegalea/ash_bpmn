@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+Calls a child process that can end in an error end event, and catches that error on the call
+activity. The child declares its own bpmn:error and so does this parent: they agree on the
+error by its errorCode, not by sharing a document. The child key is substituted per test.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_call_error_boundary"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+
+  <bpmn2:error id="Error_Referral" name="Referral declined" errorCode="DECLINED"/>
+
+  <bpmn2:process id="Process_call_error_boundary" name="Referral" isExecutable="true">
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>Flow_1</bpmn2:outgoing></bpmn2:startEvent>
+
+    <bpmn2:callActivity id="Referral" name="Refer to specialist">
+      <bpmn2:extensionElements>
+        <ash:process key="CHILD_KEY"/>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_2</bpmn2:outgoing>
+    </bpmn2:callActivity>
+
+    <bpmn2:boundaryEvent id="ReferralDeclined" attachedToRef="Referral">
+      <bpmn2:outgoing>Flow_Declined</bpmn2:outgoing>
+      <bpmn2:errorEventDefinition id="ErrDef_Referral" errorRef="Error_Referral"/>
+    </bpmn2:boundaryEvent>
+
+    <bpmn2:serviceTask id="Scheduled" name="Schedule the specialist">
+      <bpmn2:extensionElements><ash:taskConfig action="schedule_specialist"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_2</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_3</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:serviceTask id="NotifyGp" name="Tell the GP">
+      <bpmn2:extensionElements><ash:taskConfig action="notify_gp"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Declined</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_4</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>Flow_3</bpmn2:incoming></bpmn2:endEvent>
+    <bpmn2:endEvent id="End_Declined"><bpmn2:incoming>Flow_4</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Referral"/>
+    <bpmn2:sequenceFlow id="Flow_2" sourceRef="Referral" targetRef="Scheduled"/>
+    <bpmn2:sequenceFlow id="Flow_3" sourceRef="Scheduled" targetRef="End_1"/>
+    <bpmn2:sequenceFlow id="Flow_Declined" sourceRef="ReferralDeclined" targetRef="NotifyGp"/>
+    <bpmn2:sequenceFlow id="Flow_4" sourceRef="NotifyGp" targetRef="End_Declined"/>
+  </bpmn2:process>
+</bpmn2:definitions>

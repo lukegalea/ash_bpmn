@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+A clinic intake with two checks run side by side. The coverage check can answer "the plan
+does not cover this visit", a business error the diagram catches with an error boundary: the
+check is interrupted and the patient is offered self-pay instead. The allergy check runs
+beside it and knows nothing of any of this. Every branch ends at its own end event, and the
+instance completes when the last one does.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_error_boundary"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+
+  <bpmn2:error id="Error_Coverage" name="Coverage denied" errorCode="COVERAGE_DENIED"/>
+
+  <bpmn2:process id="Process_error_boundary" name="Clinic intake" isExecutable="true">
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>Flow_1</bpmn2:outgoing></bpmn2:startEvent>
+
+    <bpmn2:parallelGateway id="Fork_1">
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_Coverage</bpmn2:outgoing>
+      <bpmn2:outgoing>Flow_Allergy</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+
+    <bpmn2:serviceTask id="CoverageCheck" name="Check coverage">
+      <bpmn2:extensionElements><ash:taskConfig action="check_coverage"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Coverage</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_Covered</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:boundaryEvent id="CoverageDenied" name="Coverage denied" attachedToRef="CoverageCheck">
+      <bpmn2:outgoing>Flow_Denied</bpmn2:outgoing>
+      <bpmn2:errorEventDefinition id="ErrDef_Coverage" errorRef="Error_Coverage"/>
+    </bpmn2:boundaryEvent>
+
+    <bpmn2:serviceTask id="OfferSelfPay" name="Offer self-pay">
+      <bpmn2:extensionElements><ash:taskConfig action="offer_self_pay"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Denied</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_SelfPay</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:serviceTask id="AllergyCheck" name="Check allergies">
+      <bpmn2:extensionElements><ash:taskConfig action="check_allergies"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Allergy</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_AllergyDone</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_Covered"><bpmn2:incoming>Flow_Covered</bpmn2:incoming></bpmn2:endEvent>
+    <bpmn2:endEvent id="End_SelfPay"><bpmn2:incoming>Flow_SelfPay</bpmn2:incoming></bpmn2:endEvent>
+    <bpmn2:endEvent id="End_Allergy"><bpmn2:incoming>Flow_AllergyDone</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Fork_1"/>
+    <bpmn2:sequenceFlow id="Flow_Coverage" sourceRef="Fork_1" targetRef="CoverageCheck"/>
+    <bpmn2:sequenceFlow id="Flow_Allergy" sourceRef="Fork_1" targetRef="AllergyCheck"/>
+    <bpmn2:sequenceFlow id="Flow_Covered" sourceRef="CoverageCheck" targetRef="End_Covered"/>
+    <bpmn2:sequenceFlow id="Flow_Denied" sourceRef="CoverageDenied" targetRef="OfferSelfPay"/>
+    <bpmn2:sequenceFlow id="Flow_SelfPay" sourceRef="OfferSelfPay" targetRef="End_SelfPay"/>
+    <bpmn2:sequenceFlow id="Flow_AllergyDone" sourceRef="AllergyCheck" targetRef="End_Allergy"/>
+  </bpmn2:process>
+</bpmn2:definitions>

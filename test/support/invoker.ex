@@ -37,7 +37,7 @@ defmodule AshBpmn.Test.Invoker do
       :ets.insert(@ctx_table, {System.unique_integer([:positive]), action, ctx})
     end
 
-    current_result()
+    current_result(action)
   end
 
   @doc """
@@ -52,6 +52,12 @@ defmodule AshBpmn.Test.Invoker do
 
   def set_result(%{__struct__: _} = exception), do: store({:__raise__, exception})
   def set_result(fun) when is_function(fun, 0), do: store({:__apply__, fun})
+
+  @doc """
+  Stages what `invoke/2` returns for one action only, ahead of `set_result/1`'s staging, so
+  one branch of a parallel process can fail while its sibling's actions succeed.
+  """
+  def set_result(action, value) when is_binary(action), do: store({:action, action}, value)
 
   @doc "Returns all recorded invocations (list of `{id, action, timestamp}` tuples)."
   def recorded_calls do
@@ -84,16 +90,22 @@ defmodule AshBpmn.Test.Invoker do
     reset_result()
   end
 
-  defp store(value) do
+  defp store(key \\ :result, value) do
     ensure_result_table()
-    :ets.insert(@result_table, {:result, value})
+    :ets.insert(@result_table, {key, value})
     :ok
   end
 
-  defp current_result do
+  defp current_result(action) do
     ensure_result_table()
 
-    case :ets.lookup(@result_table, :result) do
+    staged =
+      case :ets.lookup(@result_table, {:action, action}) do
+        [{_, value}] -> [{:result, value}]
+        [] -> :ets.lookup(@result_table, :result)
+      end
+
+    case staged do
       [{:result, :ok}] -> :ok
       [{:result, {:ok, map}}] when is_map(map) -> {:ok, map}
       [{:result, {:error, reason}}] -> {:error, reason}
