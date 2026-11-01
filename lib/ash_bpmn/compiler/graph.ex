@@ -848,6 +848,22 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
+  # A receive task is a message catch wearing an activity's shape. Same configuration, same
+  # runtime, different rectangle -- which is the whole of what "sugar" should mean. If it
+  # needed semantics of its own it would not have been earned.
+  defp build_node_config(node, "receiveTask", _declarations) do
+    build_message_catch(Xml.element_attr(node, "id"), node)
+  end
+
+  defp build_node_config(node, "intermediateThrowEvent", declarations) do
+    build_signal_throw(Xml.element_attr(node, "id"), node, declarations.signals)
+  end
+
+  defp build_node_config(_node, type, _declarations)
+       when type in ["startEvent", "parallelGateway"] do
+    {:ok, %{}}
+  end
+
   defp build_call_process(id, key, binding, version) do
     cond do
       blank?(key) ->
@@ -903,22 +919,6 @@ defmodule AshBpmn.Compiler.Graph do
       true ->
         {:ok, %{"call_process" => %{"key" => String.trim(key)}}}
     end
-  end
-
-  # A receive task is a message catch wearing an activity's shape. Same configuration, same
-  # runtime, different rectangle -- which is the whole of what "sugar" should mean. If it
-  # needed semantics of its own it would not have been earned.
-  defp build_node_config(node, "receiveTask", _declarations) do
-    build_message_catch(Xml.element_attr(node, "id"), node)
-  end
-
-  defp build_node_config(node, "intermediateThrowEvent", declarations) do
-    build_signal_throw(Xml.element_attr(node, "id"), node, declarations.signals)
-  end
-
-  defp build_node_config(_node, type, _declarations)
-       when type in ["startEvent", "parallelGateway"] do
-    {:ok, %{}}
   end
 
   # A conditional catch waits for the subject to become something. It parks, and every update
