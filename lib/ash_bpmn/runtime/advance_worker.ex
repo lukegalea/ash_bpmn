@@ -1002,6 +1002,9 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
              token,
              Keyword.put(Scope.engine(parent_scope), :rollback_on_error?, false)
            ) do
+      # The call activity's deadlines are moot once its child has finished.
+      AshBpmn.Runtime.Oban.cancel_all(%{"token_id" => token.id, "kind" => "boundary"})
+
       parent =
         resources.instance
         |> Ash.Query.for_read(:read)

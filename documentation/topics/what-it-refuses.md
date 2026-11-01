@@ -19,8 +19,9 @@ The compiler rejects, each with the offending element's id in the error:
   Executable conformance class is barely larger. ash_bpmn executes that subset:
   start events, end events — including terminate end events — user, service,
   send and business rule tasks, intermediate catch events carrying a timer,
-  timer boundary events on user tasks, interrupting or not, error boundary
-  events on service, send and call activity nodes, message catch
+  timer boundary events on user tasks, receive tasks and call activities,
+  interrupting or not, error boundary events on service, send and call
+  activity nodes, message catch
   events, conditional catch events, signal
   throw and catch events, error end events, exclusive and parallel gateways,
   conditional and default flows, parallel multi-instance activities, call
@@ -74,10 +75,17 @@ The compiler rejects, each with the offending element's id in the error:
   month writes `P30D` and means it. A duration of zero is refused on the same
   principle — a timer that waits for no time is a node drawn to do something it
   does not do.
-- **Timer boundary events on anything but a user task.** Both interrupting and
-  non-interrupting timer boundaries are supported; the attachment is what is
-  restricted. A service task's token is
-  executing inside a running job. Oban cannot interrupt a running job and an Ash
+- **Timer boundary events on anything but a user task, receive task or call
+  activity.** Both interrupting and non-interrupting timer boundaries are
+  supported; the attachment is what is restricted, and the three admitted are
+  the activities whose token is *parked*: waiting for a person, a message or a
+  child process. The deadline is a scheduled job and firing it claims the
+  parked token, the same claim the wait's own wake makes, so exactly one of
+  them wins. An interrupted call activity cancels its child, and the child's
+  own children, in the same step. A boundary on an intermediate message catch
+  event is refused because BPMN attaches boundary events to activities only;
+  the receive task is the activity form of the same wait. A service task's
+  token is executing inside a running job. Oban cannot interrupt a running job and an Ash
   action that has already committed cannot be un-run — that is compensation,
   which this library refuses outright. "Interrupting" such an activity would
   mean killing the token while the work carried on, which is a lie the diagram

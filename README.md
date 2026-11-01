@@ -160,8 +160,10 @@ real processes actually use, plus some elements beyond it:
 start and end events (including terminate and error end
 events), user, service, send and **business rule tasks**, exclusive gateways
 (with default flows), parallel fork and join, timer, message, conditional and
-signal catch events, signal throw events, timer boundary events on user tasks,
-error boundary events on service, send and call activity nodes, call activities, receive tasks and parallel multi-instance activities. The
+signal catch events, signal throw events, timer boundary events (on user
+tasks, receive tasks and call activities), error boundary events on service,
+send and call activity nodes, call activities, receive tasks and parallel
+multi-instance activities. The
 full list, and the reason for each refusal, is in
 [what it refuses](documentation/topics/what-it-refuses.md). Gateway conditions
 are written in **FEEL**, the DMN expression language (`subject.amount > 50000`,

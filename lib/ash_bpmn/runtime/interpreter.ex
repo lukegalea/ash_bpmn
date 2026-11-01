@@ -162,12 +162,18 @@ defmodule AshBpmn.Runtime.Interpreter do
         signal_throw(graph, node_id, node, ctx)
 
       "callActivity" ->
-        call_activity(node_id, node, ctx)
+        with_boundary_timers(call_activity(node_id, node, ctx), graph, node_id, ctx)
 
       # Sugar. A receive task *is* a message catch, so it dispatches as one rather than
-      # through a parallel implementation that would have to be kept in step.
+      # through a parallel implementation that would have to be kept in step. What the activity
+      # shape adds is somewhere to attach a deadline, which an event cannot carry.
       "receiveTask" ->
-        intermediate_catch_event(graph, node_id, node, ctx)
+        with_boundary_timers(
+          intermediate_catch_event(graph, node_id, node, ctx),
+          graph,
+          node_id,
+          ctx
+        )
 
       other ->
         {:error, "unsupported node type: #{other}"}
@@ -906,6 +912,11 @@ defmodule AshBpmn.Runtime.Interpreter do
           "process_key" => call["key"]
         })
       ],
+      # Effects apply in order, and `with_boundary_timers/4` fills this slot. Before the child
+      # starts, so a deadline is armed ahead of anything the child's own first step could do to
+      # defuse it: a child that ends at once (an error end event caught on this activity) must
+      # find the timer there to cancel.
+      jobs: [],
       start_child: %{key: call["key"], node_id: node_id}
     ]
 
@@ -1185,7 +1196,19 @@ defmodule AshBpmn.Runtime.Interpreter do
 
   # ── Timer helpers ────────────────────────────────────────────────────────
 
-  # One job per boundary attached to this task, armed at the moment the token arrives.
+  # A parked activity's deadlines are armed in the step that parks it, beside whatever jobs the
+  # wait itself needs (a receive task's lookback), so a park that rolls back takes its timers
+  # with it.
+  defp with_boundary_timers({:ok, effects}, graph, node_id, ctx) do
+    case boundary_timer_jobs(graph, node_id, ctx) do
+      [] -> {:ok, effects}
+      jobs -> {:ok, Keyword.update(effects, :jobs, jobs, &(&1 ++ jobs))}
+    end
+  end
+
+  defp with_boundary_timers(error, _graph, _node_id, _ctx), do: error
+
+  # One job per boundary attached to this activity, armed at the moment the token arrives.
   #
   # `graph["boundaries"]` is nil on every definition published before boundaries existed, and
   # those snapshots are immutable and still executing -- so the `|| %{}` is required, not
