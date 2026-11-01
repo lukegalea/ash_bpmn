@@ -185,6 +185,37 @@ defmodule AshBpmn.WaitBoundaryTest do
       refute invoked?("escalate_it")
     end
 
+    test "a child's error caught by an error boundary defuses the deadline too" do
+      child_key = key()
+      publish!(File.read!("test/fixtures/error_end.bpmn"), child_key)
+
+      timer = """
+      <bpmn2:boundaryEvent id="Boundary_1" attachedToRef="Referral">
+        <bpmn2:outgoing>Flow_Late</bpmn2:outgoing>
+        <bpmn2:timerEventDefinition><bpmn2:timeDuration>P1D</bpmn2:timeDuration></bpmn2:timerEventDefinition>
+      </bpmn2:boundaryEvent>
+      <bpmn2:endEvent id="End_Late"><bpmn2:incoming>Flow_Late</bpmn2:incoming></bpmn2:endEvent>
+      <bpmn2:sequenceFlow id="Flow_Late" sourceRef="Boundary_1" targetRef="End_Late"/>
+      </bpmn2:process>
+      """
+
+      defn =
+        "test/fixtures/call_error_boundary.bpmn"
+        |> File.read!()
+        |> String.replace("CHILD_KEY", child_key)
+        |> String.replace("</bpmn2:process>", timer)
+        |> compile!()
+        |> Definition.publish!()
+
+      {:ok, parent} =
+        AshBpmn.start_instance(AshBpmn.Test.Domain, definition: defn, subject: subject!())
+
+      assert reload(parent).status == :completed
+      assert invoked?("notify_gp")
+      assert boundary_jobs() == []
+      assert TestJobs.fire_due!(DateTime.add(DateTime.utc_now(), @later_than_a_day)) == 0
+    end
+
     test "a non-interrupting boundary leaves the child running" do
       {parent, _child_key} = start_call!(child: :approval, interrupting: false)
       [child] = children_of(parent)
