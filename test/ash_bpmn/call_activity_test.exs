@@ -5,7 +5,7 @@ defmodule AshBpmn.CallActivityTest do
   @moduledoc """
   Process-as-action: start a child and wait for it.
 
-  Earned by vendor onboarding, which is the same track whichever award produced it and today
+  Earned by patient triage, which is the same track whichever referral produced it and today
   can only be drawn by copying it into every parent diagram -- so a change to onboarding means
   editing each copy, and the copies drift.
   """
