@@ -107,7 +107,117 @@ defmodule AshBpmn.CallActivityTest do
     end
   end
 
+  describe "version binding" do
+    test "latest is the default and writes nothing new into the snapshot" do
+      defn = Definition.create!(%{key: key(), name: "C", xml: parent_xml("child")})
+      assert defn.graph["nodes"]["Onboard"]["call_process"] == %{"key" => "child"}
+    end
+
+    test "a pinned binding carries its version" do
+      defn = Definition.create!(%{key: key(), name: "C", xml: parent_xml("child", pin: "2")})
+
+      assert defn.graph["nodes"]["Onboard"]["call_process"] == %{
+               "key" => "child",
+               "binding" => "pinned",
+               "version" => 2
+             }
+    end
+
+    test "a pinned child keeps v1 after v2 publishes" do
+      child_key = key()
+      v1 = publish!("linear.bpmn", child_key)
+      pinned = publish_parent!(child_key, pin: "1")
+      latest = publish_parent!(child_key)
+
+      before = start_parent!(pinned)
+      assert [%{definition_id: definition_id}] = children_of(before)
+      assert definition_id == v1.id
+
+      v2 = publish!("linear.bpmn", child_key)
+      assert v2.version == 2
+
+      after_pinned = start_parent!(pinned)
+      assert [%{definition_id: ^definition_id}] = children_of(after_pinned)
+      assert reload(after_pinned).status == :completed
+
+      [started] = Enum.filter(events(after_pinned), &(&1.kind == :child_started))
+      assert started.data["child_definition_id"] == v1.id
+
+      # And the default binding moves on, which is the difference.
+      after_latest = start_parent!(latest)
+      assert [%{definition_id: v2_id}] = children_of(after_latest)
+      assert v2_id == v2.id
+    end
+
+    test "a pinned version that has been retired does not start" do
+      child_key = key()
+      v1 = publish!("linear.bpmn", child_key)
+      _v2 = publish!("linear.bpmn", child_key)
+      Definition.retire!(v1)
+
+      assert {:error, message} =
+               AshBpmn.start_instance(AshBpmn.Test.Domain,
+                 process: child_key,
+                 version: 1,
+                 subject_type: "Subject",
+                 subject_id: Ash.UUID.generate()
+               )
+
+      assert message =~ "retired"
+    end
+
+    test "a binding the compiler cannot honour is refused" do
+      for {attrs, message} <- [
+            {~s(binding="newest"), ~s(must be "latest" or "pinned")},
+            {~s(binding="pinned"), "requires a version"},
+            {~s(version="1"), "would be ignored"},
+            {~s(binding="pinned" version="v1"), "positive integer"},
+            {~s(binding="pinned" version="0"), "positive integer"}
+          ] do
+        xml =
+          String.replace(
+            File.read!("test/fixtures/call_parent.bpmn"),
+            ~s(key="CHILD_KEY"),
+            ~s(key="child" #{attrs})
+          )
+
+        defn = Definition.create!(%{key: key(), name: "C", xml: xml})
+        refute defn.graph, "expected #{attrs} to be refused"
+        assert Enum.map_join(defn.errors, " ", & &1["message"]) =~ message
+      end
+    end
+  end
+
   # ── helpers ──────────────────────────────────────────────────────────────
+
+  defp parent_xml(child_key, opts \\ []) do
+    pin = if opts[:pin], do: ~s( binding="pinned" version="#{opts[:pin]}"), else: ""
+
+    "test/fixtures/call_parent.bpmn"
+    |> File.read!()
+    |> String.replace(~s(key="CHILD_KEY"), ~s(key="#{child_key}"#{pin}))
+  end
+
+  defp publish_parent!(child_key, opts \\ []) do
+    defn = Definition.create!(%{key: key(), name: "parent", xml: parent_xml(child_key, opts)})
+    if is_nil(defn.graph), do: raise("compile failed: #{inspect(defn.errors)}")
+    Definition.publish!(defn)
+  end
+
+  defp start_parent!(parent_defn) do
+    {:ok, subject} =
+      AshBpmn.Test.Subject.create!(%{
+        name: "ca",
+        amount: 0,
+        is_privileged: true,
+        created_by_id: Ash.UUID.generate()
+      })
+
+    {:ok, parent} =
+      AshBpmn.start_instance(AshBpmn.Test.Domain, definition: parent_defn, subject: subject)
+
+    parent
+  end
 
   defp key, do: "ca_#{System.unique_integer([:positive])}"
 

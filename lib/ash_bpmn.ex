@@ -59,6 +59,9 @@ defmodule AshBpmn do
       identity but not the record. A call activity starting a child uses these, because the
       parent already read the subject and re-reading it to hand it over would be a query to
       produce something it has.
+    * `:version` — with `:process`, start that published version of the key rather than the
+      latest. A call activity with a pinned binding passes it. A version that is a draft, has
+      been retired or does not exist is refused, as a key with nothing published is.
     * `:parent_instance_id` / `:parent_token_id` — set by a call activity, so the child's
       completion knows which token is waiting for it.
     * `:trigger_depth` — how many hops produced this instance. Inherited and incremented by
@@ -997,13 +1000,32 @@ defmodule AshBpmn do
         # Read through the same scope as everything below it: a definition is tenant-scoped
         # too when the host asked for that, and reading it globally would let one organization
         # start another's process.
-        case resources.definition.latest_published!(process_key, Scope.engine(scope)) do
-          [] -> {:error, "no published definition found for process: #{process_key}"}
-          [definition | _] -> {:ok, definition}
-        end
+        published_definition(resources, process_key, Keyword.get(opts, :version), scope)
 
       true ->
         {:error, "start_instance requires one of :process, :definition or :definition_id"}
+    end
+  end
+
+  defp published_definition(resources, process_key, nil, scope) do
+    case resources.definition.latest_published!(process_key, Scope.engine(scope)) do
+      [] -> {:error, "no published definition found for process: #{process_key}"}
+      [definition | _] -> {:ok, definition}
+    end
+  end
+
+  # Published only. Retiring a version is how a modeller says "start no more of these", and a
+  # pin does not overrule that; a draft has not been published to be pinned to.
+  defp published_definition(resources, process_key, version, scope) do
+    case resources.definition.by_key_version(process_key, version, Scope.engine(scope)) do
+      {:ok, %{status: :published} = definition} ->
+        {:ok, definition}
+
+      {:ok, %{status: status}} ->
+        {:error, "process #{process_key} version #{version} is #{status}, not published"}
+
+      _ ->
+        {:error, "no definition found for process: #{process_key} version #{version}"}
     end
   end
 

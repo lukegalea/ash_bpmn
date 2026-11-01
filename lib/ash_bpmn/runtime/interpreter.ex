@@ -837,12 +837,18 @@ defmodule AshBpmn.Runtime.Interpreter do
         correlation_key: nil
       },
       events: [
-        event_attrs(ctx, node_id, :node_entered, %{
-          "waiting_for" => "child_process",
-          "process_key" => call["key"]
-        })
+        event_attrs(
+          ctx,
+          node_id,
+          :node_entered,
+          Map.merge(
+            %{"waiting_for" => "child_process", "process_key" => call["key"]},
+            if(call["version"], do: %{"process_version" => call["version"]}, else: %{})
+          )
+        )
       ],
-      start_child: %{key: call["key"], node_id: node_id}
+      # `version` is nil for the default `latest` binding, and a pinned one otherwise.
+      start_child: %{key: call["key"], version: call["version"], node_id: node_id}
     ]
 
     {:ok, effects}

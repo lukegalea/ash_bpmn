@@ -976,6 +976,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     # like a bug in Ash rather than a bug here.
     case AshBpmn.start_instance(DomainResolver.module!(scope.domain),
            process: spec.key,
+           version: Map.get(spec, :version),
            subject_type: instance.subject_type,
            subject_id: instance.subject_id,
            parent_instance_id: instance.id,
@@ -987,7 +988,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       {:ok, child} ->
         record_event(resources, ctx, :child_started, %{
           "process_key" => spec.key,
-          "child_instance_id" => child.id
+          "child_instance_id" => child.id,
+          "child_definition_id" => child.definition_id
         })
 
       {:error, reason} ->
