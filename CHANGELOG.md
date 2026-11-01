@@ -25,6 +25,13 @@ Nothing has been released yet. Everything below is the initial body of work.
   event whose data names the boundary. A boundary on an intermediate message
   catch event is refused with a pointer to the receive task, since BPMN
   attaches boundary events to activities only.
+- **A stable invocation key for service and send tasks.** Both bindings now
+  receive `{instance_id, token_id, node_id}`: the `ActionInvoker` at
+  `ctx[:invocation_key]`, an `ash:call` callable in its action context at
+  `context.ash_bpmn.invocation_key`. A redelivery of the advance job (a retry, a
+  recovered claim, `retry_instance/2`) carries the same key; the next execution
+  of the node carries a new one. A host records an invocation's result under
+  the key to make a redelivery return it rather than redo the work.
 - **Who acts on a human task is checked by the engine.** `claim_task/2`,
   `complete_task/2` and `delegate_task/2` check candidacy and holding (see
   Breaking changes), team candidates included: a resolver's optional
