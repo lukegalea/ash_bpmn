@@ -60,11 +60,16 @@ defmodule AshBpmn.Runtime.Interpreter do
     * `{:multi_instance_join, spec}` — consume; the last instance of the fan-out follows on
     * `{:terminate_instance, outcome}` — kill every other live token, then complete
     * `{:error_instance, {outcome, error}}` — the same, but ending `:errored` not completed
+
+  Returns `{:error, {:bpmn_error, code, details}}` when a service or send task's callee threw a
+  business error that no error boundary on the task catches: an unhandled error, which the
+  worker fails the instance on at once, because retrying an answer gets the same answer.
     * `{:park_token, attrs}` — park the token as `:waiting`, recording what it listens
       for. `%{}` for a user task: nothing correlates to it, because the completion
       addresses the token by id. A catch event fills in the correlation key and signature.
   """
-  @spec dispatch(map(), String.t(), map(), map()) :: {:ok, keyword()} | {:error, String.t()}
+  @spec dispatch(map(), String.t(), map(), map()) ::
+          {:ok, keyword()} | {:error, String.t() | {:bpmn_error, String.t(), map()}}
   def dispatch(graph, node_id, node, ctx) do
     type = node["type"]
 
@@ -416,10 +421,16 @@ defmodule AshBpmn.Runtime.Interpreter do
       end
     else
       {:error, reason} ->
-        # Same convention as the invoker path: raise, so Oban retries and the
-        # instance fails after max_attempts rather than routing itself down a
-        # branch nobody chose.
-        raise "service task '#{node_id}' (ash:call '#{ref}') failed: #{inspect(reason)}"
+        case AshBpmn.BpmnError.from_failure(reason) do
+          {code, details} ->
+            throw_error(graph, node_id, code, details, ctx)
+
+          nil ->
+            # Same convention as the invoker path: raise, so Oban retries and the
+            # instance fails after max_attempts rather than routing itself down a
+            # branch nobody chose.
+            raise "service task '#{node_id}' (ash:call '#{ref}') failed: #{inspect(reason)}"
+        end
     end
   end
 
@@ -563,9 +574,43 @@ defmodule AshBpmn.Runtime.Interpreter do
           {:ok, service_task_effects(graph, node_id, action, inputs, %{}, ctx)}
 
         {:error, reason} ->
-          # Raise so Oban retries; the worker will catch after max_attempts
-          raise "service task '#{action}' failed: #{inspect(reason)}"
+          case AshBpmn.BpmnError.from_failure(reason) do
+            {code, details} ->
+              throw_error(graph, node_id, code, details, ctx)
+
+            nil ->
+              # Raise so Oban retries; the worker will catch after max_attempts
+              raise "service task '#{action}' failed: #{inspect(reason)}"
+          end
       end
+    end
+  end
+
+  # A callee's business error: an answer, not a fault, so it is never retried. An error
+  # boundary on the task catching its code interrupts the task and leaves by the boundary's
+  # flow, the token entering the boundary the way a timer's would. Nothing catching it is an
+  # unhandled error, handed back for the worker to fail the instance on: there is no enclosing
+  # scope for it to propagate to, because this subset has no sub-processes, and a child's
+  # errors reach its parent only by an error end event, which says so in the child's diagram.
+  defp throw_error(graph, node_id, code, details, ctx) do
+    case Routing.error_boundary(graph, node_id, code) do
+      nil ->
+        {:error, {:bpmn_error, code, details}}
+
+      boundary_id ->
+        {:ok,
+         [
+           consume_token: true,
+           events: [
+             event_attrs(ctx, boundary_id, :activity_interrupted, %{
+               "interrupted" => node_id,
+               "error_ref" => get_in(graph, ["nodes", boundary_id, "error", "ref"]),
+               "error_code" => code,
+               # Bounded: the event is the engine's diagnostic, not the callee's record.
+               "details" => details |> inspect(limit: 20) |> String.slice(0, 500)
+             })
+           ]
+         ] ++ enter_node(graph, boundary_id, ctx)}
     end
   end
 
@@ -996,7 +1041,8 @@ defmodule AshBpmn.Runtime.Interpreter do
   # ── boundaryEvent ────────────────────────────────────────────────────────
 
   # By the time a token is here the interruption has already happened: `BoundaryTimerWorker`
-  # cancelled the task, killed the activity's token and minted this one. So this clause is an
+  # cancelled the task, killed the activity's token and minted this one -- or, for an error
+  # boundary, the throwing activity's own step consumed its token and minted this one. So this clause is an
   # ordinary "leave by the one outgoing flow", the same shape as a start event -- the boundary
   # is a point on a path, and the compiler guarantees it has exactly one way out.
   defp boundary_event(graph, node_id, _node, ctx) do
@@ -1109,8 +1155,9 @@ defmodule AshBpmn.Runtime.Interpreter do
     Enum.flat_map(flows, &follow_flow(graph, &1, ctx))
   end
 
-  defp follow_flow(graph, flow, ctx) do
-    target_node_id = flow["to"]
+  defp follow_flow(graph, flow, ctx), do: enter_node(graph, flow["to"], ctx)
+
+  defp enter_node(graph, target_node_id, ctx) do
     target_node = graph["nodes"][target_node_id]
 
     if target_node do
@@ -1170,6 +1217,8 @@ defmodule AshBpmn.Runtime.Interpreter do
   defp boundary_timer_jobs(graph, node_id, ctx) do
     (graph["boundaries"] || %{})
     |> Map.get(node_id, [])
+    # An error boundary has no timer to arm; the activity's own work fires it.
+    |> Enum.filter(&get_in(graph, ["nodes", &1, "catch"]))
     |> Enum.map(fn boundary_id ->
       seconds = get_in(graph, ["nodes", boundary_id, "catch", "seconds"])
 

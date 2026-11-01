@@ -42,6 +42,26 @@ defmodule AshBpmn.ActionInvoker do
 
   The standalone approval path has no token, and so no key.
 
+  ## Business errors
+
+  Return `{:error, {:bpmn_error, code, details}}` when the action's answer is a modelled
+  failure rather than a fault: "the insurer declined the claim", not "the insurer's API timed
+  out". `code` is a string (an atom is read as its name); `details` is a map, recorded,
+  bounded, on the event that says what was caught.
+
+  An error boundary on the service or send task whose `bpmn:error` has that `errorCode`
+  catches it: the task is interrupted and the process leaves by the boundary's flow, with no
+  retry. No boundary catching it is an unhandled error, and the instance fails at the task at
+  once, with an `:action_failed` event whose reason is `"unhandled_error"`; retrying an answer
+  gets the same answer, so it is not retried. Any other `{:error, term}` is a fault, as
+  before: retried, then failed after `max_attempts`.
+
+  An `ash:call` callable throws the same error as an `AshBpmn.BpmnError`, because an Ash
+  action's error has to be an Ash error.
+
+  Record a business error under the invocation key like any other result: a redelivery that
+  returns it again is caught the same way.
+
   Optionally, the module may also export `exists?(action :: String.t()) ::
   boolean`. When it does, the compiler asks it at publish time whether every
   service/send task's action actually exists — the same publish-time promise
@@ -49,7 +69,10 @@ defmodule AshBpmn.ActionInvoker do
   it, invoking remains the only contract.
   """
 
+  @typedoc "A business error for an error boundary to catch. See \"Business errors\" above."
+  @type bpmn_error :: {:bpmn_error, code :: String.t() | atom(), details :: map()}
+
   @doc "Invokes a named action with the given context."
   @callback invoke(action :: String.t(), ctx :: map()) ::
-              :ok | {:ok, map()} | {:error, term()}
+              :ok | {:ok, map()} | {:error, bpmn_error()} | {:error, term()}
 end

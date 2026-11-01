@@ -540,9 +540,9 @@ Job args: `%{"instance_id" => id, "token_id" => id, "node_id" => binary}`. Worke
    worker kills the token, marks the instance `:failed`, records `:action_failed` — one
    step — and returns `{:ok, :failed_permanently}`. A call activity whose child cannot
    be started is such a failure: the start is inside the call activity's step, so the
-   park rolls back with it. The subset has no error boundary on a call activity
-   (its boundaries are timers only; error events are end events only), so
-   there is nowhere else to route it.
+   park rolls back with it. It is a fault, not a business error, so an error boundary
+   on the call activity does not catch it (an error boundary catches only a typed
+   business error; see `AshBpmn.ActionInvoker`), and there is nowhere else to route it.
 
 Timers (`AshBpmn.Runtime.TimerWorker`, args `%{"task_id", "kind"}`): unless task
 status in [:completed, :cancelled] → fire: `remind` → ProcessEvent

@@ -25,6 +25,19 @@ Nothing has been released yet. Everything below is the initial body of work.
   event whose data names the boundary. A boundary on an intermediate message
   catch event is refused with a pointer to the receive task, since BPMN
   attaches boundary events to activities only.
+- **Business errors and error boundary events.** A service or send task's
+  callee can now throw a business error by name: an `ActionInvoker` returns
+  `{:error, {:bpmn_error, code, details}}`, an `ash:call` callable returns an
+  `AshBpmn.BpmnError`. An error boundary on the task whose `bpmn:error` has
+  that `errorCode` catches it and the process leaves by the boundary's flow; a
+  call activity's error boundary catches a child that reached an error end
+  event with that code. A business error nothing catches fails the instance
+  at the task at once, without retrying (`:action_failed`, reason
+  `"unhandled_error"`). Any other `{:error, term}` is a fault and is retried
+  as before. Error boundaries attach to service, send and call activity
+  nodes, always interrupt, and must name a declared error with an
+  `errorCode`. A parent whose child ends in an error end event no longer
+  waits forever when nothing catches it: it fails at the call activity.
 - **A stable invocation key for service and send tasks.** Both bindings now
   receive `{instance_id, token_id, node_id}`: the `ActionInvoker` at
   `ctx[:invocation_key]`, an `ash:call` callable in its action context at
