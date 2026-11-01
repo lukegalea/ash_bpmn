@@ -175,7 +175,7 @@ way vendors from Camunda to Flowable attach execution bindings to a diagram.
 |---|---|---|
 | `ash:taskConfig action="..."` | serviceTask, sendTask | the `ActionInvoker` reference |
 | `ash:call ref="Domain.name"` | serviceTask, sendTask | a callable declared in a domain's `callables` block (`AshBpmn.Domain`); the alternative to `ash:taskConfig action=`, never both |
-| `ash:process key="..."` | callActivity | the key of the published child process to start |
+| `ash:process key binding? version?` | callActivity | the key of the published child process to start: `binding` is `latest` (the default) or `pinned` (a pin requires `version`, and starts that version while it stays published) |
 | `ash:subscribe resource action correlate match` | intermediateCatchEvent with a message definition, receiveTask | the host event the token waits for; on a conditional catch only `resource` is read |
 | `ash:taskConfig` | userTask | candidates, exclusions, outcomes, timers |
 | `ash:taskConfig outcome="..."` | endEvent | the instance outcome |

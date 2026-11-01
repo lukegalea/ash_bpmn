@@ -283,9 +283,14 @@ The compiler rejects, each with the offending element's id in the error:
   rather than a request — a free-form map on the token is precisely how that
   rule erodes. The gate itself is `AshBpmn.Runtime.Promotion`, one module shared
   by every node kind that promotes.
-- **`binding="pinned"` without a version.** It reads as "this will not move under
-  me" and would behave as "latest". Refusing it is cheaper than explaining it after
-  an incident.
+- **`binding="pinned"` without a version**, on a decision or on a call
+  activity's `ash:process`. It reads as "this will not move under me" and would
+  behave as "latest". Refusing it is cheaper than explaining it after an
+  incident. Its mirror on `ash:process`, a `version` with `binding="latest"`, is
+  refused for the same reason: the diagram would name a version it does not run.
+- **Starting a pinned child whose version is not published.** Retiring a
+  version is how a modeller says "start no more of these", and a pin does not
+  overrule it; the call activity fails as one whose child cannot start does.
 
 ## Refused in the editor
 

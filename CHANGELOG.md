@@ -16,6 +16,14 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Features:
 
+- **Call activities can pin their child's version.** `ash:process` takes the
+  `ash:decision` vocabulary: `binding="latest"` (the default) starts whatever
+  is published under the key when the token arrives, `binding="pinned"
+  version="N"` starts version N for as long as it stays published. A pin with
+  no version, a version with `latest`, and a version that is not a positive
+  integer are refused at compile time. `start_instance/2` takes `:version`
+  beside `:process`, and `:child_started` events record the child's
+  `child_definition_id`. Snapshots of diagrams that say nothing are unchanged.
 - **Timer boundaries on receive tasks and call activities.** A deadline on a
   wait for a message or for a child process, interrupting or not, with the
   same semantics as on a user task. The wait stays a parked token and a

@@ -822,6 +822,12 @@ defmodule AshBpmn.Compiler.Graph do
   # definitions document. That is the wrong reference here: a child is a published definition
   # in its own right, resolved by key and version at start time like every other process, and
   # a document-local id could only ever name one drawn in the same file.
+  #
+  # Which version is the `ash:decision` vocabulary, for the same reason: `binding="latest"`
+  # (the default) starts whatever is published under the key when the token arrives, and
+  # `binding="pinned" version="2"` starts version 2 for as long as it stays published. Only a
+  # pinned binding is written into the graph, so a diagram that says nothing compiles to the
+  # snapshot it always did.
   defp build_node_config(node, "callActivity", _declarations) do
     id = Xml.element_attr(node, "id")
     ext = Xml.find_extension_elements(node)
@@ -838,13 +844,12 @@ defmodule AshBpmn.Compiler.Graph do
         {:error, Errors.error(id, "callActivity '#{id}' has more than one ash:process")}
 
       [process] ->
-        key = Xml.element_attr(process, "key")
-
-        if blank?(key) do
-          {:error, Errors.error(id, "ash:process on '#{id}' has no key")}
-        else
-          {:ok, %{"call_process" => %{"key" => String.trim(key)}}}
-        end
+        build_call_process(
+          id,
+          Xml.element_attr(process, "key"),
+          Xml.element_attr(process, "binding") || "latest",
+          Xml.element_attr(process, "version")
+        )
     end
   end
 
@@ -862,6 +867,63 @@ defmodule AshBpmn.Compiler.Graph do
   defp build_node_config(_node, type, _declarations)
        when type in ["startEvent", "parallelGateway"] do
     {:ok, %{}}
+  end
+
+  defp build_call_process(id, key, binding, version) do
+    cond do
+      blank?(key) ->
+        {:error, Errors.error(id, "ash:process on '#{id}' has no key")}
+
+      binding not in ["latest", "pinned"] ->
+        {:error,
+         Errors.error(
+           id,
+           ~s(callActivity '#{id}' ash:process binding must be "latest" or "pinned", got ) <>
+             inspect(binding)
+         )}
+
+      # The same dangerous default the decision binding refuses: it reads as "this will not
+      # move under me" and would behave as "latest".
+      binding == "pinned" and blank?(version) ->
+        {:error,
+         Errors.error(
+           id,
+           ~s(callActivity '#{id}' ash:process binding="pinned" requires a version)
+         )}
+
+      # And its mirror: a diagram that names a version it does not run.
+      binding == "latest" and not is_nil(version) ->
+        {:error,
+         Errors.error(
+           id,
+           ~s(callActivity '#{id}' ash:process names version #{inspect(version)} with ) <>
+             ~s(binding="latest"; the version would be ignored. Use binding="pinned" to start it)
+         )}
+
+      binding == "pinned" ->
+        case Integer.parse(String.trim(version)) do
+          {n, ""} when n > 0 ->
+            {:ok,
+             %{
+               "call_process" => %{
+                 "key" => String.trim(key),
+                 "binding" => "pinned",
+                 "version" => n
+               }
+             }}
+
+          _ ->
+            {:error,
+             Errors.error(
+               id,
+               "callActivity '#{id}' ash:process version must be a positive integer, got " <>
+                 inspect(version)
+             )}
+        end
+
+      true ->
+        {:ok, %{"call_process" => %{"key" => String.trim(key)}}}
+    end
   end
 
   # A conditional catch waits for the subject to become something. It parks, and every update

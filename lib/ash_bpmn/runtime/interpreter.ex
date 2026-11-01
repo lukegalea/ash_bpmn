@@ -907,17 +907,23 @@ defmodule AshBpmn.Runtime.Interpreter do
         correlation_key: nil
       },
       events: [
-        event_attrs(ctx, node_id, :node_entered, %{
-          "waiting_for" => "child_process",
-          "process_key" => call["key"]
-        })
+        event_attrs(
+          ctx,
+          node_id,
+          :node_entered,
+          Map.merge(
+            %{"waiting_for" => "child_process", "process_key" => call["key"]},
+            if(call["version"], do: %{"process_version" => call["version"]}, else: %{})
+          )
+        )
       ],
       # Effects apply in order, and `with_boundary_timers/4` fills this slot. Before the child
       # starts, so a deadline is armed ahead of anything the child's own first step could do to
       # defuse it: a child that ends at once (an error end event caught on this activity) must
       # find the timer there to cancel.
       jobs: [],
-      start_child: %{key: call["key"], node_id: node_id}
+      # `version` is nil for the default `latest` binding, and a pinned one otherwise.
+      start_child: %{key: call["key"], version: call["version"], node_id: node_id}
     ]
 
     {:ok, effects}
