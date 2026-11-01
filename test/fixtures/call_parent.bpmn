@@ -3,7 +3,7 @@
 SPDX-FileCopyrightText: 2026 Luke Galea
 SPDX-License-Identifier: MIT
 
-Calls a child process and waits for it. Vendor onboarding is the same track whichever award
+Calls a child process and waits for it. Patient triage is the same track whichever referral
 produced it, so it is drawn once and invoked rather than copied into every parent.
 -->
 <bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"

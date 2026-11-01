@@ -280,9 +280,9 @@ defmodule AshBpmn.Compiler.Graph do
 
   # `multiInstanceLoopCharacteristics` runs an activity once per element of a list:
   #
-  #     <bpmn2:serviceTask id="Onboard">
+  #     <bpmn2:serviceTask id="Notify">
   #       <bpmn2:multiInstanceLoopCharacteristics isSequential="false">
-  #         <ash:collection from="subject.awarded_property_ids" as="property_id"/>
+  #         <ash:collection from="subject.referral_ids" as="referral_id"/>
   #       </bpmn2:multiInstanceLoopCharacteristics>
   #     </bpmn2:serviceTask>
   #
@@ -807,9 +807,9 @@ defmodule AshBpmn.Compiler.Graph do
   # the sweep delivers the signal to whoever was listening.
   # A call activity starts a child process and waits for it to finish -- process-as-action.
   #
-  #     <bpmn2:callActivity id="Onboard">
+  #     <bpmn2:callActivity id="Triage">
   #       <bpmn2:extensionElements>
-  #         <ash:process key="vendor.onboarding"/>
+  #         <ash:process key="clinic.triage"/>
   #       </bpmn2:extensionElements>
   #     </bpmn2:callActivity>
   #

@@ -212,7 +212,7 @@ defmodule AshBpmn.Test.RuntimeCallablesDomain do
 
   callables do
     callable :assess_tier, AshBpmn.Test.CallablesRuntimeResource, :assess_tier do
-      description "Assesses the risk tier from the amount"
+      description "Assesses the severity level from the amount"
     end
 
     callable(:assess_struct, AshBpmn.Test.CallablesRuntimeResource, :assess_struct)
