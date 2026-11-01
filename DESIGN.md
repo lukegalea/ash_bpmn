@@ -496,7 +496,7 @@ AshBpmn.decide!(task, outcome: :approved, comment: "...", actor: user) :: task
   # process tasks: identical to complete_task!
 AshBpmn.claim_task!(task, actor: user) :: task
 AshBpmn.delegate_task!(task, to_principal: %{type: :user, id: id}, actor: user) :: task
-AshBpmn.cancel_instance!(instance, actor: user) :: instance
+AshBpmn.cancel_instance!(instance, actor: user, reason: "...") :: instance   # one step; cascades to call-activity children
 AshBpmn.my_tasks(domain, principal_ids: [id], team_ids: [id]) :: [task]   # candidates join (:user rows on principal_ids, :team rows on team_ids), status in open/claimed
 AshBpmn.instance_report(instance) :: %{instance:, tokens: [], tasks: [], events: []}
 AshBpmn.retry_instance!(instance) :: instance                   # reactivate dead tokens, re-enqueue

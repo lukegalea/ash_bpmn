@@ -15,7 +15,7 @@ defmodule AshBpmn do
   alias AshBpmn.Candidacy
   alias AshBpmn.Config
   alias AshBpmn.FlightView
-  alias AshBpmn.Runtime.{AdvanceWorker, DomainResolver, Oban, Routing, Step}
+  alias AshBpmn.Runtime.{AdvanceWorker, CallTree, DomainResolver, Oban, Routing, Step}
   alias AshBpmn.Scope
 
   # ── Instance lifecycle ───────────────────────────────────────────────────
@@ -614,16 +614,31 @@ defmodule AshBpmn do
   # ── Instance operations ─────────────────────────────────────────────────
 
   @doc """
-  Cancels a running instance.
+  Cancels a running instance, and every instance its call activities started, in one step.
 
-  `opts` may carry `:actor` and `:tenant`. Without a `:tenant` the instance's own
-  `organization_id` is used, which is the right answer whenever the caller loaded
-  the instance in the first place.
+  `opts` may carry `:actor`, `:tenant` and `:reason`. Without a `:tenant` the instance's own
+  `organization_id` is used, which is the right answer whenever the caller loaded the
+  instance in the first place.
+
+  Everything commits together or not at all, under the instance's lock: the instance marked
+  `:cancelled`, its live tokens killed, its open tasks and their clocks closed, the same for
+  each running descendant down the call tree, and an `:instance_cancelled` event on each. The
+  event's data records who and why:
+
+    * `"cancelled_by_id"` -- the actor's `:id`, or `nil` for an actor without one.
+    * `"reason"` -- the `:reason` given, as a string, or `nil`.
+    * `"cascaded_from_instance_id"` -- on a descendant only: the instance whose cancel
+      reached it.
+
+  An instance that is not `:running` is refused with `{:error, error}` and nothing changes.
   """
   @spec cancel_instance!(map(), keyword()) :: map()
   def cancel_instance!(instance, opts \\ []) do
-    {:ok, cancelled} = cancel_instance(instance, opts)
-    cancelled
+    case cancel_instance(instance, opts) do
+      {:ok, cancelled} -> cancelled
+      {:error, %{__exception__: true} = exception} -> raise exception
+      {:error, reason} -> raise "AshBpmn.cancel_instance! failed: #{inspect(reason)}"
+    end
   end
 
   @spec cancel_instance(map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -631,23 +646,55 @@ defmodule AshBpmn do
     resources = DomainResolver.resolve!()
     scope = Scope.from_record(instance, opts)
 
-    halt_instance_work(resources, instance, :instance_cancelled, scope)
+    data = %{
+      "cancelled_by_id" => actor_id(Map.get(scope, :actor)),
+      "reason" => opts[:reason] && to_string(opts[:reason])
+    }
 
-    cancelled = resources.instance.cancel!(instance, Scope.engine(scope))
+    resources
+    |> Step.transaction(
+      fn locked ->
+        # Locks before writes, top down: see `AshBpmn.Runtime.CallTree` for the deadlock the
+        # other order has against a child finishing at the same moment.
+        descendants = CallTree.lock_descendants(resources, [locked], scope)
 
-    resources.process_event.create!(
-      %{
-        instance_id: instance.id,
-        kind: :instance_cancelled,
-        data: %{}
-      },
-      Scope.engine(scope)
+        case resources.instance.cancel(locked, rollback_on_error(scope)) do
+          {:ok, cancelled} ->
+            halt_instance_work(resources, locked, :instance_cancelled, scope)
+
+            CallTree.cancel(
+              resources,
+              descendants,
+              Map.put(data, "cascaded_from_instance_id", instance.id),
+              scope
+            )
+
+            resources.process_event.create!(
+              %{instance_id: instance.id, kind: :instance_cancelled, data: data},
+              Scope.engine(scope)
+            )
+
+            cancelled
+
+          # Nothing is written yet, only locks taken, so the refusal is returned rather than
+          # rolled back: a cancel refused inside the caller's own transaction leaves it intact.
+          {:error, error} ->
+            {:refused, error}
+        end
+      end,
+      lock: {instance.id, scope}
     )
-
-    {:ok, cancelled}
+    |> case do
+      {:ok, {:refused, error}} -> {:error, error}
+      result -> result
+    end
   rescue
     e -> {:error, e}
   end
+
+  # A refused transition is an answer here, not a crash: it must not abort the transaction the
+  # way a failed action otherwise does, so the caller decides what to roll back.
+  defp rollback_on_error(scope), do: Keyword.put(Scope.engine(scope), :rollback_on_error?, false)
 
   @doc false
   # Stops an instance doing anything further: every live token killed, every open task closed,

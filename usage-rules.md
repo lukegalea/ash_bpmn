@@ -237,6 +237,11 @@ gateway conditions, never in resolver specs, never in the invoker.
     at once (`:action_failed`, reason `"unhandled_error"`). Error boundaries
     attach to service, send and call activity nodes, always interrupt, and name
     an `errorRef` whose `bpmn:error` has an `errorCode`.
+28. **Cancel the top of a call tree, as the person, with a reason.**
+    `AshBpmn.cancel_instance/2` cancels the instance and every running instance its
+    call activities started, in one step, and each `:instance_cancelled` event
+    records `"cancelled_by_id"` and `"reason"`. Pass `actor:` and `reason:`, and do
+    not cancel the children yourself first.
 
 ## Testing
 

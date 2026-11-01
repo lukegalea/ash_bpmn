@@ -251,6 +251,17 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Breaking changes:
 
+- **Cancelling an instance cancels its call-activity children, in one step.**
+  `AshBpmn.cancel_instance/2` now runs under the instance's lock as one
+  transaction, and cancels every running instance below it in the call tree.
+  Before, the children kept running, and a failure part-way left tokens
+  killed on an instance still marked `:running`. It takes `:reason`, and the
+  `:instance_cancelled` event's data, which was `%{}`, is now
+  `%{"cancelled_by_id" => ..., "reason" => ...}` (plus
+  `"cascaded_from_instance_id"` on a descendant). An instance that is not
+  `:running` is refused before anything is written, where before its live
+  tokens were killed and then the refusal returned. `cancel_instance!/2`
+  raises the refusal instead of a `MatchError`.
 - **`AshBpmn.complete_task/2` and `decide/2` check who is completing.** On an
   open task the actor must be a candidate (a candidate row for them or one of
   their teams, and not excluded); on a claimed task they must hold it. Before,
