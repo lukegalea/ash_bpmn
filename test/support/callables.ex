@@ -80,6 +80,8 @@ defmodule AshBpmn.Test.CallablesRuntimeResource do
   * `record_inputs` — records the arguments it received, and the context it was
     called under, into `AshBpmn.Test.CallablesRecorder`.
   * `always_fails` — returns an error tuple, for the failure path.
+  * `deny_coverage` — throws a business error, `COVERAGE_DENIED`, for an error boundary to
+    catch.
   """
 
   use Ash.Resource, domain: AshBpmn.Test.RuntimeCallablesDomain
@@ -128,6 +130,13 @@ defmodule AshBpmn.Test.CallablesRuntimeResource do
 
     action :always_fails, :string do
       run fn _input, _context -> {:error, "the payout was refused"} end
+    end
+
+    action :deny_coverage, :map do
+      run fn _input, _context ->
+        {:error,
+         AshBpmn.BpmnError.exception(code: "COVERAGE_DENIED", details: %{"plan" => "basic"})}
+      end
     end
   end
 end
@@ -220,6 +229,7 @@ defmodule AshBpmn.Test.RuntimeCallablesDomain do
     callable(:assess_deep, AshBpmn.Test.CallablesRuntimeResource, :assess_deep)
     callable(:record_inputs, AshBpmn.Test.CallablesRuntimeResource, :record_inputs)
     callable(:always_fails, AshBpmn.Test.CallablesRuntimeResource, :always_fails)
+    callable(:deny_coverage, AshBpmn.Test.CallablesRuntimeResource, :deny_coverage)
     callable(:enroll, AshBpmn.Test.CallablesEnrollee, :enroll)
     callable(:engine_check, AshBpmn.Test.CallablesGuardedResource, :engine_only)
   end
@@ -228,7 +238,8 @@ end
 defmodule AshBpmn.Test.CallablesRecorder do
   @moduledoc """
   Records what the ash:call test callables actually received: their arguments,
-  string-keyed, and whether the engine's private context flag was set.
+  string-keyed, whether the engine's private context flag was set, and the
+  invocation key the engine put in the action's context.
 
   The engine runs inline in tests, but the advance job may execute in the caller's
   process or not, so this is ETS — the same arrangement `AshBpmn.Test.Invoker` uses —
@@ -238,34 +249,35 @@ defmodule AshBpmn.Test.CallablesRecorder do
   @table :ash_bpmn_test_callable_calls
 
   def record(action, %Ash.ActionInput{} = input) do
-    do_record(action, input.arguments, engine_context?(input.context))
+    do_record(action, input.arguments, input.context)
   end
 
   def record(action, %Ash.Changeset{} = changeset) do
-    do_record(action, changeset.arguments, engine_context?(changeset.context))
+    do_record(action, changeset.arguments, changeset.context)
   end
 
-  defp do_record(action, arguments, engine?) do
+  defp do_record(action, arguments, context) do
     ensure_table()
 
     :ets.insert(@table, {
       System.unique_integer([:positive]),
       to_string(action),
       Map.new(arguments || %{}, fn {k, v} -> {to_string(k), v} end),
-      engine?
+      engine_context?(context),
+      get_in(context, [:ash_bpmn, :invocation_key])
     })
 
     :ok
   end
 
-  @doc "Every recorded call as `%{action, arguments, engine_context?}`, oldest first."
+  @doc "Every recorded call as `%{action, arguments, engine_context?, invocation_key}`, oldest first."
   def recorded do
     if :ets.whereis(@table) != :undefined do
       @table
       |> :ets.tab2list()
       |> Enum.sort_by(&elem(&1, 0))
-      |> Enum.map(fn {_id, action, arguments, engine?} ->
-        %{action: action, arguments: arguments, engine_context?: engine?}
+      |> Enum.map(fn {_id, action, arguments, engine?, key} ->
+        %{action: action, arguments: arguments, engine_context?: engine?, invocation_key: key}
       end)
     else
       []

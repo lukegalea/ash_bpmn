@@ -458,16 +458,34 @@ defmodule AshBpmn.Compiler.Verify do
   # Everything structural about a boundary event, refused at publish rather than discovered
   # at three in the morning.
   #
-  # Attachment is restricted to `userTask`, and that is a real limit rather than a first cut.
-  # A service task's token is `:executing` inside a running Oban job: Oban cannot interrupt a
+  # Where a boundary may attach depends on what fires it.
+  #
+  # A timer interrupts an activity from outside, while it waits, so it attaches only where the
+  # activity's token is *parked*: a user task waiting for a person, a receive task waiting for a
+  # message, a call activity waiting for its child. Each of those waits is a row and a scheduled
+  # job, never a running one, so the deadline is one more scheduled job and firing it is a
+  # compare-and-set on the parked token -- the same claim the wake would have made, so exactly
+  # one of them wins.
+  #
+  # Every other timer attachment is refused, and that is a real limit rather than a first cut. A
+  # service task's token is `:executing` inside a running Oban job: Oban cannot interrupt a
   # running job, and an Ash action that has already committed cannot be un-run -- that is
   # compensation, which this library refuses outright. "Interrupting" such an activity would
   # mean killing the token while the work carried on, which is a lie the diagram would be
   # telling.
+  #
+  # An error is the opposite case. It is thrown by the activity's own work, at the moment that
+  # work stops, so nothing is left running to lie about: it attaches to the activities whose
+  # work can throw one -- a service or send task's callee, a call activity's child. A user task
+  # throws nothing, so an error boundary there could never fire.
+  @timer_attachable ~w(userTask receiveTask callActivity)
+  @error_attachable ~w(serviceTask sendTask callActivity)
+
   defp verify_boundary_events(nodes, flows) do
-    nodes
-    |> Enum.filter(fn {_id, node} -> node["type"] == "boundaryEvent" end)
-    |> Enum.flat_map(fn {id, node} -> boundary_errors(id, node, nodes, flows) end)
+    boundaries = Enum.filter(nodes, fn {_id, node} -> node["type"] == "boundaryEvent" end)
+
+    Enum.flat_map(boundaries, fn {id, node} -> boundary_errors(id, node, nodes, flows) end) ++
+      duplicate_catch_errors(boundaries)
   end
 
   defp boundary_errors(id, node, nodes, flows) do
@@ -477,13 +495,13 @@ defmodule AshBpmn.Compiler.Verify do
     outgoing = Enum.count(flows, fn {_fid, f} -> f["from"] == id end)
     incoming = Enum.filter(flows, fn {_fid, f} -> f["to"] == id end)
 
-    attachment_errors(id, ref, attached) ++
+    attachment_errors(id, ref, attached, node) ++
       outgoing_errors(id, outgoing) ++
       incoming_errors(id, incoming) ++
-      expire_conflict_errors(id, ref, attached)
+      expire_conflict_errors(id, ref, attached, node)
   end
 
-  defp attachment_errors(id, ref, nil),
+  defp attachment_errors(id, ref, nil, _boundary),
     do: [
       Errors.error(
         id,
@@ -491,17 +509,83 @@ defmodule AshBpmn.Compiler.Verify do
       )
     ]
 
-  defp attachment_errors(_id, _ref, %{"type" => "userTask"}), do: []
+  # A multi-instance activity's error boundary belongs to the whole fan-out: one instance's
+  # error interrupts all of them, and the join must then not carry the activity on. The
+  # fan-out has no way to interrupt its siblings, so the boundary is refused rather than
+  # taken by one instance while the rest join and continue past it.
+  defp attachment_errors(id, ref, %{"multi_instance" => multi}, %{"error" => _})
+       when not is_nil(multi),
+       do: [
+         Errors.error(
+           id,
+           "boundaryEvent '#{id}' catches an error on multi-instance activity '#{ref}'. The " <>
+             "error would interrupt one instance while the others joined and carried the " <>
+             "activity on past it"
+         )
+       ]
 
-  defp attachment_errors(id, _ref, %{"type" => type}),
+  defp attachment_errors(_id, _ref, %{"type" => type}, %{"error" => _})
+       when type in @error_attachable,
+       do: []
+
+  defp attachment_errors(id, _ref, %{"type" => type}, %{"error" => _}),
     do: [
       Errors.error(
         id,
-        "boundaryEvent '#{id}' is attached to a #{type}; interrupting boundary events are " <>
-          "supported on: userTask. A task whose work is already running cannot be " <>
-          "interrupted without either lying about it or compensating for it"
+        "boundaryEvent '#{id}' catches an error on a #{type}; error boundary events are " <>
+          "supported on: #{Enum.join(@error_attachable, ", ")}, the activities whose work " <>
+          "can throw one"
       )
     ]
+
+  defp attachment_errors(_id, _ref, %{"type" => type}, _timer) when type in @timer_attachable,
+    do: []
+
+  # BPMN attaches boundary events to activities only (BPMN 2.0, 10.5.3), so a deadline on an
+  # intermediate message catch is not a drawing this compiler can honour. The receive task is
+  # the activity form of the same wait, and it runs on the same code.
+  defp attachment_errors(id, ref, %{"type" => "intermediateCatchEvent"}, _timer),
+    do: [
+      Errors.error(
+        id,
+        "boundaryEvent '#{id}' is attached to intermediateCatchEvent '#{ref}'; boundary " <>
+          "events attach to activities, not events. To wait for a message with a deadline, " <>
+          "draw the wait as a receiveTask and attach the timer to it"
+      )
+    ]
+
+  defp attachment_errors(id, _ref, %{"type" => type}, _timer),
+    do: [
+      Errors.error(
+        id,
+        "boundaryEvent '#{id}' is attached to a #{type}; timer boundary events are " <>
+          "supported on: #{Enum.join(@timer_attachable, ", ")}. A task whose work is already " <>
+          "running cannot be interrupted without either lying about it or compensating for it"
+      )
+    ]
+
+  # Two error boundaries on one activity catching the same code would make the route the
+  # engine's choice between them rather than the diagram's.
+  defp duplicate_catch_errors(boundaries) do
+    boundaries
+    |> Enum.filter(fn {_id, node} -> is_map(node["error"]) end)
+    |> Enum.group_by(fn {_id, node} -> {node["attached_to"], node["error"]["code"]} end)
+    |> Enum.flat_map(fn
+      {_key, [_one]} ->
+        []
+
+      {{ref, code}, many} ->
+        ids = many |> Enum.map(&elem(&1, 0)) |> Enum.sort()
+
+        [
+          Errors.error(
+            hd(ids),
+            "boundaryEvents #{Enum.join(ids, ", ")} on '#{ref}' both catch error code " <>
+              "'#{code}'; which one an error took would be the engine's choice, not the diagram's"
+          )
+        ]
+    end)
+  end
 
   defp outgoing_errors(_id, 1), do: []
 
@@ -540,7 +624,7 @@ defmodule AshBpmn.Compiler.Verify do
   # leaves down the task's own flow with `outcome: :expired` for a following gateway to read,
   # the boundary leaves down its own flow with no outcome at all. Whichever fired first would
   # win. Neither can be silently preferred, so carrying both is refused.
-  defp expire_conflict_errors(id, ref, %{"type" => "userTask"} = attached) do
+  defp expire_conflict_errors(id, ref, %{"type" => "userTask"} = attached, %{"catch" => _}) do
     if Enum.any?(attached["timers"] || [], &(&1["kind"] == "expire")) do
       [
         Errors.error(
@@ -555,7 +639,7 @@ defmodule AshBpmn.Compiler.Verify do
     end
   end
 
-  defp expire_conflict_errors(_id, _ref, _attached), do: []
+  defp expire_conflict_errors(_id, _ref, _attached, _boundary), do: []
 
   defp verify_parallel_gateways(nodes, flows, joins) do
     nodes

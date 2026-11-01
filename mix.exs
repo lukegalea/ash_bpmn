@@ -137,7 +137,7 @@ defmodule AshBpmn.MixProject do
       ],
       groups_for_modules: [
         Resources: [~r/AshBpmn\.Resources/],
-        Runtime: [~r/AshBpmn\.Runtime/, AshBpmn],
+        Runtime: [~r/AshBpmn\.Runtime/, AshBpmn, AshBpmn.BpmnError],
         Authorization: [
           AshBpmn.Scope,
           AshBpmn.SystemActor,

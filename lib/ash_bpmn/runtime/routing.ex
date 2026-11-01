@@ -107,6 +107,27 @@ defmodule AshBpmn.Runtime.Routing do
   end
 
   @doc """
+  The error boundary on `node_id` that catches a business error with `code`, or `nil`.
+
+  The other way out of a node: not a flow chosen by a condition but a boundary chosen by
+  which error the activity threw. Matched on the `errorCode` of the `bpmn:error` the boundary
+  references, as Camunda matches, so a child process and its parent agree on an error by code
+  without sharing a document. The compiler refuses two boundaries on one activity catching
+  the same code, so at most one matches.
+
+  `graph["boundaries"]` is nil on snapshots published before boundaries existed, and those
+  are immutable and still executing, so a missing index is "no boundary", not a crash.
+  """
+  @spec error_boundary(map(), String.t(), String.t() | nil) :: String.t() | nil
+  def error_boundary(_graph, _node_id, nil), do: nil
+
+  def error_boundary(graph, node_id, code) do
+    (graph["boundaries"] || %{})
+    |> Map.get(node_id, [])
+    |> Enum.find(&(get_in(graph, ["nodes", &1, "error", "code"]) == code))
+  end
+
+  @doc """
   A one-line summary of null-valued conditions, for an error message.
 
   Empty string when there were none, so it can be appended unconditionally.

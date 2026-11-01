@@ -19,7 +19,9 @@ The compiler rejects, each with the offending element's id in the error:
   Executable conformance class is barely larger. ash_bpmn executes that subset:
   start events, end events — including terminate end events — user, service,
   send and business rule tasks, intermediate catch events carrying a timer,
-  timer boundary events on user tasks, interrupting or not, message catch
+  timer boundary events on user tasks, receive tasks and call activities,
+  interrupting or not, error boundary events on service, send and call
+  activity nodes, message catch
   events, conditional catch events, signal
   throw and catch events, error end events, exclusive and parallel gateways,
   conditional and default flows, parallel multi-instance activities, call
@@ -28,7 +30,7 @@ The compiler rejects, each with the offending element's id in the error:
   the rest of the event-definition taxonomy (message on anything but an
   intermediate catch event, signal on anything but an intermediate throw or
   catch, conditional on anything but an intermediate catch, error on anything
-  but an end event,
+  but an end event or a boundary event,
   escalation, compensation, cancel, link), complex and
   event-based gateways, standard loop markers and sequential multi-instance:
   rejected, loudly. A
@@ -73,10 +75,17 @@ The compiler rejects, each with the offending element's id in the error:
   month writes `P30D` and means it. A duration of zero is refused on the same
   principle — a timer that waits for no time is a node drawn to do something it
   does not do.
-- **Boundary events on anything but a user task.** Both interrupting and
-  non-interrupting boundaries are supported; the attachment is what is
-  restricted. A service task's token is
-  executing inside a running job. Oban cannot interrupt a running job and an Ash
+- **Timer boundary events on anything but a user task, receive task or call
+  activity.** Both interrupting and non-interrupting timer boundaries are
+  supported; the attachment is what is restricted, and the three admitted are
+  the activities whose token is *parked*: waiting for a person, a message or a
+  child process. The deadline is a scheduled job and firing it claims the
+  parked token, the same claim the wait's own wake makes, so exactly one of
+  them wins. An interrupted call activity cancels its child, and the child's
+  own children, in the same step. A boundary on an intermediate message catch
+  event is refused because BPMN attaches boundary events to activities only;
+  the receive task is the activity form of the same wait. A service task's
+  token is executing inside a running job. Oban cannot interrupt a running job and an Ash
   action that has already committed cannot be un-run — that is compensation,
   which this library refuses outright. "Interrupting" such an activity would
   mean killing the token while the work carried on, which is a lie the diagram
@@ -93,17 +102,42 @@ The compiler rejects, each with the offending element's id in the error:
   its own flow with no outcome at all. Whichever fired first would win, and
   neither can be silently preferred over the other, so carrying both is refused
   rather than resolved.
-- **Error *boundary* events**, while error *end* events are supported. Catching
-  requires telling a modelled business error apart from an infrastructure
-  failure, and `ActionInvoker.invoke/2` returns `{:error, term()}` with no error
-  code — so nothing distinguishes "the applicant was declined" from "Postgres is
-  unreachable". A catch would route a transient outage down the declined branch
-  and the process would end having decided something nobody decided. Also
-  refused: an error thrown with no `errorRef`, since an anonymous error tells
-  nothing downstream which error was thrown; an `errorRef` with no matching
-  `bpmn:error` declaration beside the process; and an end event carrying both a
-  terminate and an error marker, which are two different endings where one would
-  be ignored.
+- **Error boundary events that could catch a fault.** An error boundary
+  catches only a *business* error: an `ActionInvoker` returning
+  `{:error, {:bpmn_error, code, details}}`, an `ash:call` callable returning an
+  `AshBpmn.BpmnError`, or a called child reaching an error end event. Any other
+  `{:error, term}` is a fault and is retried, boundary or no boundary, because
+  catching it would route "Postgres is unreachable" down the "coverage denied"
+  branch and end the process having decided something nobody decided. The code
+  is matched on the `errorCode` of the `bpmn:error` the boundary references, so
+  a parent and a child agree on an error by code. Refused around it:
+  - an error boundary on anything but a service task, a send task or a call
+    activity, the activities whose work can throw one (a user task throws
+    nothing, so a boundary there could never fire);
+  - a non-interrupting error boundary (`cancelActivity="false"`), which BPMN
+    does not define: the activity that threw has already stopped;
+  - a catch with no `errorRef`. Camunda reads it as catch-all; here it is
+    refused, because a catch-all routes by whichever errors a callee happens to
+    throw rather than by the diagram, and a callee that learns a new error would
+    start taking the branch with no change to the drawing;
+  - an `errorRef` with no matching `bpmn:error` beside the process, and a
+    `bpmn:error` with no `errorCode`, which nothing could ever match;
+  - two error boundaries on one activity catching the same code, where the
+    route would be the engine's choice rather than the diagram's;
+  - an error boundary on a multi-instance activity. The boundary belongs to the
+    whole fan-out, and one instance's error cannot stop its siblings, which
+    would join and carry the activity on past it.
+
+  A business error nothing catches is an unhandled error. The instance fails at
+  the throwing task at once, with an `:action_failed` event whose reason is
+  `"unhandled_error"` — Camunda's incident — and is not retried, because an
+  answer asked again gives the same answer. A child's error reaches its parent
+  only through an error end event in the child; an unhandled error inside the
+  child fails the child, where it was thrown, rather than travelling up on its
+  own. Also refused: an error thrown with no `errorRef`, since an anonymous
+  error tells nothing downstream which error was thrown, and an end event
+  carrying both a terminate and an error marker, which are two different
+  endings where one would be ignored.
 - **Promoting `ash:timer kind="expire"` into a boundary event automatically.**
   The roadmap proposed it and it cannot be done wholesale: `RequireApproval`
   schedules expire timers for standalone approvals, which have no process

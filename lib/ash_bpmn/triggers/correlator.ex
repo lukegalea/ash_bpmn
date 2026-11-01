@@ -345,6 +345,10 @@ defmodule AshBpmn.Triggers.Correlator do
         :ok
 
       {:ok, token} ->
+        # A receive task's deadlines are moot once its message has arrived. Left armed they
+        # would lose at the claim anyway; defused, they do not fire at all.
+        AshBpmn.Runtime.Oban.cancel_all(%{"token_id" => token.id, "kind" => "boundary"})
+
         ctx.resources.process_event.create!(
           %{
             instance_id: token.instance_id,

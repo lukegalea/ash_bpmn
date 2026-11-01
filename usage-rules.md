@@ -114,8 +114,11 @@ gateway conditions, never in resolver specs, never in the invoker.
     (Oban redelivery, or a claim older than `config :ash_bpmn, claim_timeout:`
     taken back from a worker presumed dead). The token claim gate makes
     double-advance safe; it cannot un-run host work, so your `ActionInvoker`
-    callbacks and callables must tolerate a second invocation. Keep
-    `claim_timeout` above your slowest service task.
+    callbacks and callables must tolerate a second invocation. Key that on the
+    invocation key, `{instance_id, token_id, node_id}`: `ctx[:invocation_key]`
+    for the invoker, `context.ash_bpmn.invocation_key` for an `ash:call`
+    callable. It is the same on every redelivery and new on the next execution
+    of the node. Keep `claim_timeout` above your slowest service task.
 15. **Engine calls go through `AshBpmn.Scope`, never `authorize?: false`.** Every
     internal call passes `AshBpmn.Scope.engine/2`, which carries the actor and the
     tenant and marks the call for the bypass each generated resource declares on
@@ -224,6 +227,16 @@ gateway conditions, never in resolver specs, never in the invoker.
     `team_ids/2` (or put `:team_ids` on the actor). The candidacy read calls
     `team_ids/2` several times per read or count, so keep it cheap. See
     [presenting tasks to people](documentation/topics/assignment-and-maker-checker.md#presenting-tasks-to-people).
+27. **Name a business error; never dress a fault as one.** An error boundary
+    catches only a typed business error: `{:error, {:bpmn_error, code, details}}`
+    from an `ActionInvoker`, an `AshBpmn.BpmnError` from an `ash:call`
+    callable, an error end event in a called child. `code` is matched on the
+    `errorCode` of the `bpmn:error` the boundary references. Throw one for an
+    answer ("coverage denied"), never for a fault ("the insurer timed out"): a
+    business error is not retried, and one nothing catches fails the instance
+    at once (`:action_failed`, reason `"unhandled_error"`). Error boundaries
+    attach to service, send and call activity nodes, always interrupt, and name
+    an `errorRef` whose `bpmn:error` has an `errorCode`.
 
 ## Testing
 

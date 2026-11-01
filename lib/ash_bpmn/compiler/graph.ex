@@ -141,7 +141,7 @@ defmodule AshBpmn.Compiler.Graph do
   @implemented_event_definitions %{
     "terminateEventDefinition" => ["endEvent"],
     "timerEventDefinition" => ["intermediateCatchEvent", "boundaryEvent"],
-    "errorEventDefinition" => ["endEvent"],
+    "errorEventDefinition" => ["endEvent", "boundaryEvent"],
     "messageEventDefinition" => ["intermediateCatchEvent"],
     "signalEventDefinition" => ["intermediateCatchEvent", "intermediateThrowEvent"],
     "conditionalEventDefinition" => ["intermediateCatchEvent"]
@@ -738,22 +738,27 @@ defmodule AshBpmn.Compiler.Graph do
     end
   end
 
-  defp build_node_config(node, "boundaryEvent", _declarations) do
+  defp build_node_config(node, "boundaryEvent", declarations) do
     id = Xml.element_attr(node, "id")
     ref = Xml.element_attr(node, "attachedToRef")
 
     definitions =
       node
       |> Xml.get_element_children()
-      |> Enum.filter(&(Xml.normalize_name(Xml.local_name(&1)) == "timerEventDefinition"))
+      |> Enum.filter(
+        &(Xml.normalize_name(Xml.local_name(&1)) in [
+            "timerEventDefinition",
+            "errorEventDefinition"
+          ])
+      )
 
     with :ok <- check_attached_ref(id, ref),
          {:ok, interrupting?} <-
            check_cancel_activity(id, Xml.element_attr(node, "cancelActivity")),
          {:ok, definition} <- single_boundary_definition(id, definitions),
-         {:ok, %{"catch" => spec}} <- build_timer_catch(id, definition) do
+         {:ok, trigger} <- boundary_trigger(id, definition, interrupting?, declarations.errors) do
       {:ok,
-       %{"attached_to" => String.trim(ref), "catch" => spec, "interrupting" => interrupting?}}
+       Map.merge(%{"attached_to" => String.trim(ref), "interrupting" => interrupting?}, trigger)}
     end
   end
 
@@ -1201,10 +1206,8 @@ defmodule AshBpmn.Compiler.Graph do
   # engine gave up". That distinction is the entire payoff, and it is why the runtime gives it
   # its own instance status rather than reusing `:failed`.
   #
-  # Error *boundary* events are a separate matter and stay refused. `ActionInvoker.invoke/2`
-  # returns `{:error, term()}` with no error code, so nothing distinguishes a modelled business
-  # error from Postgres being unreachable -- and catching would route a transient outage down
-  # the "credit declined" branch.
+  # An error end event in a called child is also how the child hands its parent an error: the
+  # parent's call activity catches it with an error boundary matching the code.
   defp build_error_end(_id, [], _declarations), do: {:ok, nil}
 
   defp build_error_end(id, [_, _ | _], _declarations),
@@ -1221,18 +1224,22 @@ defmodule AshBpmn.Compiler.Graph do
          )}
 
       ref ->
-        case Map.fetch(declarations, ref) do
-          {:ok, declaration} ->
-            {:ok, Map.put(declaration, "ref", ref)}
+        resolve_error_ref(id, "endEvent", ref, declarations)
+    end
+  end
 
-          :error ->
-            {:error,
-             Errors.error(
-               id,
-               "endEvent '#{id}' references error '#{ref}', which is not declared. A " <>
-                 "bpmn:error element with that id must sit beside the process, not inside it"
-             )}
-        end
+  defp resolve_error_ref(id, type, ref, declarations) do
+    case Map.fetch(declarations, ref) do
+      {:ok, declaration} ->
+        {:ok, Map.put(declaration, "ref", ref)}
+
+      :error ->
+        {:error,
+         Errors.error(
+           id,
+           "#{type} '#{id}' references error '#{ref}', which is not declared. A " <>
+             "bpmn:error element with that id must sit beside the process, not inside it"
+         )}
     end
   end
 
@@ -1351,6 +1358,64 @@ defmodule AshBpmn.Compiler.Graph do
      Errors.error(id, "boundaryEvent '#{id}' has a non-boolean cancelActivity '#{value}'")}
   end
 
+  defp boundary_trigger(id, definition, interrupting?, errors) do
+    case Xml.normalize_name(Xml.local_name(definition)) do
+      "timerEventDefinition" -> build_timer_catch(id, definition)
+      "errorEventDefinition" -> build_error_catch(id, definition, interrupting?, errors)
+    end
+  end
+
+  # An error boundary catches a business error the activity it sits on threw: a service or send
+  # task's callee returning one, or a called child reaching an error end event. Camunda's model,
+  # with three refusals.
+  #
+  # Non-interrupting is refused because BPMN has no such thing for errors: the activity that
+  # threw has already stopped, so there is nothing left running for a second branch to run
+  # beside.
+  #
+  # A catch with no errorRef is refused although Camunda reads it as catch-all. A catch-all is
+  # the one boundary whose route depends on which errors a callee happens to throw rather than
+  # on what the diagram says, and a callee that learns a new error would start taking it with
+  # no change to the drawing. Naming the error keeps the diagram the whole of the routing.
+  #
+  # And an error with no errorCode is refused, because the code is what a thrown error is
+  # matched on: a boundary for an error without one could never fire.
+  defp build_error_catch(id, _definition, false, _errors) do
+    {:error,
+     Errors.error(
+       id,
+       ~s(boundaryEvent '#{id}' catches an error and sets cancelActivity="false". An error ) <>
+         "boundary always interrupts: the activity that threw has already stopped, so " <>
+         "there is nothing for a second branch to run beside"
+     )}
+  end
+
+  defp build_error_catch(id, definition, true, errors) do
+    case Xml.element_attr(definition, "errorRef") do
+      nil ->
+        {:error,
+         Errors.error(
+           id,
+           "boundaryEvent '#{id}' catches an error with no errorRef. A catch-all would route " <>
+             "by whichever errors the activity happens to throw; name the bpmn:error it is for"
+         )}
+
+      ref ->
+        with {:ok, error} <- resolve_error_ref(id, "boundaryEvent", ref, errors) do
+          if blank?(error["code"]) do
+            {:error,
+             Errors.error(
+               id,
+               "boundaryEvent '#{id}' catches error '#{ref}', which has no errorCode. A " <>
+                 "thrown error is matched on its code, so this boundary could never fire"
+             )}
+          else
+            {:ok, %{"error" => error}}
+          end
+        end
+    end
+  end
+
   defp single_boundary_definition(_id, [definition]), do: {:ok, definition}
 
   defp single_boundary_definition(id, []) do
@@ -1358,7 +1423,7 @@ defmodule AshBpmn.Compiler.Graph do
      Errors.error(
        id,
        "boundaryEvent '#{id}' has no event definition; it would attach to the activity and " <>
-         "never fire. Supported: timerEventDefinition"
+         "never fire. Supported: timerEventDefinition, errorEventDefinition"
      )}
   end
 

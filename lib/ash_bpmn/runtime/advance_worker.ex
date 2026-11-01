@@ -236,12 +236,30 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   # count is somebody else's claim, recovered and re-taken while this job ran, and handing it
   # back would pull the token out from under the job now running it. Either way the failure is
   # only passed on.
+  #
+  # An unhandled business error gives up on the first attempt. It is an answer, not a fault, so
+  # a retry would ask the same question and get the same answer; the instance fails at the task
+  # the way Camunda raises an incident there, and `AshBpmn.retry_instance/2` asks again once
+  # somebody has changed what the answer depends on.
   defp node_failed(resources, job, instance, token, failure, scope) do
     current = reload_token(resources, token, scope)
 
     cond do
       is_nil(current) or current.status != :executing or current.attempts != token.attempts ->
         pass_on(failure)
+
+      match?({:error, {:bpmn_error, _, _}}, failure) ->
+        {:error, {:bpmn_error, code, _details}} = failure
+
+        mark_instance_failed(
+          resources,
+          instance,
+          current,
+          current.node_id,
+          describe_failure(failure),
+          scope,
+          %{"reason" => "unhandled_error", "error_code" => code}
+        )
 
       exhausted?(current, job) ->
         mark_instance_failed(
@@ -274,6 +292,9 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
   defp pass_on({:error, reason}), do: {:error, reason}
   defp pass_on({:raised, e, stacktrace}), do: reraise(e, stacktrace)
+
+  defp describe_failure({:error, {:bpmn_error, code, _details}}),
+    do: "unhandled BPMN error '#{code}': no error boundary on this activity catches it"
 
   defp describe_failure({:error, reason}) when is_binary(reason), do: reason
   defp describe_failure({:error, %{__exception__: true} = e}), do: Exception.message(e)
@@ -601,6 +622,8 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
           Scope.engine(scope)
         )
 
+        throw_to_parent(resources, ctx[:instance], outcome, error, scope)
+
       {:emit_signal, %{name: name} = spec} ->
         # Through the facade, so a throw and a host call take the same path -- including the
         # depth inheritance, which is what stops a signal that starts a process that throws a
@@ -822,10 +845,10 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   # commit together, under the instance's lock, and only while this job's claim still holds.
   # The instance is the locked re-read because the node may have run for a long time: a cancel
   # that landed meanwhile has already ended it, and `mark_failed` would refuse a non-running one.
-  defp mark_instance_failed(resources, _instance, token, node_id, error, scope) do
+  defp mark_instance_failed(resources, _instance, token, node_id, error, scope, why \\ %{}) do
     resources
     |> step(token, scope, fn locked ->
-      give_up(resources, locked, token, node_id, error, scope)
+      give_up(resources, locked, token, node_id, error, scope, why)
       :failed_permanently
     end)
     |> case do
@@ -837,7 +860,9 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     end
   end
 
-  defp give_up(resources, instance, token, node_id, error, scope) do
+  # `why` overrides the default reason, `"max_attempts_exceeded"`, for a give-up that is not
+  # about attempts: an unhandled business error says so, and names its code.
+  defp give_up(resources, instance, token, node_id, error, scope, why) do
     killed = resources.token.kill!(token, Scope.engine(scope))
     FlightView.token_moved(instance, killed)
 
@@ -851,12 +876,17 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         token_id: token.id,
         kind: :action_failed,
         node_id: node_id,
-        data: %{
-          "reason" => "max_attempts_exceeded",
-          "attempts" => token.attempts,
-          # Bounded: the event is the engine's diagnostic, not a copy of the host's error log.
-          "error" => String.slice(error, 0, 500)
-        }
+        data:
+          Map.merge(
+            %{
+              "reason" => "max_attempts_exceeded",
+              "attempts" => token.attempts,
+              # Bounded: the event is the engine's diagnostic, not a copy of the host's error
+              # log.
+              "error" => String.slice(error, 0, 500)
+            },
+            why
+          )
       },
       Scope.engine(scope)
     )
@@ -873,6 +903,91 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   defp wake_parent(_resources, %{parent_token_id: nil}, _outcome, _scope), do: :ok
 
   defp wake_parent(resources, instance, outcome, scope) do
+    with {:ok, parent, token, parent_scope} <- claim_parent(resources, instance, scope) do
+      record_child_completed(resources, parent, token, instance, outcome, %{}, parent_scope)
+
+      case AshBpmn.Runtime.Routing.outgoing(
+             parent_graph(resources, parent, parent_scope),
+             token.node_id
+           ) do
+        [flow | _] -> move_parent_token(resources, parent, token, flow["to"], parent_scope)
+        [] -> resources.token.consume!(token, Scope.engine(parent_scope))
+      end
+    end
+  end
+
+  # A child that reached an error end event throws its error at the call activity waiting for
+  # it, as Camunda propagates a child's error to its parent. An error boundary on the call
+  # activity catching the code interrupts it and the parent leaves by the boundary's flow.
+  #
+  # Nothing catching it is an unhandled error, and the parent fails at the call activity -- an
+  # incident there, which `AshBpmn.retry_instance/2` answers by starting the child again. It
+  # used to be nothing at all: an errored child never woke its parent, which waited forever.
+  defp throw_to_parent(_resources, %{parent_token_id: nil}, _outcome, _error, _scope), do: :ok
+
+  defp throw_to_parent(resources, instance, outcome, error, scope) do
+    with {:ok, parent, token, parent_scope} <- claim_parent(resources, instance, scope) do
+      code = error["code"]
+
+      record_child_completed(
+        resources,
+        parent,
+        token,
+        instance,
+        outcome,
+        %{"error_ref" => error["ref"], "error_code" => code},
+        parent_scope
+      )
+
+      graph = parent_graph(resources, parent, parent_scope)
+
+      case AshBpmn.Runtime.Routing.error_boundary(graph, token.node_id, code) do
+        nil ->
+          give_up(
+            resources,
+            parent,
+            token,
+            token.node_id,
+            "child #{instance.id} ended with BPMN error '#{code}' and no error boundary on " <>
+              "this call activity catches it",
+            parent_scope,
+            %{
+              "reason" => "unhandled_error",
+              "error_code" => code,
+              "child_instance_id" => instance.id
+            }
+          )
+
+        boundary_id ->
+          resources.process_event.create!(
+            %{
+              instance_id: parent.id,
+              token_id: token.id,
+              node_id: boundary_id,
+              kind: :activity_interrupted,
+              data: %{
+                "interrupted" => token.node_id,
+                "error_ref" => get_in(graph, ["nodes", boundary_id, "error", "ref"]),
+                "error_code" => code,
+                "child_instance_id" => instance.id
+              }
+            },
+            Scope.engine(parent_scope)
+          )
+
+          move_parent_token(resources, parent, token, boundary_id, parent_scope)
+      end
+    end
+  end
+
+  # The waiting parent token, claimed, with its instance and scope; or `:ok` when there is no
+  # parent left to tell.
+  #
+  # `rollback_on_error?: false` because losing this claim is an ordinary answer -- the parent
+  # branch was pruned -- and this runs inside the child's ending step. A failed action in a
+  # transaction otherwise rolls the whole transaction back, which would undo the child's ending
+  # over a parent that has simply gone.
+  defp claim_parent(resources, instance, scope) do
     parent_scope = Scope.from_record(instance, actor: Map.get(scope, :actor))
 
     token =
@@ -881,16 +996,15 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       |> Ash.Query.filter(id == ^instance.parent_token_id)
       |> Ash.read_one!(Scope.engine(parent_scope))
 
-    # `rollback_on_error?: false` because losing this claim is an ordinary answer -- the parent
-    # branch was pruned -- and this runs inside the child's completing step. A failed action in
-    # a transaction otherwise rolls the whole transaction back, which would undo the child's
-    # completion over a parent that has simply gone.
     with false <- is_nil(token),
          {:ok, token} <-
            resources.token.claim_waiting(
              token,
              Keyword.put(Scope.engine(parent_scope), :rollback_on_error?, false)
            ) do
+      # The call activity's deadlines are moot once its child has finished.
+      AshBpmn.Runtime.Oban.cancel_all(%{"token_id" => token.id, "kind" => "boundary"})
+
       parent =
         resources.instance
         |> Ash.Query.for_read(:read)
@@ -898,19 +1012,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         |> Ash.read_one!(Scope.engine(parent_scope))
 
       FlightView.token_moved(parent, token)
-
-      resources.process_event.create!(
-        %{
-          instance_id: parent.id,
-          token_id: token.id,
-          node_id: token.node_id,
-          kind: :child_completed,
-          data: %{"child_instance_id" => instance.id, "outcome" => to_outcome(outcome)}
-        },
-        Scope.engine(parent_scope)
-      )
-
-      continue_parent(resources, parent, token, parent_scope)
+      {:ok, parent, token, parent_scope}
     else
       # The parent branch was pruned while the child ran -- a terminate, a cancel, or an
       # interrupting boundary above it. The child still finished, and its work still happened;
@@ -919,45 +1021,49 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     end
   end
 
-  defp continue_parent(resources, parent, token, scope) do
-    graph =
-      AshBpmn.DefinitionLoader.load!(
-        resources.definition,
-        parent.definition_id,
-        parent,
-        scope
-      ).graph
+  defp record_child_completed(resources, parent, token, child, outcome, extra, scope) do
+    resources.process_event.create!(
+      %{
+        instance_id: parent.id,
+        token_id: token.id,
+        node_id: token.node_id,
+        kind: :child_completed,
+        data:
+          Map.merge(%{"child_instance_id" => child.id, "outcome" => to_outcome(outcome)}, extra)
+      },
+      Scope.engine(scope)
+    )
+  end
 
-    case AshBpmn.Runtime.Routing.outgoing(graph, token.node_id) do
-      [flow | _] ->
-        consumed = resources.token.consume!(token, Scope.engine(scope))
-        FlightView.token_moved(parent, consumed)
+  defp parent_graph(resources, parent, scope) do
+    AshBpmn.DefinitionLoader.load!(resources.definition, parent.definition_id, parent, scope).graph
+  end
 
-        new_token =
-          resources.token.create!(
-            %{
-              instance_id: parent.id,
-              node_id: flow["to"],
-              status: :active,
-              routing: token.routing || %{}
-            },
-            Scope.engine(scope)
-          )
+  defp move_parent_token(resources, parent, token, node_id, scope) do
+    consumed = resources.token.consume!(token, Scope.engine(scope))
+    FlightView.token_moved(parent, consumed)
 
-        FlightView.token_moved(parent, new_token)
+    new_token =
+      resources.token.create!(
+        %{
+          instance_id: parent.id,
+          node_id: node_id,
+          status: :active,
+          routing: token.routing || %{}
+        },
+        Scope.engine(scope)
+      )
 
-        AshBpmn.Runtime.Oban.insert(
-          AshBpmn.Runtime.AdvanceWorker,
-          Scope.to_job_args(scope, %{
-            "instance_id" => parent.id,
-            "token_id" => new_token.id,
-            "node_id" => flow["to"]
-          })
-        )
+    FlightView.token_moved(parent, new_token)
 
-      [] ->
-        resources.token.consume!(token, Scope.engine(scope))
-    end
+    AshBpmn.Runtime.Oban.insert(
+      AshBpmn.Runtime.AdvanceWorker,
+      Scope.to_job_args(scope, %{
+        "instance_id" => parent.id,
+        "token_id" => new_token.id,
+        "node_id" => node_id
+      })
+    )
   end
 
   # Starts the child a call activity is waiting for, naming the waiting token so the child's
@@ -1000,9 +1106,9 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         #
         # This used to raise after the park had committed. The retry then found the token
         # `:waiting`, not `:active`, and skipped, so the parent waited for a child that was
-        # never started, forever. A call activity has no error boundary to route to: the
-        # compiler admits boundary events on user tasks only, and error events on end events
-        # only, so the give-up is the whole of what BPMN offers this model.
+        # never started, forever. Not starting the child is a fault, not a business error the
+        # child threw, so an error boundary on the call activity does not catch it and the
+        # give-up is the whole answer.
         raise "call activity #{spec.node_id} could not start #{spec.key}: #{describe_start_error(reason)}"
     end
   end
