@@ -80,6 +80,8 @@ defmodule AshBpmn.Test.CallablesRuntimeResource do
   * `record_inputs` — records the arguments it received, and the context it was
     called under, into `AshBpmn.Test.CallablesRecorder`.
   * `always_fails` — returns an error tuple, for the failure path.
+  * `deny_coverage` — throws a business error, `COVERAGE_DENIED`, for an error boundary to
+    catch.
   """
 
   use Ash.Resource, domain: AshBpmn.Test.RuntimeCallablesDomain
@@ -128,6 +130,13 @@ defmodule AshBpmn.Test.CallablesRuntimeResource do
 
     action :always_fails, :string do
       run fn _input, _context -> {:error, "the payout was refused"} end
+    end
+
+    action :deny_coverage, :map do
+      run fn _input, _context ->
+        {:error,
+         AshBpmn.BpmnError.exception(code: "COVERAGE_DENIED", details: %{"plan" => "basic"})}
+      end
     end
   end
 end
@@ -220,6 +229,7 @@ defmodule AshBpmn.Test.RuntimeCallablesDomain do
     callable(:assess_deep, AshBpmn.Test.CallablesRuntimeResource, :assess_deep)
     callable(:record_inputs, AshBpmn.Test.CallablesRuntimeResource, :record_inputs)
     callable(:always_fails, AshBpmn.Test.CallablesRuntimeResource, :always_fails)
+    callable(:deny_coverage, AshBpmn.Test.CallablesRuntimeResource, :deny_coverage)
     callable(:enroll, AshBpmn.Test.CallablesEnrollee, :enroll)
     callable(:engine_check, AshBpmn.Test.CallablesGuardedResource, :engine_only)
   end

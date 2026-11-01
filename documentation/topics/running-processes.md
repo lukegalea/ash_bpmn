@@ -266,7 +266,8 @@ activity whose child process cannot be started (nothing published under its key,
 say): the start is part of the call activity's step, so its token is handed back
 rather than left waiting for a child that never existed, and on the last attempt
 the instance fails with `:action_failed` naming the call activity and the reason.
-The subset has no error boundary event a call activity could route this to. Before it does, the worker hands the claim
+That is a fault, not a business error, so an error boundary on the call activity
+does not catch it. Before the last attempt, the worker hands the claim
 back -- the token returns from `:executing` to `:active`, keeping its attempt
 count -- so the retry can claim it again. On the last attempt, which is the
 engine's `max_attempts` or the job's own Oban `max_attempts`, whichever comes
@@ -290,6 +291,22 @@ once.
 
 Human tasks never fail the instance by themselves: they wait. Expiry is the
 declared alternative to waiting forever, and it is opt-in per task.
+
+### Business errors
+
+A business error is an answer, not a fault, and is never retried. A callee
+throws one by name — an `ActionInvoker` returns
+`{:error, {:bpmn_error, code, details}}`, an `ash:call` callable returns an
+`AshBpmn.BpmnError` — and a called child throws one by reaching an error end
+event. An error boundary on the task (or on the call activity) whose
+`bpmn:error` has that `errorCode` catches it: the task's token is consumed, an
+`:activity_interrupted` event on the boundary records the code, the `errorRef`
+and the bounded details (and the child instance, for a call activity), and the
+process leaves by the boundary's flow. Nothing catching it is an unhandled
+error: the instance fails at the task on the first attempt, with an
+`:action_failed` event whose reason is `"unhandled_error"` and which names the
+code. `AshBpmn.retry_instance!/1` asks again, under the same invocation key,
+once the answer can be different.
 
 ## Watching an instance run
 

@@ -227,6 +227,16 @@ gateway conditions, never in resolver specs, never in the invoker.
     `team_ids/2` (or put `:team_ids` on the actor). The candidacy read calls
     `team_ids/2` several times per read or count, so keep it cheap. See
     [presenting tasks to people](documentation/topics/assignment-and-maker-checker.md#presenting-tasks-to-people).
+27. **Name a business error; never dress a fault as one.** An error boundary
+    catches only a typed business error: `{:error, {:bpmn_error, code, details}}`
+    from an `ActionInvoker`, an `AshBpmn.BpmnError` from an `ash:call`
+    callable, an error end event in a called child. `code` is matched on the
+    `errorCode` of the `bpmn:error` the boundary references. Throw one for an
+    answer ("coverage denied"), never for a fault ("the insurer timed out"): a
+    business error is not retried, and one nothing catches fails the instance
+    at once (`:action_failed`, reason `"unhandled_error"`). Error boundaries
+    attach to service, send and call activity nodes, always interrupt, and name
+    an `errorRef` whose `bpmn:error` has an `errorCode`.
 
 ## Testing
 
