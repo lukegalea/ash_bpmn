@@ -129,6 +129,12 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Fixes:
 
+- **A receive task's lookback scan reads the event source as its contract says.**
+  `AshBpmn.EventSource.stream/3` returns `{:ok, {events, last_sequence}}`. The
+  scan a token with a `lookback` window makes as it parks treated the answer as
+  a bare list and raised on any conforming adapter, so a window never delivered
+  an event that came first. The scan now reads the tuple; the test source that
+  returned a bare list (and hid it) returns the contract's shape.
 - **Parallel joins wait for every incoming branch, however long it is.** A
   join used to look only at its immediate source nodes, and only for `:active`
   and `:executing` tokens. A sibling branch two or more nodes long, or one
