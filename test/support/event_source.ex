@@ -152,9 +152,12 @@ defmodule AshBpmn.Test.SeededEventSource do
 
   @impl true
   def stream(_tenant, after_sequence, limit) do
-    Process.get(@key, [])
-    |> Enum.filter(&(&1.sequence > after_sequence))
-    |> Enum.take(limit)
+    events =
+      Process.get(@key, [])
+      |> Enum.filter(&(&1.sequence > after_sequence))
+      |> Enum.take(limit)
+
+    {:ok, {events, events |> List.last() |> then(&(&1 && &1.sequence))}}
   end
 
   @impl true

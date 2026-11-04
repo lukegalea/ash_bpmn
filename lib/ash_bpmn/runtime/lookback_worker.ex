@@ -124,9 +124,9 @@ defmodule AshBpmn.Runtime.LookbackWorker do
   defp eligible_events(tenant, source, token, resources, scope) do
     after_sequence = max(cursor_sequence(resources, scope) - @scan_events, 0)
 
-    tenant
-    |> source.stream(after_sequence, @scan_events)
-    |> Enum.filter(fn event ->
+    {:ok, {events, _last_sequence}} = source.stream(tenant, after_sequence, @scan_events)
+
+    Enum.filter(events, fn event ->
       DateTime.compare(source.occurred_at(event), token.lookback_until) != :lt
     end)
   end
