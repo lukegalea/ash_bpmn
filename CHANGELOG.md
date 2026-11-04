@@ -129,6 +129,26 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Fixes:
 
+- **Parallel joins wait for every incoming branch, however long it is.** A
+  join used to look only at its immediate source nodes, and only for `:active`
+  and `:executing` tokens. A sibling branch two or more nodes long, or one
+  parked (`:waiting`) on a user task, receive task, timer or call activity,
+  looked as if it would never arrive: the join fired at the first arrival and
+  again when that branch arrived, so the node after the join ran twice, the
+  first time early. A join inside a loop also counted every earlier pass's
+  arrivals as this pass's. Behaviour change: a join now fires exactly once,
+  when no live token can still reach it — none on any node with a path to it
+  (boundary events included), none at the join with its advance still to run,
+  and no other join upstream still holding arrivals. Each arrival is recorded
+  as a `:node_entered` event with `"join" => "arrived"`, and each firing as a
+  `:node_completed` event whose `"arrived_token_ids"` names the arrivals it
+  used, so each pass through a join uses that pass's arrivals only. A branch
+  taken somewhere else after its sibling arrived (an exclusive gateway
+  choosing the other path, an error boundary leading to an end) still releases
+  the join, now from whichever step took it away. A user task completed
+  straight into a join now enters the join like any other node instead of
+  judging it by a rule of its own. A join in an instance that is not
+  `:running` waits. No schema change.
 - **`FlightView.token_positions/2` reads as the actor it is given.** The
   instance and token reads were marked as engine work even with an `:actor`,
   so `AshBpmn.Checks.AshBpmnInteraction` bypassed the host's policies and a

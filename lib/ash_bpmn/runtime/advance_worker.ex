@@ -155,7 +155,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
           {:ok, effects} ->
             resources
             |> step(token, scope, fn locked ->
-              apply_effects(resources, effects, %{ctx | instance: locked})
+              apply_effects(resources, effects, %{ctx | instance: locked}, graph)
               :advanced
             end)
             |> step_result(resources, job, instance, token, scope)
@@ -354,67 +354,197 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
   # ── Parallel join handling ──────────────────────────────────────────────
 
-  defp handle_parallel_join(resources, graph, instance, token, join_node_id, join_info, scope) do
-    # The arriving branch's token dies at the join; a single fresh token is
-    # minted on the far side once every branch has arrived.
+  # A join fires once, when nothing that could still reach it is left upstream.
+  #
+  # The arriving token dies at the join and its arrival is recorded as a `:node_entered` event
+  # carrying `"join" => "arrived"`. The join fires -- one fresh token past it, and a
+  # `:node_completed` event naming the arrivals it used -- when no live token stands anywhere
+  # it could still arrive from: on any node with a path to the join that does not pass through
+  # the join itself, on a boundary event of such a node, at the join itself with its own advance
+  # still to run, or at another join upstream that is holding arrivals of its own.
+  #
+  # This used to look only at the join's *immediate* source nodes, and only for `:active` and
+  # `:executing` tokens. A branch two nodes long, or one parked on a user task or a receive task
+  # one node back, looked as if it would never arrive: the join fired at the first arrival and
+  # fired again when the branch did, and the node past it ran twice. It also counted every dead
+  # token the join had ever seen, so a join inside a loop counted the previous pass's arrivals
+  # as this pass's.
+  #
+  # When every incoming flow has had a branch arrive, nothing upstream is left and this is the
+  # BPMN parallel join. When an upstream exclusive gateway or a boundary event took a branch
+  # somewhere else, it is the inclusive-join rule the engine has always applied in that case
+  # (see DESIGN.md): the join stops waiting for a branch that can no longer come. Because a
+  # branch can be taken elsewhere *after* its sibling arrived, `release_stranded_joins/4` asks
+  # the same question at the end of every other step.
+  defp handle_parallel_join(resources, graph, instance, token, join_node_id, _join_info, scope) do
     killed = resources.token.kill!(token, Scope.engine(scope))
     FlightView.token_moved(instance, killed)
 
-    # Record node_entered event
     resources.process_event.create!(
       %{
         instance_id: instance.id,
         token_id: token.id,
         node_id: join_node_id,
         kind: :node_entered,
-        data: %{}
+        data: %{"join" => "arrived"}
       },
       Scope.engine(scope)
     )
 
-    # Count how many tokens at this join node have been consumed/dead
-    waits_for = join_info["waits_for"] || []
+    # A join in an instance that is not running waits. A `:failed` instance's failed branch is
+    # dead until `AshBpmn.retry_instance/2` brings it back, and firing now would count it as a
+    # branch that will never come.
+    if instance.status == :running do
+      pending = pending_arrivals(resources, graph, instance, scope)
 
-    all_arrived =
-      resources.token
-      |> Ash.Query.for_read(:read)
-      |> Ash.Query.filter(instance_id == ^instance.id)
-      |> Ash.Query.filter(node_id == ^join_node_id)
-      |> Ash.Query.filter(status in [:consumed, :dead])
-      |> Ash.read!(Scope.engine(scope))
-      |> length()
-
-    if all_arrived >= length(waits_for) do
-      # All siblings arrived — advance through the join
-      advance_from_join(resources, graph, instance, join_node_id, scope)
-    else
-      # Not all siblings have arrived yet — check if remaining siblings
-      # will ever arrive (i.e., are there active tokens on their source nodes?)
-      incoming_nodes =
-        graph["flows"]
-        |> Map.values()
-        |> Enum.filter(fn f -> f["to"] == join_node_id end)
-        |> Enum.map(fn f -> f["from"] end)
-        |> Enum.reject(fn from -> from == token.node_id end)
-
-      has_active_siblings =
-        Enum.any?(incoming_nodes, fn from_node ->
-          resources.token
-          |> Ash.Query.for_read(:read)
-          |> Ash.Query.filter(instance_id == ^instance.id)
-          |> Ash.Query.filter(node_id == ^from_node)
-          |> Ash.Query.filter(status in [:active, :executing])
-          |> Ash.read_one!(Scope.engine(scope))
-        end)
-
-      if has_active_siblings do
+      if still_arriving?(graph, join_node_id, live_tokens(resources, instance, scope), pending) do
         :waiting_for_siblings
       else
-        # Remaining siblings will never arrive (exclusive gateway chose
-        # a different path) — advance through the join now.
-        advance_from_join(resources, graph, instance, join_node_id, scope)
+        fire_join(
+          resources,
+          graph,
+          instance,
+          join_node_id,
+          Map.get(pending, join_node_id, []),
+          scope
+        )
+      end
+    else
+      :waiting_for_siblings
+    end
+  end
+
+  # The other half of the join rule: a step that took a branch somewhere the join cannot be
+  # reached from -- an exclusive gateway choosing the other path, a boundary event leading to
+  # an end, a branch reaching its own end event -- may be what a waiting join was waiting for.
+  # Nothing would ever arrive to ask again, so every step asks on the join's behalf.
+  #
+  # Repeated until nothing fires, because a join that fires puts a live token in front of any
+  # join further on, and a join still holding arrivals counts as a branch on its way to the
+  # joins after it.
+  defp release_stranded_joins(resources, graph, instance, scope) do
+    if instance.status == :running and join_ids(graph) != [] do
+      pending = pending_arrivals(resources, graph, instance, scope)
+      live = live_tokens(resources, instance, scope)
+
+      stranded =
+        pending
+        |> Map.keys()
+        |> Enum.sort()
+        |> Enum.find(&(not still_arriving?(graph, &1, live, pending)))
+
+      if stranded do
+        fire_join(resources, graph, instance, stranded, Map.fetch!(pending, stranded), scope)
+        release_stranded_joins(resources, graph, instance, scope)
       end
     end
+
+    :ok
+  end
+
+  defp join_ids(graph) do
+    nodes = graph["nodes"] || %{}
+
+    (graph["joins"] || %{})
+    |> Map.keys()
+    |> Enum.filter(&(get_in(nodes, [&1, "type"]) == "parallelGateway"))
+  end
+
+  defp live_tokens(resources, instance, scope) do
+    resources.token
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(instance_id == ^instance.id and status in [:active, :executing, :waiting])
+    |> Ash.read!(Scope.engine(scope))
+  end
+
+  # Arrivals a join has recorded and not yet used, by join: `%{join_id => [token_id]}`.
+  #
+  # Read from the process events rather than from the dead tokens at the join, because a dead
+  # token says that a branch arrived and not whether the join has already fired for it.
+  # Arrivals recorded before arrivals carried `"join" => "arrived"` are not counted: those
+  # joins fired, or waited, under the rule they were recorded under.
+  defp pending_arrivals(resources, graph, instance, scope) do
+    case join_ids(graph) do
+      [] ->
+        %{}
+
+      joins ->
+        events =
+          resources.process_event
+          |> Ash.Query.for_read(:read)
+          |> Ash.Query.filter(
+            instance_id == ^instance.id and node_id in ^joins and
+              kind in [:node_entered, :node_completed]
+          )
+          |> Ash.read!(Scope.engine(scope))
+
+        used =
+          events
+          |> Enum.filter(&(&1.kind == :node_completed))
+          |> Enum.flat_map(&List.wrap((&1.data || %{})["arrived_token_ids"]))
+          |> MapSet.new()
+
+        events
+        |> Enum.filter(&(&1.kind == :node_entered and (&1.data || %{})["join"] == "arrived"))
+        |> Enum.reject(&MapSet.member?(used, &1.token_id))
+        |> Enum.sort_by(& &1.inserted_at, DateTime)
+        |> Enum.group_by(& &1.node_id, & &1.token_id)
+    end
+  end
+
+  defp still_arriving?(graph, join_node_id, live_tokens, pending) do
+    upstream = upstream_of(graph, join_node_id)
+
+    Enum.any?(live_tokens, &(&1.node_id == join_node_id or MapSet.member?(upstream, &1.node_id))) or
+      Enum.any?(Map.keys(pending), &(&1 != join_node_id and MapSet.member?(upstream, &1)))
+  end
+
+  # Every node with a path to `join_node_id` that does not pass through it: the sequence flows
+  # walked backwards, plus the edge from an activity to each boundary event attached to it,
+  # since a token parked on the activity can leave by the boundary.
+  defp upstream_of(graph, join_node_id) do
+    predecessors =
+      (graph["flows"] || %{})
+      |> Map.values()
+      |> Enum.group_by(& &1["to"], & &1["from"])
+
+    attached =
+      for {id, node} <- graph["nodes"] || %{}, is_binary(node["attached_to"]), into: %{} do
+        {id, node["attached_to"]}
+      end
+
+    walk_upstream(
+      [join_node_id],
+      MapSet.new(),
+      &(Map.get(predecessors, &1, []) ++ List.wrap(Map.get(attached, &1))),
+      join_node_id
+    )
+  end
+
+  defp walk_upstream([], seen, _preds, _join), do: seen
+
+  defp walk_upstream([node | rest], seen, preds, join) do
+    new =
+      node
+      |> preds.()
+      |> Enum.reject(&(&1 == join or MapSet.member?(seen, &1)))
+      |> Enum.uniq()
+
+    walk_upstream(new ++ rest, Enum.into(new, seen), preds, join)
+  end
+
+  defp fire_join(resources, graph, instance, join_node_id, arrived_token_ids, scope) do
+    resources.process_event.create!(
+      %{
+        instance_id: instance.id,
+        node_id: join_node_id,
+        kind: :node_completed,
+        data: %{"join" => "fired", "arrived_token_ids" => arrived_token_ids}
+      },
+      Scope.engine(scope)
+    )
+
+    advance_from_join(resources, graph, instance, join_node_id, scope)
   end
 
   # The token past the join is minted `:active` and given an advance job of its own, in the
@@ -531,7 +661,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
   # ── Effect application ───────────────────────────────────────────────────
 
-  defp apply_effects(resources, effects, ctx) do
+  defp apply_effects(resources, effects, ctx, graph) do
     scope = ctx[:scope]
 
     # Phase 1: create tokens and tasks first, so later effects can reference
@@ -728,6 +858,9 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         record_event(resources, ctx, :instance_completed, %{"outcome" => outcome})
 
       {:complete_instance, outcome} ->
+        # A join this branch's end has stranded fires first, so its token is live when the
+        # end event asks whether it is the last branch.
+        release_stranded_joins(resources, graph, ctx[:instance], scope)
         complete_when_last(resources, ctx, outcome, scope)
 
       {:tasks, _task_specs} ->
@@ -747,7 +880,18 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       {:timers, {task_ref, timer_specs}} ->
         attach_timers(resources, Map.fetch!(task_id_map, task_ref), timer_specs, ctx, scope)
     end)
+
+    # A step that ended the instance has nothing left to release, and its `ctx[:instance]` is
+    # the row from before it did; a plain end event already asked, before it completed.
+    unless Enum.any?(effects, &ends_instance?/1) do
+      release_stranded_joins(resources, graph, ctx[:instance], scope)
+    end
   end
+
+  defp ends_instance?({kind, _}),
+    do: kind in [:complete_instance, :terminate_instance, :error_instance]
+
+  defp ends_instance?(_effect), do: false
 
   # Enqueues a task's timers and records the resulting job ids on the task, so
   # completing the task early can cancel them. Without the ids on the row there

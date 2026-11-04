@@ -61,8 +61,8 @@ the only things in an Ash stack that survive a deploy.
 - Every token advance is one Oban job. The job claims the token (optimistic
   compare-and-set; the loser of a race is a no-op), loads the *snapshot* — never a
   module — executes the node, and writes the next token(s) in one transaction.
-- A **fork** mints sibling tokens sharing a `fork_id`. A **join** consumes
-  arrivals and fires once all waited-for branches have arrived.
+- A **fork** mints sibling tokens sharing a `fork_id`. A **join** records
+  arrivals and fires once, when no live token can still reach it.
 - A **service task** calls your `ActionInvoker` callback with
   `action`, subject, actor and tenant. It orchestrates; your Ash action decides,
   validates and authorizes.

@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+A join one of whose branches may be taken elsewhere after its sibling has already arrived:
+the review can reject, and a rejected review ends its branch without reaching the join. The
+join waits while the review is open, and stops waiting once the review has gone the other way.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_join_pruned_branch"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_join_pruned_branch" name="Pruned branch" isExecutable="true">
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>F0</bpmn2:outgoing></bpmn2:startEvent>
+    <bpmn2:parallelGateway id="Fork_1">
+      <bpmn2:incoming>F0</bpmn2:incoming>
+      <bpmn2:outgoing>FQ</bpmn2:outgoing>
+      <bpmn2:outgoing>FR</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+    <bpmn2:serviceTask id="Quick" name="Quick">
+      <bpmn2:extensionElements><ash:taskConfig action="quick_check"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FQ</bpmn2:incoming>
+      <bpmn2:outgoing>FQ1</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:userTask id="Review" name="Review">
+      <bpmn2:extensionElements>
+        <ash:taskConfig>
+          <ash:candidates><ash:candidate kind="role" of="approver"/></ash:candidates>
+          <ash:outcomes><ash:outcome name="approved"/><ash:outcome name="rejected"/></ash:outcomes>
+        </ash:taskConfig>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>FR</bpmn2:incoming>
+      <bpmn2:outgoing>FR1</bpmn2:outgoing>
+    </bpmn2:userTask>
+    <bpmn2:exclusiveGateway id="Decide" default="FRej">
+      <bpmn2:incoming>FR1</bpmn2:incoming>
+      <bpmn2:outgoing>FApp</bpmn2:outgoing>
+      <bpmn2:outgoing>FRej</bpmn2:outgoing>
+    </bpmn2:exclusiveGateway>
+    <bpmn2:serviceTask id="Extra" name="Extra">
+      <bpmn2:extensionElements><ash:taskConfig action="extra_check"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FApp</bpmn2:incoming>
+      <bpmn2:outgoing>FX</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:endEvent id="End_rejected"><bpmn2:incoming>FRej</bpmn2:incoming></bpmn2:endEvent>
+    <bpmn2:parallelGateway id="Join_1">
+      <bpmn2:incoming>FQ1</bpmn2:incoming>
+      <bpmn2:incoming>FX</bpmn2:incoming>
+      <bpmn2:outgoing>FJ</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+    <bpmn2:serviceTask id="After" name="After">
+      <bpmn2:extensionElements><ash:taskConfig action="after_join"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FJ</bpmn2:incoming>
+      <bpmn2:outgoing>FE</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>FE</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F0" sourceRef="Start_1" targetRef="Fork_1"/>
+    <bpmn2:sequenceFlow id="FQ" sourceRef="Fork_1" targetRef="Quick"/>
+    <bpmn2:sequenceFlow id="FR" sourceRef="Fork_1" targetRef="Review"/>
+    <bpmn2:sequenceFlow id="FQ1" sourceRef="Quick" targetRef="Join_1"/>
+    <bpmn2:sequenceFlow id="FR1" sourceRef="Review" targetRef="Decide"/>
+    <bpmn2:sequenceFlow id="FApp" sourceRef="Decide" targetRef="Extra">
+      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression" language="feel">task.outcome = "approved"</bpmn2:conditionExpression>
+    </bpmn2:sequenceFlow>
+    <bpmn2:sequenceFlow id="FRej" sourceRef="Decide" targetRef="End_rejected"/>
+    <bpmn2:sequenceFlow id="FX" sourceRef="Extra" targetRef="Join_1"/>
+    <bpmn2:sequenceFlow id="FJ" sourceRef="Join_1" targetRef="After"/>
+    <bpmn2:sequenceFlow id="FE" sourceRef="After" targetRef="End_1"/>
+  </bpmn2:process>
+</bpmn2:definitions>

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+Two branches of different lengths meeting at one parallel join. The coverage branch is three
+nodes long (a check, a follow-up and an exclusive merge); the allergy branch is one. Whichever
+reaches the join first must wait for the other however far upstream it still is, and the visit
+is booked exactly once.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_join_two_step_branch"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+
+  <bpmn2:process id="Process_join_two_step_branch" name="Two-step branch" isExecutable="true">
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>Flow_1</bpmn2:outgoing></bpmn2:startEvent>
+
+    <bpmn2:parallelGateway id="Fork_1">
+      <bpmn2:incoming>Flow_1</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_Coverage</bpmn2:outgoing>
+      <bpmn2:outgoing>Flow_Allergy</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+
+    <bpmn2:serviceTask id="CoverageCheck" name="Check coverage">
+      <bpmn2:extensionElements><ash:taskConfig action="check_coverage"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Coverage</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_Covered</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:serviceTask id="OfferSelfPay" name="Offer self-pay">
+      <bpmn2:extensionElements><ash:taskConfig action="offer_self_pay"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Covered</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_SelfPay</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:exclusiveGateway id="CoverageSettled" default="Flow_Settled">
+      <bpmn2:incoming>Flow_SelfPay</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_Settled</bpmn2:outgoing>
+    </bpmn2:exclusiveGateway>
+
+    <bpmn2:serviceTask id="AllergyCheck" name="Check allergies">
+      <bpmn2:extensionElements><ash:taskConfig action="check_allergies"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Allergy</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_AllergyDone</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:parallelGateway id="Join_1">
+      <bpmn2:incoming>Flow_Settled</bpmn2:incoming>
+      <bpmn2:incoming>Flow_AllergyDone</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_Book</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+
+    <bpmn2:serviceTask id="BookVisit" name="Book the visit">
+      <bpmn2:extensionElements><ash:taskConfig action="book_visit"/></bpmn2:extensionElements>
+      <bpmn2:incoming>Flow_Book</bpmn2:incoming>
+      <bpmn2:outgoing>Flow_End</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>Flow_End</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Fork_1"/>
+    <bpmn2:sequenceFlow id="Flow_Coverage" sourceRef="Fork_1" targetRef="CoverageCheck"/>
+    <bpmn2:sequenceFlow id="Flow_Allergy" sourceRef="Fork_1" targetRef="AllergyCheck"/>
+    <bpmn2:sequenceFlow id="Flow_Covered" sourceRef="CoverageCheck" targetRef="OfferSelfPay"/>
+    <bpmn2:sequenceFlow id="Flow_SelfPay" sourceRef="OfferSelfPay" targetRef="CoverageSettled"/>
+    <bpmn2:sequenceFlow id="Flow_Settled" sourceRef="CoverageSettled" targetRef="Join_1"/>
+    <bpmn2:sequenceFlow id="Flow_AllergyDone" sourceRef="AllergyCheck" targetRef="Join_1"/>
+    <bpmn2:sequenceFlow id="Flow_Book" sourceRef="Join_1" targetRef="BookVisit"/>
+    <bpmn2:sequenceFlow id="Flow_End" sourceRef="BookVisit" targetRef="End_1"/>
+  </bpmn2:process>
+</bpmn2:definitions>
