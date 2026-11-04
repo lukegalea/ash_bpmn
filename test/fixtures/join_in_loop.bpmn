@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+A fork and join inside a loop. Each pass through the join uses that pass's arrivals and no
+others, so the node after it runs once per pass.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_join_in_loop"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_join_in_loop" name="Join in a loop" isExecutable="true">
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>F0</bpmn2:outgoing></bpmn2:startEvent>
+    <bpmn2:exclusiveGateway id="Merge" default="FM">
+      <bpmn2:incoming>F0</bpmn2:incoming>
+      <bpmn2:incoming>FAgain</bpmn2:incoming>
+      <bpmn2:outgoing>FM</bpmn2:outgoing>
+    </bpmn2:exclusiveGateway>
+    <bpmn2:parallelGateway id="Fork_1">
+      <bpmn2:incoming>FM</bpmn2:incoming>
+      <bpmn2:outgoing>FA</bpmn2:outgoing>
+      <bpmn2:outgoing>FB</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+    <bpmn2:serviceTask id="A1" name="A1">
+      <bpmn2:extensionElements><ash:taskConfig action="a1"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FA</bpmn2:incoming>
+      <bpmn2:outgoing>FA1</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:serviceTask id="B1" name="B1">
+      <bpmn2:extensionElements><ash:taskConfig action="b1"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FB</bpmn2:incoming>
+      <bpmn2:outgoing>FB1</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:serviceTask id="B2" name="B2">
+      <bpmn2:extensionElements><ash:taskConfig action="b2"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FB1</bpmn2:incoming>
+      <bpmn2:outgoing>FB2</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:parallelGateway id="Join_1">
+      <bpmn2:incoming>FA1</bpmn2:incoming>
+      <bpmn2:incoming>FB2</bpmn2:incoming>
+      <bpmn2:outgoing>FJ</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+    <bpmn2:serviceTask id="Tally" name="Tally">
+      <bpmn2:extensionElements><ash:taskConfig action="tally"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FJ</bpmn2:incoming>
+      <bpmn2:outgoing>FT</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:userTask id="Review" name="Review">
+      <bpmn2:extensionElements>
+        <ash:taskConfig>
+          <ash:candidates><ash:candidate kind="role" of="approver"/></ash:candidates>
+          <ash:outcomes><ash:outcome name="again"/><ash:outcome name="done"/></ash:outcomes>
+        </ash:taskConfig>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>FT</bpmn2:incoming>
+      <bpmn2:outgoing>FR1</bpmn2:outgoing>
+    </bpmn2:userTask>
+    <bpmn2:exclusiveGateway id="Decide" default="FDone">
+      <bpmn2:incoming>FR1</bpmn2:incoming>
+      <bpmn2:outgoing>FAgain</bpmn2:outgoing>
+      <bpmn2:outgoing>FDone</bpmn2:outgoing>
+    </bpmn2:exclusiveGateway>
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>FDone</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F0" sourceRef="Start_1" targetRef="Merge"/>
+    <bpmn2:sequenceFlow id="FM" sourceRef="Merge" targetRef="Fork_1"/>
+    <bpmn2:sequenceFlow id="FA" sourceRef="Fork_1" targetRef="A1"/>
+    <bpmn2:sequenceFlow id="FB" sourceRef="Fork_1" targetRef="B1"/>
+    <bpmn2:sequenceFlow id="FA1" sourceRef="A1" targetRef="Join_1"/>
+    <bpmn2:sequenceFlow id="FB1" sourceRef="B1" targetRef="B2"/>
+    <bpmn2:sequenceFlow id="FB2" sourceRef="B2" targetRef="Join_1"/>
+    <bpmn2:sequenceFlow id="FJ" sourceRef="Join_1" targetRef="Tally"/>
+    <bpmn2:sequenceFlow id="FT" sourceRef="Tally" targetRef="Review"/>
+    <bpmn2:sequenceFlow id="FR1" sourceRef="Review" targetRef="Decide"/>
+    <bpmn2:sequenceFlow id="FAgain" sourceRef="Decide" targetRef="Merge">
+      <bpmn2:conditionExpression xsi:type="bpmn2:tFormalExpression" language="feel">task.outcome = "again"</bpmn2:conditionExpression>
+    </bpmn2:sequenceFlow>
+    <bpmn2:sequenceFlow id="FDone" sourceRef="Decide" targetRef="End_1"/>
+  </bpmn2:process>
+</bpmn2:definitions>

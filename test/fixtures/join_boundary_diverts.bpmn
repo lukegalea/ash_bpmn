@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+A join one of whose branches can leave by an error boundary that does not lead back to it.
+While the coverage check is still to run the join waits for it; once the check has thrown and
+its branch has ended at its own end event, nothing can arrive any more and the join fires.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_join_boundary_diverts"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+
+  <bpmn2:error id="Error_Coverage" name="Coverage denied" errorCode="COVERAGE_DENIED"/>
+
+  <bpmn2:process id="Process_join_boundary_diverts" name="Boundary diverts" isExecutable="true">
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>F0</bpmn2:outgoing></bpmn2:startEvent>
+
+    <bpmn2:parallelGateway id="Fork_1">
+      <bpmn2:incoming>F0</bpmn2:incoming>
+      <bpmn2:outgoing>FC</bpmn2:outgoing>
+      <bpmn2:outgoing>FQ</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+
+    <bpmn2:serviceTask id="CoverageCheck" name="Check coverage">
+      <bpmn2:extensionElements><ash:taskConfig action="check_coverage"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FC</bpmn2:incoming>
+      <bpmn2:outgoing>FC1</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:boundaryEvent id="CoverageDenied" name="Coverage denied" attachedToRef="CoverageCheck">
+      <bpmn2:outgoing>FD</bpmn2:outgoing>
+      <bpmn2:errorEventDefinition id="ErrDef_Coverage" errorRef="Error_Coverage"/>
+    </bpmn2:boundaryEvent>
+
+    <bpmn2:serviceTask id="NotifyDenied" name="Notify denied">
+      <bpmn2:extensionElements><ash:taskConfig action="notify_denied"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FD</bpmn2:incoming>
+      <bpmn2:outgoing>FD1</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_denied"><bpmn2:incoming>FD1</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:serviceTask id="Quick" name="Quick check">
+      <bpmn2:extensionElements><ash:taskConfig action="quick_check"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FQ</bpmn2:incoming>
+      <bpmn2:outgoing>FQ1</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:parallelGateway id="Join_1">
+      <bpmn2:incoming>FC1</bpmn2:incoming>
+      <bpmn2:incoming>FQ1</bpmn2:incoming>
+      <bpmn2:outgoing>FJ</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+
+    <bpmn2:serviceTask id="After" name="After the join">
+      <bpmn2:extensionElements><ash:taskConfig action="after_join"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FJ</bpmn2:incoming>
+      <bpmn2:outgoing>FE</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>FE</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F0" sourceRef="Start_1" targetRef="Fork_1"/>
+    <bpmn2:sequenceFlow id="FC" sourceRef="Fork_1" targetRef="CoverageCheck"/>
+    <bpmn2:sequenceFlow id="FQ" sourceRef="Fork_1" targetRef="Quick"/>
+    <bpmn2:sequenceFlow id="FC1" sourceRef="CoverageCheck" targetRef="Join_1"/>
+    <bpmn2:sequenceFlow id="FD" sourceRef="CoverageDenied" targetRef="NotifyDenied"/>
+    <bpmn2:sequenceFlow id="FD1" sourceRef="NotifyDenied" targetRef="End_denied"/>
+    <bpmn2:sequenceFlow id="FQ1" sourceRef="Quick" targetRef="Join_1"/>
+    <bpmn2:sequenceFlow id="FJ" sourceRef="Join_1" targetRef="After"/>
+    <bpmn2:sequenceFlow id="FE" sourceRef="After" targetRef="End_1"/>
+  </bpmn2:process>
+</bpmn2:definitions>

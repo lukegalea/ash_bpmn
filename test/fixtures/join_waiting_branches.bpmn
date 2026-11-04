@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+
+Three branches into one parallel join: one parked on a user task two nodes back, one parked
+on a receive task two nodes back, and one that arrives at once. Parked branches are branches
+still to come, and the join waits for both.
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   id="Definitions_join_waiting_branches"
+                   targetNamespace="https://github.com/lukegalea/ash_bpmn/ns">
+  <bpmn2:process id="Process_join_waiting_branches" name="Waiting branches" isExecutable="true">
+    <bpmn2:startEvent id="Start_1"><bpmn2:outgoing>F0</bpmn2:outgoing></bpmn2:startEvent>
+    <bpmn2:parallelGateway id="Fork_1">
+      <bpmn2:incoming>F0</bpmn2:incoming>
+      <bpmn2:outgoing>FR</bpmn2:outgoing>
+      <bpmn2:outgoing>FP</bpmn2:outgoing>
+      <bpmn2:outgoing>FQ</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+    <bpmn2:userTask id="Review" name="Review">
+      <bpmn2:extensionElements>
+        <ash:taskConfig>
+          <ash:candidates><ash:candidate kind="role" of="approver"/></ash:candidates>
+          <ash:outcomes><ash:outcome name="approved"/></ash:outcomes>
+        </ash:taskConfig>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>FR</bpmn2:incoming>
+      <bpmn2:outgoing>FR1</bpmn2:outgoing>
+    </bpmn2:userTask>
+    <bpmn2:serviceTask id="FileReview" name="FileReview">
+      <bpmn2:extensionElements><ash:taskConfig action="file_review"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FR1</bpmn2:incoming>
+      <bpmn2:outgoing>FR2</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:receiveTask id="AwaitPayment" name="Await payment">
+      <bpmn2:incoming>FP</bpmn2:incoming>
+      <bpmn2:outgoing>FP1</bpmn2:outgoing>
+      <bpmn2:extensionElements>
+        <ash:subscribe resource="payment" action="create"
+                       correlate="subject.id" match="data.invoice_id"/>
+      </bpmn2:extensionElements>
+    </bpmn2:receiveTask>
+    <bpmn2:serviceTask id="Settle" name="Settle">
+      <bpmn2:extensionElements><ash:taskConfig action="settle"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FP1</bpmn2:incoming>
+      <bpmn2:outgoing>FP2</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:serviceTask id="Quick" name="Quick">
+      <bpmn2:extensionElements><ash:taskConfig action="quick_check"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FQ</bpmn2:incoming>
+      <bpmn2:outgoing>FQ1</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:parallelGateway id="Join_1">
+      <bpmn2:incoming>FR2</bpmn2:incoming>
+      <bpmn2:incoming>FP2</bpmn2:incoming>
+      <bpmn2:incoming>FQ1</bpmn2:incoming>
+      <bpmn2:outgoing>FJ</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+    <bpmn2:serviceTask id="After" name="After">
+      <bpmn2:extensionElements><ash:taskConfig action="after_join"/></bpmn2:extensionElements>
+      <bpmn2:incoming>FJ</bpmn2:incoming>
+      <bpmn2:outgoing>FE</bpmn2:outgoing>
+    </bpmn2:serviceTask>
+    <bpmn2:endEvent id="End_1"><bpmn2:incoming>FE</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F0" sourceRef="Start_1" targetRef="Fork_1"/>
+    <bpmn2:sequenceFlow id="FR" sourceRef="Fork_1" targetRef="Review"/>
+    <bpmn2:sequenceFlow id="FP" sourceRef="Fork_1" targetRef="AwaitPayment"/>
+    <bpmn2:sequenceFlow id="FQ" sourceRef="Fork_1" targetRef="Quick"/>
+    <bpmn2:sequenceFlow id="FR1" sourceRef="Review" targetRef="FileReview"/>
+    <bpmn2:sequenceFlow id="FR2" sourceRef="FileReview" targetRef="Join_1"/>
+    <bpmn2:sequenceFlow id="FP1" sourceRef="AwaitPayment" targetRef="Settle"/>
+    <bpmn2:sequenceFlow id="FP2" sourceRef="Settle" targetRef="Join_1"/>
+    <bpmn2:sequenceFlow id="FQ1" sourceRef="Quick" targetRef="Join_1"/>
+    <bpmn2:sequenceFlow id="FJ" sourceRef="Join_1" targetRef="After"/>
+    <bpmn2:sequenceFlow id="FE" sourceRef="After" targetRef="End_1"/>
+  </bpmn2:process>
+</bpmn2:definitions>

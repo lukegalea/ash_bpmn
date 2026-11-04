@@ -553,31 +553,37 @@ outcome `:expired`, record `:task_expired`, then advance the token with
 cancels remaining timer jobs (`Oban.cancel_job/1`) — the bookkeeping the plan §6.4
 demands.
 
-Join semantics (corrected to match the implementation, 2026-09-07 — the previous
-paragraph said a dead sibling meant the join could never fire; the code has never
-behaved that way): when a token arrives at a join node, do not consume-and-advance;
-within one step (§6.2.4, under the instance lock) retire it (`:dead` arriving from an
-advance, `:consumed` from a task completion), then:
+Join semantics (revised 2026-11-04; the 2026-09-07 rule this replaces looked only at a
+join's *immediate* source nodes, and only for `:active`/`:executing` tokens, so a sibling
+branch two nodes long, or parked one node back, read as "will never arrive" and the join fired
+twice): when a token arrives at a join node, within one step (§6.2.4, under the instance lock)
+kill it and record a `:node_entered` event with `"join" => "arrived"`. Then:
 
-1. Count tokens at the same node (same instance, same fork) with status :consumed
-   **or :dead** — a dead token counts as arrived. When the count reaches the
-   `waits_for` size, mint one fresh :active token at the join and enqueue its advance.
-2. Otherwise ask whether the missing siblings can still arrive: does any source node
-   of a not-yet-arrived wait hold a token with status :active or :executing? If yes →
-   wait (a parked human task keeps its branch live and its join waiting). If no →
-   **dead-branch reconciliation**: the missing siblings can never arrive — an
-   upstream exclusive gateway pruned their branch — and the join releases
-   immediately.
+1. The join's *pending* arrivals are its `"arrived"` events whose token is not named in the
+   `"arrived_token_ids"` of any `:node_completed` event at the join. A firing names the
+   arrivals it used, so a join inside a loop starts every pass with nothing pending.
+2. Ask whether anything can still arrive: a live token (`:active`, `:executing` or
+   `:waiting`) on any node *upstream* of the join — any node with a path to it that does not
+   pass through the join, walking sequence flows backwards and from a boundary event to the
+   activity it is attached to — or a live token at the join itself (an arrival whose advance
+   has not run yet), or another upstream join with pending arrivals. If yes → wait. If no →
+   fire: record a `:node_completed` event naming the pending arrivals, mint one fresh
+   `:active` token past the join and enqueue its advance.
+3. Because a branch can be taken away from the join *after* its siblings arrived — an
+   exclusive gateway choosing the other path, a boundary leading elsewhere, a branch reaching
+   its own end — every advance step that does not end the instance re-asks (2) for each join
+   with pending arrivals, repeating until nothing fires; an end event asks before deciding
+   whether it was the last branch. An instance that is not `:running` never releases a join:
+   a `:failed` instance's failed branch is dead until a retry brings it back.
 
-This is BPMN dead-path elimination, implemented structurally (query the sibling
-branches for live tokens) rather than by propagating dead tokens through the graph.
-It is deliberately *not* a strict AND-join: the compiler permits
-fork → exclusive-branch-prune → join, and a strict join without reconciliation would
-deadlock in every such graph. Note the consequence: this join already behaves like an
-inclusive join over its incoming flows. If `inclusiveGateway` is ever added, this rule
-*is* its join semantics and should be promoted to the shared implementation — recorded
-here (and in `docs/bpmn-event-dimension/05-hygiene.md` #9) so that decision is made
-deliberately, not discovered by accretion.
+When every incoming flow has had an arrival this is the BPMN parallel join. When an upstream
+choice pruned a branch it is BPMN's inclusive-join rule: the join stops waiting for a branch
+no token can reach any more. It is deliberately *not* a strict AND-join as Zeebe implements
+one (fire when every incoming flow has a token, otherwise wait forever): the compiler permits
+fork → exclusive-branch-prune → join, and a strict join would deadlock in every such graph. If
+`inclusiveGateway` is ever added, this rule *is* its join semantics and should be promoted to
+the shared implementation. No dead tokens are propagated through the graph; the question is
+answered structurally from the live tokens and the snapshot.
 
 Sweep (`AshBpmn.Runtime.SweepWorker`): plain Oban worker the host may cron
 (`config :ash_oban`/Oban plugins). For each :running instance:

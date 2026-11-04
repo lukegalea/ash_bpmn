@@ -126,19 +126,41 @@ not the same thing happening to a branch.
 
 ## Joins
 
-A join node waits for all branches named in its `waits_for`. Each arriving token
-is consumed and counted; when the count of consumed arrivals for a `fork_id`
-reaches the expected arity, one fresh token is minted past the join, with an
-advance job of its own, and the process continues. Each arrival is one step (see
-"Each step commits as one" below) under the instance's row lock, so two branches
-finishing at the same moment are counted one after the other: the join fires
-exactly once, and neither arrival misses the other.
+A parallel join fires once, when no branch that could still reach it is left.
+Each arriving token dies at the join and its arrival is recorded as a
+`:node_entered` event with `"join" => "arrived"`. The join fires — one fresh
+token past it, with an advance job of its own, and a `:node_completed` event
+whose `"arrived_token_ids"` names the arrivals it used — once no live token
+(`:active`, `:executing` or `:waiting`) stands anywhere it could still arrive
+from:
 
-A dead sibling branch means the join can never fire — the compiler rejects the
-mixed-gateway patterns that create this shape, and the reconciliation sweep
-reports any join that has been waiting with dead siblings as a stuck condition
-(an event an operator can query), because converting a hang into a different
-wrong answer via join timeouts is a choice, and it is not this library's default.
+* on any node with a path to the join that does not pass through the join
+  itself, however many nodes back it is, including a token parked on a user
+  task, a receive task, a timer or a call activity;
+* on a boundary event of such a node, or on the node a boundary is attached to;
+* at the join itself, with its own advance still to run;
+* at another join upstream that is holding arrivals of its own.
+
+When every incoming flow has had a branch arrive this is the BPMN parallel
+join: one token per branch, and the node after the join runs once, after all of
+them. Each firing uses only the arrivals it names, so a join inside a loop
+starts each pass with nothing counted.
+
+When an upstream exclusive gateway, or a boundary event, takes a branch
+somewhere the join cannot be reached from, the join stops waiting for it — the
+inclusive-join rule BPMN gives the inclusive gateway, which this engine has
+always applied to a parallel join fed through an exclusive choice. A branch can
+be taken away *after* its sibling has arrived, so every step that does not end
+the instance asks the same question of each join holding arrivals, and an end
+event asks it before deciding whether it was the last branch.
+
+Each arrival is one step (see "Each step commits as one" below) under the
+instance's row lock, so two branches finishing at the same moment are counted
+one after the other: the join fires exactly once, and neither arrival misses
+the other. A redelivered or retried arrival job finds its token already dead and
+skips. An instance that is not `:running` — a `:failed` one waiting for
+`AshBpmn.retry_instance/2` — never releases a join early: its failed branch
+comes back on retry and arrives in the ordinary way.
 
 ## Terminating an instance
 
@@ -249,8 +271,8 @@ never pretends to undo something your action already did.
 
 Each step also takes its instance's row lock, so the steps of one instance
 commit one at a time. That is what gives "am I the last branch?" one answer: an
-end event asking whether any branch is still live, or a join counting arrivals,
-sees every earlier step of the instance committed. Only the writes are
+end event asking whether any branch is still live, or a join asking whether any
+branch can still reach it, sees every earlier step of the instance committed. Only the writes are
 serialized; parallel branches still run their host work concurrently.
 
 Starting an instance, completing a task, and the timer, boundary-timer and

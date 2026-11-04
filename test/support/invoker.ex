@@ -33,8 +33,15 @@ defmodule AshBpmn.Test.Invoker do
     ensure_result_table()
 
     if :ets.whereis(@table) != :undefined do
-      :ets.insert(@table, {System.unique_integer([:positive]), action, DateTime.utc_now()})
-      :ets.insert(@ctx_table, {System.unique_integer([:positive]), action, ctx})
+      # Monotonic, because `recorded_calls/0` and `recorded_ctxs/0` sort by this key and
+      # promise call order: a plain unique integer is only unique, and calls made on
+      # different schedulers can sort out of order.
+      :ets.insert(
+        @table,
+        {System.unique_integer([:positive, :monotonic]), action, DateTime.utc_now()}
+      )
+
+      :ets.insert(@ctx_table, {System.unique_integer([:positive, :monotonic]), action, ctx})
     end
 
     current_result(action)

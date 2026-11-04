@@ -1146,124 +1146,38 @@ defmodule AshBpmn do
     end)
   end
 
+  # A parallel join after a task is entered like any other node: the token goes to the join
+  # and the join's own advance decides whether it fires, under the instance lock, by the same
+  # rule as every other arrival (see `AshBpmn.Runtime.AdvanceWorker`). This path used to judge
+  # the join itself, by a weaker rule of its own.
   defp follow_flow(resources, instance, token, graph, flow, outcome, scope) do
     next_node_id = flow["to"]
-    next_node = graph["nodes"][next_node_id]
 
-    if next_node do
-      # Check if this is a join — handle join semantics
-      join_info = graph["joins"][next_node_id]
+    if graph["nodes"][next_node_id] do
+      consumed = consume_token!(resources, token, scope)
+      FlightView.token_moved(instance, consumed)
 
-      if join_info do
-        handle_join(resources, instance, token, graph, next_node_id, join_info, outcome, scope)
-      else
-        consumed = consume_token!(resources, token, scope)
-        FlightView.token_moved(instance, consumed)
-
-        new_token =
-          resources.token.create!(
-            %{
-              instance_id: instance.id,
-              node_id: next_node_id,
-              status: :active
-            },
-            Scope.engine(scope)
-          )
-
-        FlightView.token_moved(instance, new_token)
-
-        Oban.insert(
-          AshBpmn.Runtime.AdvanceWorker,
-          Scope.to_job_args(scope, %{
-            "instance_id" => instance.id,
-            "token_id" => new_token.id,
-            "node_id" => next_node_id,
-            "task_outcome" => outcome && to_string(outcome)
-          })
-        )
-      end
-    end
-  end
-
-  defp handle_join(resources, instance, token, graph, join_node_id, join_info, _outcome, scope) do
-    consumed = consume_token!(resources, token, scope)
-    FlightView.token_moved(instance, consumed)
-
-    # Count how many tokens have been consumed at this join node
-    waits_for = join_info["waits_for"] || []
-
-    _consumed_at_join =
-      resources.token
-      |> Ash.Query.for_read(:read)
-      |> Ash.Query.filter(instance_id == ^instance.id)
-      |> Ash.Query.filter(node_id == ^join_node_id)
-      |> Ash.Query.filter(status == :consumed)
-      |> Ash.read!(Scope.engine(scope))
-
-    if length(waits_for) <= 1 do
-      # Non-parallel join — always advance
-      advance_through_join(resources, instance, token, graph, join_node_id, scope)
-    else
-      # Parallel join — check if remaining sibling tokens exist.
-      # If any sibling still has active/executing tokens, wait. Otherwise advance.
-      incoming_nodes =
-        graph["flows"]
-        |> Map.values()
-        |> Enum.filter(fn f -> f["to"] == join_node_id end)
-        |> Enum.map(fn f -> f["from"] end)
-        |> Enum.reject(fn from -> from == token.node_id end)
-
-      has_active_siblings =
-        Enum.any?(incoming_nodes, fn from_node ->
-          resources.token
-          |> Ash.Query.for_read(:read)
-          |> Ash.Query.filter(instance_id == ^instance.id)
-          |> Ash.Query.filter(node_id == ^from_node)
-          |> Ash.Query.filter(status in [:active, :executing])
-          |> Ash.read_one!(Scope.engine(scope))
-        end)
-
-      if has_active_siblings do
-        :ok
-      else
-        advance_through_join(resources, instance, token, graph, join_node_id, scope)
-      end
-    end
-  end
-
-  defp advance_through_join(resources, instance, _token, graph, join_node_id, scope) do
-    outgoing =
-      graph["flows"]
-      |> Map.values()
-      |> Enum.filter(fn flow -> flow["from"] == join_node_id end)
-
-    case outgoing do
-      [flow | _] ->
-        next_node_id = flow["to"]
-
-        new_token =
-          resources.token.create!(
-            %{
-              instance_id: instance.id,
-              node_id: next_node_id,
-              status: :active
-            },
-            Scope.engine(scope)
-          )
-
-        FlightView.token_moved(instance, new_token)
-
-        Oban.insert(
-          AshBpmn.Runtime.AdvanceWorker,
-          Scope.to_job_args(scope, %{
-            "instance_id" => instance.id,
-            "token_id" => new_token.id,
-            "node_id" => next_node_id
-          })
+      new_token =
+        resources.token.create!(
+          %{
+            instance_id: instance.id,
+            node_id: next_node_id,
+            status: :active
+          },
+          Scope.engine(scope)
         )
 
-      _ ->
-        :ok
+      FlightView.token_moved(instance, new_token)
+
+      Oban.insert(
+        AshBpmn.Runtime.AdvanceWorker,
+        Scope.to_job_args(scope, %{
+          "instance_id" => instance.id,
+          "token_id" => new_token.id,
+          "node_id" => next_node_id,
+          "task_outcome" => outcome && to_string(outcome)
+        })
+      )
     end
   end
 
