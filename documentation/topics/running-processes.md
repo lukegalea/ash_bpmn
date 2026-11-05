@@ -394,7 +394,18 @@ sleep in the engine's test suite, and your host tests get the same determinism.
 
 ## Cancellation
 
-`AshBpmn.cancel_instance!/1` marks the instance `:cancelled`, kills its active
-tokens and cancels open human tasks (with events). It does not compensate
-completed work — compensation is a phase-3 concern this library deliberately does
-not ship (see [what it refuses](what-it-refuses.md)).
+`AshBpmn.cancel_instance/2` marks the instance `:cancelled`, kills its live
+tokens, cancels its open human tasks and their clocks, and does the same to every
+running instance its call activities started, all the way down the call tree. It
+is one step under the instance's lock: all of it commits, or none of it does. Pass
+the person as `actor:` and say why with `reason:`; each `:instance_cancelled`
+event records `"cancelled_by_id"` and `"reason"`, and a descendant's also records
+`"cascaded_from_instance_id"`. An instance that is not `:running` is refused and
+nothing changes.
+
+```elixir
+AshBpmn.cancel_instance(instance, actor: current_user, reason: "withdrawn by the clinic")
+```
+
+Cancelling does not compensate completed work; compensation is something this
+library deliberately does not ship (see [what it refuses](what-it-refuses.md)).
