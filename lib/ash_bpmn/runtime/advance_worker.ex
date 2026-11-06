@@ -1217,6 +1217,11 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   # out, not work about something else -- and a child whose subject had to be computed would
   # need a mapping vocabulary that nothing has asked for. The depth is inherited so a process
   # that calls itself is bounded by the same counter as everything else.
+  #
+  # So is `started_by_id`. The person accountable for the parent is accountable for the work
+  # it broke out; the engine starts the child, but the engine's actor is not who caused it,
+  # and a child naming nobody (or the engine) cannot act for the person who did. A parent
+  # that names nobody passes nobody on: the engine's system actor has no id to fall back to.
   defp start_child_instance(resources, ctx, spec, scope) do
     instance = ctx[:instance]
 
@@ -1232,6 +1237,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
            parent_instance_id: instance.id,
            parent_token_id: ctx[:token] && ctx[:token].id,
            trigger_depth: (instance.trigger_depth || 0) + 1,
+           started_by_id: instance.started_by_id,
            actor: Map.get(scope, :actor),
            tenant: Map.get(scope, :tenant)
          ) do

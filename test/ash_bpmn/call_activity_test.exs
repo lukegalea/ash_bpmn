@@ -91,6 +91,67 @@ defmodule AshBpmn.CallActivityTest do
     assert child.trigger_depth == (reload(parent).trigger_depth || 0) + 1
   end
 
+  describe "who started it" do
+    test "the child is accountable to whoever started the parent" do
+      starter = Ash.UUID.generate()
+      {parent, _} = start!(child: "approval", started_by_id: starter)
+      [child] = children_of(parent)
+
+      assert reload(parent).started_by_id == starter
+      assert child.started_by_id == starter
+    end
+
+    test "a grandchild is accountable to the same person" do
+      starter = Ash.UUID.generate()
+      grandchild_key = key()
+      publish!("access_request.bpmn", grandchild_key)
+      middle = publish_parent!(grandchild_key)
+      top = publish_parent!(middle.key)
+
+      parent = start_parent!(top, started_by_id: starter)
+      [child] = children_of(parent)
+      [grandchild] = children_of(child)
+
+      assert child.started_by_id == starter
+      assert grandchild.started_by_id == starter
+    end
+
+    test "a parent that names nobody passes nobody on, not the engine" do
+      {parent, _} = start!(child: "approval")
+      [child] = children_of(parent)
+
+      assert reload(parent).started_by_id == nil
+      assert child.started_by_id == nil
+    end
+
+    test "an instance started outside a call activity keeps the starter it was given" do
+      starter = Ash.UUID.generate()
+      other = Ash.UUID.generate()
+      {parent, child_key} = start!(child: "approval", started_by_id: starter)
+
+      # Started directly, under the same subject and process key as the call activity's
+      # child, but not by it: it inherits nothing from the running parent.
+      {:ok, direct} =
+        AshBpmn.start_instance(AshBpmn.Test.Domain,
+          process: child_key,
+          subject_type: reload(parent).subject_type,
+          subject_id: reload(parent).subject_id,
+          started_by_id: other
+        )
+
+      {:ok, unnamed} =
+        AshBpmn.start_instance(AshBpmn.Test.Domain,
+          process: child_key,
+          subject_type: reload(parent).subject_type,
+          subject_id: reload(parent).subject_id
+        )
+
+      assert direct.started_by_id == other
+      assert direct.parent_instance_id == nil
+      assert unnamed.started_by_id == nil
+    end
+  end
+
   describe "refusing" do
     test "a call activity with no ash:process is refused" do
       xml =
@@ -204,7 +265,7 @@ defmodule AshBpmn.CallActivityTest do
     Definition.publish!(defn)
   end
 
-  defp start_parent!(parent_defn) do
+  defp start_parent!(parent_defn, opts \\ []) do
     {:ok, subject} =
       AshBpmn.Test.Subject.create!(%{
         name: "ca",
@@ -214,7 +275,10 @@ defmodule AshBpmn.CallActivityTest do
       })
 
     {:ok, parent} =
-      AshBpmn.start_instance(AshBpmn.Test.Domain, definition: parent_defn, subject: subject)
+      AshBpmn.start_instance(
+        AshBpmn.Test.Domain,
+        [definition: parent_defn, subject: subject] ++ Keyword.take(opts, [:started_by_id])
+      )
 
     parent
   end
@@ -252,7 +316,10 @@ defmodule AshBpmn.CallActivityTest do
       })
 
     {:ok, parent} =
-      AshBpmn.start_instance(AshBpmn.Test.Domain, definition: parent_defn, subject: subject)
+      AshBpmn.start_instance(
+        AshBpmn.Test.Domain,
+        [definition: parent_defn, subject: subject] ++ Keyword.take(opts, [:started_by_id])
+      )
 
     {parent, child_key}
   end

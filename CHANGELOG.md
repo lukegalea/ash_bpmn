@@ -16,6 +16,14 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Features:
 
+- **A call activity's child is accountable to whoever started the parent.**
+  The child instance's `started_by_id` is its parent's, as its subject and
+  trigger depth already were, so work a person started still names that person
+  when it is broken out into a child process (and a grandchild). Before, the
+  child was started under the engine's system actor and named nobody. A
+  parent that names nobody passes nobody on; an instance started directly
+  keeps the `started_by_id` (or actor) it is given.
+
 - **Call activities can pin their child's version.** `ash:process` takes the
   `ash:decision` vocabulary: `binding="latest"` (the default) starts whatever
   is published under the key when the token arrives, `binding="pinned"

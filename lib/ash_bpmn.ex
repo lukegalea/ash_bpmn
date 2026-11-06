@@ -63,7 +63,8 @@ defmodule AshBpmn do
       latest. A call activity with a pinned binding passes it. A version that is a draft, has
       been retired or does not exist is refused, as a key with nothing published is.
     * `:parent_instance_id` / `:parent_token_id` — set by a call activity, so the child's
-      completion knows which token is waiting for it.
+      completion knows which token is waiting for it. A call activity also passes its
+      instance's `started_by_id`, so the child is accountable to whoever started the parent.
     * `:trigger_depth` — how many hops produced this instance. Inherited and incremented by
       anything that starts a process from a process; the bound that stops a cycle.
   """
