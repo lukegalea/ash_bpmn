@@ -262,7 +262,10 @@ defmodule TriggerTest.EventSource do
     end
   end
 
-  defp set_flag(key), do: (ensure_tables() && :ets.insert(@counters, {key, true})) || :ok
+  defp set_flag(key) do
+    ensure_tables()
+    :ets.insert(@counters, {key, true})
+  end
 end
 
 defmodule TriggerTest.DecisionResolver do
