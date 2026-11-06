@@ -17,7 +17,7 @@ defmodule AshBpmn.Compiler.Graph do
       if process.is_executable == "true" do
         errors
       else
-        [Errors.error(process_id || "process", "isExecutable must be true") | errors]
+        [Errors.error(process_id, "isExecutable must be true") | errors]
       end
 
     # Collect all nodes and flows

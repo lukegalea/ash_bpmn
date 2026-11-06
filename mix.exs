@@ -16,7 +16,7 @@ defmodule AshBpmn.MixProject do
     [
       app: :ash_bpmn,
       version: @version,
-      elixir: "~> 1.17",
+      elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
       aliases: aliases(),

@@ -12,6 +12,8 @@ See [Conventional Commits](https://conventionalcommits.org) for commit guideline
 
 ## [Unreleased]
 
+Requires Elixir 1.20 or later.
+
 Nothing has been released yet. Everything below is the initial body of work.
 
 ### Features:

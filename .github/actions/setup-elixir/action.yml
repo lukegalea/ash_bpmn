@@ -17,20 +17,18 @@ runs:
   steps:
     - uses: erlef/setup-beam@v1.24.1
       with:
-        # The minor pair from .tool-versions. Pinned to the minor rather than
-        # the patch so a missing prebuilt image for one patch release cannot
-        # break CI.
-        otp-version: "27"
-        elixir-version: "1.18"
+        # The pair from .tool-versions.
+        otp-version: "27.3.4"
+        elixir-version: "1.20.4"
 
     - uses: actions/cache@v6.1.0
       with:
         path: |
           deps
           _build
-        key: ${{ runner.os }}-mix-${{ inputs.mix-env }}-${{ hashFiles('mix.lock') }}
+        key: ${{ runner.os }}-mix-1.20.4-${{ inputs.mix-env }}-${{ hashFiles('mix.lock') }}
         restore-keys: |
-          ${{ runner.os }}-mix-${{ inputs.mix-env }}-
+          ${{ runner.os }}-mix-1.20.4-${{ inputs.mix-env }}-
 
     - name: Install hex and rebar
       shell: bash

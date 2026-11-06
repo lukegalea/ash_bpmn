@@ -75,8 +75,6 @@ defmodule AshBpmn.Triggers.CursorStore.Legacy do
 
   @behaviour AshBpmn.Triggers.CursorStore
 
-  require Ash.Query
-
   alias AshBpmn.Scope
 
   @impl true

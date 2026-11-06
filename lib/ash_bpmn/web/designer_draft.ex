@@ -29,8 +29,6 @@ defmodule AshBpmn.Web.DesignerDraft do
   back somebody else's draft and call the failure a race.
   """
 
-  require Ash.Query
-
   @spec create_or_reread!(module(), String.t(), String.t(), keyword()) :: struct()
   def create_or_reread!(definition_mod, key, xml, opts) do
     definition_mod.create!(
@@ -81,6 +79,4 @@ defmodule AshBpmn.Web.DesignerDraft do
         false
     end)
   end
-
-  defp uniqueness_error?(_), do: false
 end

@@ -163,6 +163,35 @@ defmodule AshBpmn.Web.DesignerLive do
     baseline_mfa = Keyword.get(opts, :baseline, nil)
     customize_mfa = Keyword.get(opts, :customize, nil)
 
+    # A literal compile-time key can never be missing, so the "no process key" error is only
+    # generated when the key is not a literal. The type checker flags that raise as dead code
+    # otherwise.
+    resolve_key_fun =
+      if is_binary(process_key) do
+        quote do
+          defp ash_bpmn_resolve_key(params) do
+            params["key"] || params["process"] || @ash_bpmn_designer_process_key
+          end
+        end
+      else
+        quote do
+          defp ash_bpmn_resolve_key(params) do
+            params["key"] || params["process"] || @ash_bpmn_designer_process_key ||
+              raise """
+              ash_bpmn: the designer has no process key.
+
+              Either pass one at compile time:
+
+                  use AshBpmn.Web.DesignerLive, domain: MyApp.Bpmn, process: "access_request"
+
+              or put it in the route, which is what a multi-process application wants:
+
+                  live "/processes/:key/designer", MyAppWeb.Bpmn.DesignerLive
+              """
+          end
+        end
+      end
+
     quote do
       use Phoenix.LiveView
 
@@ -188,20 +217,7 @@ defmodule AshBpmn.Web.DesignerLive do
       # The route wins over the compile-time option, so one module can serve every process a
       # tenant authors. Neither being present is a configuration error rather than a blank
       # page: the designer has nothing to open.
-      defp ash_bpmn_resolve_key(params) do
-        params["key"] || params["process"] || @ash_bpmn_designer_process_key ||
-          raise """
-          ash_bpmn: the designer has no process key.
-
-          Either pass one at compile time:
-
-              use AshBpmn.Web.DesignerLive, domain: MyApp.Bpmn, process: "access_request"
-
-          or put it in the route, which is what a multi-process application wants:
-
-              live "/processes/:key/designer", MyAppWeb.Bpmn.DesignerLive
-          """
-      end
+      unquote(resolve_key_fun)
 
       # ── Mount & handle_params ────────────────────────────────────────────
 
