@@ -89,7 +89,6 @@ defmodule AshBpmnDevWeb.InstanceListLive do
 
   use Phoenix.LiveView
 
-  require Ash.Query
 
   @impl true
   def mount(_params, _session, socket) do

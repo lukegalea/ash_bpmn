@@ -214,8 +214,6 @@ defmodule AshBpmn.Test.FixedDefinitionLoader do
 
   @behaviour AshBpmn.DefinitionLoader
 
-  require Ash.Query
-
   @impl true
   def load(resource, _definition_id, _instance, _scope) do
     id = Application.get_env(:ash_bpmn, :test_fixed_definition_id)
