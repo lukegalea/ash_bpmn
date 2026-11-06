@@ -129,6 +129,14 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Fixes:
 
+- **A receive task's lookback scan delivers only the events the wait
+  subscribed to.** The scan read every event in its window and woke the token
+  on any whose `match` expression carried the token's key, whatever its
+  resource or action, so an earlier event of another action on the same
+  record could stand in for the reply. `Correlator.deliver_one/4` now checks
+  the event against the token's `subscription_signature` first, as the live
+  path's query does: the subscribed resource and action, or any action when
+  the subscription names none. A token with no signature is never woken by it.
 - **A receive task's lookback scan reads the event source as its contract says.**
   `AshBpmn.EventSource.stream/3` returns `{:ok, {events, last_sequence}}`. The
   scan a token with a `lookback` window makes as it parks treated the answer as
