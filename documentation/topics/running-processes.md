@@ -94,7 +94,9 @@ for*, never what the subject said — the same line drawn for promoted signals:
   at park so a subject edited during the wait cannot silently change what the
   token is listening for. Nil for both of today's waits.
 - `lookback_until` — how far back a wake may reach for an event that arrived
-  before the token parked. Nil means BPMN-strict, which is the default.
+  before the token parked. Nil means BPMN-strict, which is the default. The
+  scan offers the token only events its `subscription_signature` covers, the
+  same resource and action a live event must have.
 
 ### Leaving the waiting state
 

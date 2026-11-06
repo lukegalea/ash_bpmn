@@ -238,6 +238,123 @@ defmodule AshBpmn.MessageCatchTest do
       end)
     end
 
+    test "an earlier event of another action on the same resource is not delivered" do
+      # The scan reads every kind of event in the log. One for the subscribed resource whose
+      # match carries the token's key, but of an action the token did not subscribe to, is
+      # not the reply it waits for.
+      with_seeded_source(fn ->
+        invoice_id = Ash.UUID.generate()
+
+        AshBpmn.Test.SeededEventSource.put(%{
+          action: :update,
+          action_type: :update,
+          data: %{invoice_id: invoice_id},
+          occurred_at: DateTime.add(DateTime.utc_now(), -60, :second)
+        })
+
+        instance = start_correlated!(invoice_id, lookback: 30)
+
+        assert token_at(instance, "AwaitPayment").status == :waiting
+        assert reload(instance).status == :running
+        refute Enum.any?(events(instance), &(&1.kind == :message_received))
+      end)
+    end
+
+    test "an earlier event of another resource carrying the key is not delivered" do
+      with_seeded_source(fn ->
+        invoice_id = Ash.UUID.generate()
+
+        AshBpmn.Test.SeededEventSource.put(%{
+          resource: "refund",
+          data: %{invoice_id: invoice_id},
+          occurred_at: DateTime.add(DateTime.utc_now(), -60, :second)
+        })
+
+        instance = start_correlated!(invoice_id, lookback: 30)
+
+        assert token_at(instance, "AwaitPayment").status == :waiting
+        assert reload(instance).status == :running
+      end)
+    end
+
+    test "an unsubscribed event ahead of the subscribed one does not stop the scan" do
+      with_seeded_source(fn ->
+        invoice_id = Ash.UUID.generate()
+
+        AshBpmn.Test.SeededEventSource.put(%{
+          action: :update,
+          action_type: :update,
+          data: %{invoice_id: invoice_id},
+          occurred_at: DateTime.add(DateTime.utc_now(), -90, :second)
+        })
+
+        AshBpmn.Test.SeededEventSource.put(%{
+          data: %{invoice_id: invoice_id},
+          occurred_at: DateTime.add(DateTime.utc_now(), -60, :second)
+        })
+
+        instance = start_correlated!(invoice_id, lookback: 30)
+
+        assert reload(instance).status == :completed
+        assert [received] = Enum.filter(events(instance), &(&1.kind == :message_received))
+        assert received.data["event_id"] == "seeded-2"
+      end)
+    end
+
+    test "a subscription with no action takes an earlier event of any action on its resource" do
+      with_seeded_source(fn ->
+        invoice_id = Ash.UUID.generate()
+
+        AshBpmn.Test.SeededEventSource.put(%{
+          action: :update,
+          action_type: :update,
+          data: %{invoice_id: invoice_id},
+          occurred_at: DateTime.add(DateTime.utc_now(), -60, :second)
+        })
+
+        instance = start_correlated!(invoice_id, lookback: 30, action: nil)
+
+        assert reload(instance).status == :completed
+      end)
+    end
+
+    test "a token that subscribed to nothing is never woken by a historical event" do
+      with_seeded_source(fn ->
+        invoice_id = Ash.UUID.generate()
+
+        event =
+          AshBpmn.Test.SeededEventSource.put(%{
+            data: %{invoice_id: invoice_id},
+            occurred_at: DateTime.add(DateTime.utc_now(), -60, :second)
+          })
+
+        instance = start_correlated!(invoice_id, lookback: nil)
+        token = token_at(instance, "AwaitPayment")
+        {:ok, resources} = AshBpmn.Resources.for_domain(AshBpmn.Test.Domain)
+
+        graph =
+          AshBpmn.DefinitionLoader.load!(
+            resources.definition,
+            reload(instance).definition_id,
+            reload(instance),
+            AshBpmn.Scope.system(:sweep)
+          ).graph
+
+        Correlator.deliver_one(
+          %{token | subscription_signature: nil},
+          graph,
+          AshBpmn.Feel.to_feel_value(AshBpmn.Test.SeededEventSource.context(event)),
+          %{
+            event_source: AshBpmn.Test.SeededEventSource,
+            resources: resources,
+            scope: AshBpmn.Scope.system(:sweep)
+          }
+        )
+
+        assert token_at(instance, "AwaitPayment").status == :waiting
+      end)
+    end
+
     test "a lookback that is not a whole number of minutes is refused" do
       # "30min" is the one that matters: it *parses*, as 30 with a remainder, so a guard that
       # only checks the number would accept it and quietly mean thirty minutes when the
@@ -328,6 +445,11 @@ defmodule AshBpmn.MessageCatchTest do
     xml =
       File.read!("test/fixtures/message_catch.bpmn")
       |> String.replace(~s(correlate="subject.id"), ~s(correlate="&quot;#{invoice_id}&quot;"))
+
+    xml =
+      if Keyword.has_key?(opts, :action) and is_nil(opts[:action]),
+        do: String.replace(xml, ~s(resource="payment" action="create"), ~s(resource="payment")),
+        else: xml
 
     xml =
       case opts[:lookback] do

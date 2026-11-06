@@ -136,18 +136,9 @@ defmodule AshBpmn.Triggers.Correlator do
   # distinct node rather than once per token -- a hundred instances parked at the same catch
   # event cost one evaluation, not a hundred.
   defp deliver_to_waiting(feel_ctx, ctx) do
-    event = feel_ctx[@event]
     token_resource = ctx.resources.token
 
-    # A signal event carries the name it broadcast, so its signature is derived from the
-    # *payload* rather than from the resource and action the way a message's is. Both shapes
-    # are queried together because a single read over one partial index beats two.
-    signatures =
-      [
-        "message:#{event["resource"]}:#{event["action"]}",
-        "message:#{event["resource"]}:*",
-        "conditional:#{event["resource"]}"
-      ] ++ signal_signatures(feel_ctx, ctx)
+    signatures = event_signatures(feel_ctx, ctx)
 
     token_resource
     |> Ash.Query.for_read(:read)
@@ -164,6 +155,22 @@ defmodule AshBpmn.Triggers.Correlator do
     error ->
       Logger.error("ash_bpmn catch delivery failed: #{Exception.message(error)}")
       :ok
+  end
+
+  # The subscription signatures this event can wake: the tokens parked for its resource and
+  # action, for any action on its resource, or for a change to its resource.
+  #
+  # A signal event carries the name it broadcast, so its signature is derived from the
+  # *payload* rather than from the resource and action the way a message's is. Both shapes
+  # are queried together because a single read over one partial index beats two.
+  defp event_signatures(feel_ctx, ctx) do
+    event = feel_ctx[@event]
+
+    [
+      "message:#{event["resource"]}:#{event["action"]}",
+      "message:#{event["resource"]}:*",
+      "conditional:#{event["resource"]}"
+    ] ++ signal_signatures(feel_ctx, ctx)
   end
 
   # `["signal:<ref>"]` when this event is a signal row, `[]` otherwise.
@@ -205,16 +212,20 @@ defmodule AshBpmn.Triggers.Correlator do
   Public because the lookback scan needs exactly this and nothing else: it has a token, it
   has a historical event, and it wants the same decision the live path makes. Duplicating
   that decision is how the two drift until an event delivers live and not on replay.
+
+  That decision starts where the live path's query does: the event must be one the token
+  subscribed to (its resource and action, by `subscription_signature`). The live path gets
+  that from the query that found the token; a scan of history has every kind of event in it,
+  so the check is made here. Without it, any event of the same resource whose `match`
+  happened to carry the token's key would wake it, whatever its action. A token with no
+  signature subscribed to nothing and is never woken here.
   """
   @spec deliver_one(struct(), map(), map(), map()) :: :ok
   def deliver_one(token, graph, feel_ctx, ctx) do
-    case expected_key(graph, token.node_id, feel_ctx) do
-      {:ok, key} ->
-        if token.correlation_key == key,
-          do: wake(token, token.node_id, feel_ctx, ctx, graph)
-
-      :skip ->
-        :ok
+    with true <- token.subscription_signature in event_signatures(feel_ctx, ctx),
+         {:ok, key} <- expected_key(graph, token.node_id, feel_ctx),
+         true <- token.correlation_key == key do
+      wake(token, token.node_id, feel_ctx, ctx, graph)
     end
 
     :ok
