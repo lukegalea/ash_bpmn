@@ -382,6 +382,26 @@ defmodule AshBpmn.TypedNodesTest do
       # The ctx keys the resolver sees alongside it.
       assert context.tenant == nil
     end
+
+    test "a decision without a name hands the resolver a nil decision_name" do
+      Application.put_env(:ash_bpmn, :decision_resolver, AshBpmn.Test.RecordingDecisionResolver)
+      Invoker.set_result(:ok)
+
+      unnamed = String.replace(@xml, ~s( name="RiskTier"), "")
+      refute unnamed == @xml
+
+      _defn = create_published_definition!("typed_unnamed", unnamed)
+      subject = create_test_subject!("typed_unnamed_subject", amount: 10)
+
+      {:ok, instance} =
+        AshBpmn.start_instance(AshBpmn.Test.Domain, process: "typed_unnamed", subject: subject)
+
+      assert instance.status == :completed
+
+      assert_received {:decision_context, context}
+      assert Map.fetch!(context, :decision_name) == nil
+      assert context.node_id == "AssessRisk"
+    end
   end
 
   defp create_published_definition!(key, xml) do
