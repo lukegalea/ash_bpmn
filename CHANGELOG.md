@@ -16,6 +16,16 @@ Requires Elixir 1.20 or later.
 
 Nothing has been released yet. Everything below is the initial body of work.
 
+### Bug Fixes:
+
+- **A reconnect no longer replaces unsaved edits in the designer.** Entering
+  the route pushes `load_xml` again on every reconnect, and the hook imported
+  it over whatever was on the canvas. That push now carries `route_key`, and
+  the hook keeps a canvas with unsaved edits to the same key. It also skips
+  the second import of the same document on connect, and importing no longer
+  reports the canvas as modified. Revert, Customize and Discard still replace
+  the canvas.
+
 ### Features:
 
 - **A call activity's child is accountable to whoever started the parent.**

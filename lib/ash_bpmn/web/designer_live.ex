@@ -125,7 +125,9 @@ defmodule AshBpmn.Web.DesignerLive do
     * `dirty_changed` — canvas modified flag
 
   Server → Client (via `push_event` to JS hook):
-    * `load_xml` — replace canvas XML
+    * `load_xml` — replace canvas XML. Carries `route_key` when sent on entering
+      the route, which includes every reconnect; the hook keeps a canvas that
+      already holds the document or has unsaved edits to the same key
     * `collect_xml` — request XML from the modeler
     * `apply_config` — update node extension elements, a sequence flow's
       condition expression, or an exclusive gateway's default flow
@@ -256,7 +258,10 @@ defmodule AshBpmn.Web.DesignerLive do
 
         if connected?(socket) do
           socket =
-            push_event(socket, "load_xml", %{xml: socket.assigns.xml})
+            push_event(socket, "load_xml", %{
+              xml: socket.assigns.xml,
+              route_key: socket.assigns.definition_key
+            })
 
           # A definition that arrives with errors highlights its broken elements
           # right away; the hook replays the payload once the import resolves.
