@@ -623,6 +623,46 @@ function replayPendingErrorHighlight(hook) {
   }
 }
 
+// Imports one document onto the canvas. `_canvasXml` is set before the import
+// starts, so a second delivery of the same document mid-import is recognised.
+function importOntoCanvas(hook, xml, announceClean) {
+  hook._imported = false;
+  hook._canvasXml = xml;
+
+  return hook._modeler
+    .importXML(xml)
+    .then(function () {
+      hook._modeler.get('canvas').zoom('fit-viewport', 'auto');
+      hook._currentSelection = null;
+      hook._imported = true;
+      hook._dirty = false;
+      replayPendingErrorHighlight(hook);
+      if (announceClean) hook.pushEvent('dirty_changed', { dirty: false });
+    })
+    .catch(function (err) {
+      hook._canvasXml = null;
+      pushError(hook, err);
+    });
+}
+
+// The server pushes the route's document (a load_xml with a route_key) every
+// time the route is entered: the first connect, a patch, and every reconnect.
+// The canvas already holds that document after the first, and on a reconnect
+// it may hold edits the server never saw, which must not be replaced.
+function keepsCanvasFor(hook, payload) {
+  if (payload.route_key === undefined) return false;
+
+  var sameRoute = payload.route_key === hook._routeKey;
+  hook._routeKey = payload.route_key;
+
+  var keep = payload.xml === hook._canvasXml || (hook._dirty && sameRoute);
+
+  // A reconnect starts a new server process that believes the canvas is clean.
+  if (keep && hook._dirty) hook.pushEvent('dirty_changed', { dirty: true });
+
+  return keep;
+}
+
 // ---------------------------------------------------------------------------
 // AshBpmnDesigner — Phoenix LiveView hook  (plain object, NOT a class)
 //
@@ -633,7 +673,8 @@ function replayPendingErrorHighlight(hook) {
 //   import_error      %{ message: string }
 //
 // LV → Hook  (handleEvent):
-//   load_xml      %{ xml }
+//   load_xml      %{ xml, route_key? }  — route_key: sent on entering the route;
+//                                         see keepsCanvasFor
 //   collect_xml   %{}
 //   apply_config  %{ id, config, name, condition?, default_flow? }
 //                    condition    — sequence flow FEEL source (blank clears)
@@ -696,7 +737,11 @@ export const AshBpmnDesigner = {
     // -----------------------------------------------------------------------
     // Track dirty via commandStack
     // -----------------------------------------------------------------------
-    eventBus.on('commandStack.changed', function () {
+    // Importing clears the stack, which reports a change nobody made.
+    eventBus.on('commandStack.changed', function (event) {
+      if (event.trigger === 'clear') return;
+
+      this._dirty = true;
       this.pushEvent('dirty_changed', { dirty: true });
     }.bind(this));
 
@@ -704,38 +749,16 @@ export const AshBpmnDesigner = {
     // Initial import from data-xml attribute
     // -----------------------------------------------------------------------
     var xml = this.el.dataset.xml || '';
-    if (xml) {
-      this._modeler
-        .importXML(xml)
-        .then(function () {
-          canvas.zoom('fit-viewport', 'auto');
-          this._currentSelection = null;
-          this._imported = true;
-          replayPendingErrorHighlight(this);
-        }.bind(this))
-        .catch(function (err) {
-          pushError(this, err);
-        }.bind(this));
-    }
+    if (xml) importOntoCanvas(this, xml, false);
 
     // -----------------------------------------------------------------------
     // Server → client event handlers
     // -----------------------------------------------------------------------
 
     this.handleEvent('load_xml', function (payload) {
-      this._imported = false;
-      this._modeler
-        .importXML(payload.xml)
-        .then(function () {
-          canvas.zoom('fit-viewport', 'auto');
-          this._currentSelection = null;
-          this._imported = true;
-          replayPendingErrorHighlight(this);
-          this.pushEvent('dirty_changed', { dirty: false });
-        }.bind(this))
-        .catch(function (err) {
-          pushError(this, err);
-        }.bind(this));
+      if (keepsCanvasFor(this, payload)) return;
+
+      importOntoCanvas(this, payload.xml, true);
     }.bind(this));
 
     this.handleEvent('collect_xml', function () {
@@ -811,6 +834,7 @@ export const AshBpmnDesigner = {
         }
 
         modeling.updateProperties(element, updates);
+        this._dirty = true;
         this.pushEvent('dirty_changed', { dirty: true });
       } catch (err) {
         pushError(this, err);

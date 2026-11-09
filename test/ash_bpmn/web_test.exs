@@ -287,6 +287,17 @@ defmodule AshBpmn.WebTest do
 
       assert stored() == []
     end
+
+    test "entering the route names its key on the push; a revert's push does not" do
+      {:ok, view, _html} = live(build_test_conn(), "/designer")
+
+      assert_push_event(view, "load_xml", %{route_key: "web_test"})
+
+      render_click(view, "revert", %{})
+
+      assert_push_event(view, "load_xml", revert)
+      refute Map.has_key?(revert, :route_key)
+    end
   end
 
   describe "designer: a baseline is shown read-only" do
