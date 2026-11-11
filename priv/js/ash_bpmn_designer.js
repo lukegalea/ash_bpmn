@@ -613,6 +613,50 @@ function resolveContainer(el) {
   return null;
 }
 
+// Swaps one marker channel across the diagram: strips the base marker — and
+// any variant layered on it — from everything the caller marked last time,
+// then marks `nodeIds` with the base marker plus, when `variants` has one
+// for the id, its variant. Ids whose elements no longer exist are skipped on
+// both sides; the return maps what is now marked to its variant, and becomes
+// the caller's next "what did I mark".
+function swapMarkers(canvas, elementRegistry, marked, nodeIds, marker, variants) {
+  marked.forEach(function (variantClass, prevId) {
+    var prev = elementRegistry.get(prevId);
+    if (prev) {
+      canvas.removeMarker(prev, marker);
+      if (variantClass) {
+        canvas.removeMarker(prev, variantClass);
+      }
+    }
+  });
+
+  var nowMarked = new Map();
+  nodeIds.forEach(function (nodeId) {
+    var el = elementRegistry.get(nodeId);
+    if (el) {
+      var variantClass = variants[nodeId] || null;
+      canvas.addMarker(el, marker);
+      if (variantClass) {
+        canvas.addMarker(el, variantClass);
+      }
+      nowMarked.set(nodeId, variantClass);
+    }
+  });
+
+  return nowMarked;
+}
+
+// Runs one canvas-touching body, reporting a throw to the server as an
+// import_error — the guard every handler and marker applier wraps itself in,
+// so one bad payload cannot break the connection.
+function guardErrors(hook, body) {
+  try {
+    body.call(hook);
+  } catch (err) {
+    pushError(hook, err);
+  }
+}
+
 // A highlight that arrived mid-import is held on the hook; this runs once the
 // import resolves and the elements exist to mark.
 function replayPendingErrorHighlight(hook) {
@@ -773,7 +817,7 @@ export const AshBpmnDesigner = {
     }.bind(this));
 
     this.handleEvent('apply_config', function (payload) {
-      try {
+      guardErrors(this, function () {
         var elementRegistry = this._modeler.get('elementRegistry');
         var modeling = this._modeler.get('modeling');
         var moddle = this._modeler.get('moddle');
@@ -836,9 +880,7 @@ export const AshBpmnDesigner = {
         modeling.updateProperties(element, updates);
         this._dirty = true;
         this.pushEvent('dirty_changed', { dirty: true });
-      } catch (err) {
-        pushError(this, err);
-      }
+      });
     }.bind(this));
 
     // -----------------------------------------------------------------------
@@ -848,34 +890,23 @@ export const AshBpmnDesigner = {
     // -----------------------------------------------------------------------
     this._imported = false;
     this._pendingErrorHighlight = null;
-    this._errorIds = new Set();
+    // node id → variant marker (always null: errors carry no variant) — the
+    // shape swapMarkers consumes and returns.
+    this._errorIds = new Map();
 
     this._applyErrorHighlight = function (payload) {
-      try {
+      guardErrors(this, function () {
         var elementRegistry = this._modeler.get('elementRegistry');
 
-        var _this = this;
-        this._errorIds.forEach(function (prevId) {
-          var prev = elementRegistry.get(prevId);
-          if (prev) {
-            canvas.removeMarker(prev, 'ash-bpmn-error');
-          }
-        });
-        this._errorIds.clear();
-
-        var nodeIds = payload.node_ids;
-        if (Array.isArray(nodeIds)) {
-          nodeIds.forEach(function (nodeId) {
-            var el = elementRegistry.get(nodeId);
-            if (el) {
-              canvas.addMarker(el, 'ash-bpmn-error');
-              _this._errorIds.add(nodeId);
-            }
-          });
-        }
-      } catch (err) {
-        pushError(this, err);
-      }
+        this._errorIds = swapMarkers(
+          canvas,
+          elementRegistry,
+          this._errorIds,
+          Array.isArray(payload.node_ids) ? payload.node_ids : [],
+          'ash-bpmn-error',
+          {}
+        );
+      });
     }.bind(this);
 
     this.handleEvent('highlight', function (payload) {
@@ -892,7 +923,7 @@ export const AshBpmnDesigner = {
     // exactly the channel a canvas click uses.
     // -----------------------------------------------------------------------
     this.handleEvent('select_element', function (payload) {
-      try {
+      guardErrors(this, function () {
         var elementRegistry = this._modeler.get('elementRegistry');
         var selection = this._modeler.get('selection');
 
@@ -901,17 +932,13 @@ export const AshBpmnDesigner = {
           selection.select(el);
           canvas.scrollToElement(el);
         }
-      } catch (err) {
-        pushError(this, err);
-      }
+      });
     }.bind(this));
 
     this.handleEvent('fit', function () {
-      try {
+      guardErrors(this, function () {
         canvas.zoom('fit-viewport', 'auto');
-      } catch (err) {
-        pushError(this, err);
-      }
+      });
     }.bind(this));
   },
 
@@ -992,53 +1019,32 @@ export const AshBpmnViewer = {
     // -----------------------------------------------------------------------
 
     this._applyHighlight = function (payload) {
-      try {
+      guardErrors(this, function () {
         var elementRegistry = this._viewer.get('elementRegistry');
 
-        // Clear previous highlights — including any status variant that came
-        // with them. An empty payload lands here and wipes the markers, which
-        // is how a completed instance cleans up after itself.
-        var _this = this;
-        this._highlightedIds.forEach(function (statusClass, prevId) {
-          var prev = elementRegistry.get(prevId);
-          if (prev) {
-            canvas.removeMarker(prev, 'ash-bpmn-highlight');
-            if (statusClass) {
-              canvas.removeMarker(prev, statusClass);
-            }
-          }
-        });
-        this._highlightedIds.clear();
-
-        // Apply new highlights. A node whose token status the server knows
-        // gets the status-specific marker layered on the base one.
-        var statusByNode = {};
+        // A node whose token status the server knows gets the status-specific
+        // marker layered on the base one. An empty payload lands here and
+        // wipes the markers — how a completed instance cleans up after
+        // itself.
+        var variants = {};
         var nodes = payload.nodes;
         if (Array.isArray(nodes)) {
           nodes.forEach(function (node) {
             if (node && node.node_id) {
-              statusByNode[node.node_id] = node.status;
+              variants[node.node_id] = ASH_BPMN_STATUS_CLASSES[node.status] || null;
             }
           });
         }
 
-        var nodeIds = payload.node_ids;
-        if (Array.isArray(nodeIds)) {
-          nodeIds.forEach(function (nodeId) {
-            var el = elementRegistry.get(nodeId);
-            if (el) {
-              var statusClass = ASH_BPMN_STATUS_CLASSES[statusByNode[nodeId]] || null;
-              canvas.addMarker(el, 'ash-bpmn-highlight');
-              if (statusClass) {
-                canvas.addMarker(el, statusClass);
-              }
-              _this._highlightedIds.set(nodeId, statusClass);
-            }
-          });
-        }
-      } catch (err) {
-        pushError(this, err);
-      }
+        this._highlightedIds = swapMarkers(
+          canvas,
+          elementRegistry,
+          this._highlightedIds,
+          Array.isArray(payload.node_ids) ? payload.node_ids : [],
+          'ash-bpmn-highlight',
+          variants
+        );
+      });
     }.bind(this);
 
     this.handleEvent('highlight', function (payload) {
@@ -1048,11 +1054,9 @@ export const AshBpmnViewer = {
     }.bind(this));
 
     this.handleEvent('fit', function () {
-      try {
+      guardErrors(this, function () {
         canvas.zoom('fit-viewport', 'auto');
-      } catch (err) {
-        pushError(this, err);
-      }
+      });
     }.bind(this));
   },
 

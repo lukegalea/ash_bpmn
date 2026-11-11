@@ -154,6 +154,13 @@ Nothing has been released yet. Everything below is the initial body of work.
   import resolved and replayed it. The hook now keeps the import's promise and
   the highlight handler waits on it; a new import replaces the promise, and a
   failed one settles it, so no handler waits on an import that never finishes.
+- **Both hooks share one marker helper and one error guard.** The designer's
+  error markers and the viewer's token markers cleared and re-applied their
+  `bpmn-js` markers with the same two loops apiece — now one `swapMarkers`
+  does it, returning what it marked so a clear removes exactly that. The
+  identical `try`/`catch`-and-report blocks in every handler and applier are
+  one `guardErrors` instead. (The designer's import chain was already one
+  routine, `importOntoCanvas`, shared by the connect and `load_xml` paths.)
 
 ### Fixes:
 
