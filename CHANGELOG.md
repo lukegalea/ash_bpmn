@@ -37,6 +37,13 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Features:
 
+- **The hooks are exported with the events they handle.** `priv/js/hooks.js`
+  maps each hook's registered name to the events it passes to `handleEvent`
+  and a `load` that fetches its code, with no top-level imports of its own —
+  importing it never pulls in bpmn-js. A host registers both hooks from one
+  module, or loads their code lazily by subscribing to `events` before the
+  code arrives. A test reads the module and the hook sources and fails when
+  the events drift or a `load` misses its file.
 - **A call activity's child is accountable to whoever started the parent.**
   The child instance's `started_by_id` is its parent's, as its subject and
   trigger depth already were, so work a person started still names that person
