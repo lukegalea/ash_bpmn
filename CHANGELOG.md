@@ -18,6 +18,15 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Bug Fixes:
 
+- **The dialyzer job gates again.** CI reported 59 calls to missing
+  functions (`Enum.__in__/2`, `:elixir_quote.validate_quote/1` and
+  `unquote/1`) because the PLT cache key had no Elixir version in it: the
+  step read the second line of `elixir --version`, which is blank, so a PLT
+  built under an earlier Elixir was restored as an exact hit. The key now
+  takes `System.version()` and the step fails if it comes out empty. With a
+  fresh PLT, `mix dialyzer --format short` reports nothing, so the job is no
+  longer advisory and fails the build on new warnings.
+
 - **A reconnect no longer replaces unsaved edits in the designer.** Entering
   the route pushes `load_xml` again on every reconnect, and the hook imported
   it over whatever was on the canvas. That push now carries `route_key`, and
