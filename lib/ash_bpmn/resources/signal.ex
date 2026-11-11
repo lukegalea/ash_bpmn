@@ -129,7 +129,8 @@ defmodule AshBpmn.Resources.Signal do
 
       if unquote(policies?) do
         policies do
-          bypass AshBpmn.Checks.AshBpmnInteraction do
+          bypass {AshBpmn.Checks.AshBpmnInteraction,
+                  actions: unquote(AshBpmn.Checks.AshBpmnInteraction.engine_actions(:signal))} do
             authorize_if always()
           end
         end

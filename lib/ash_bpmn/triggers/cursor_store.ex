@@ -112,23 +112,6 @@ defmodule AshBpmn.Triggers.CursorStore.Legacy do
 
   # A fresh cursor starts at the newest event rather than at zero: a subscription hears what
   # happens after it exists, and starting at zero would walk the tenant's whole history.
-  #
-  # The adapter's contract is forward-only -- `stream/3` reads *after* a sequence -- so the
-  # high-water mark is found by paging to the end once, bounded by the batch size and paid
-  # once per tenant before anything dispatches. Moved here verbatim from the sweep worker,
-  # because it is the legacy cursor's own business rather than the sweep's.
-  @batch 500
-
-  defp high_water(event_source, tenant, after_sequence \\ 0, last \\ nil)
-
-  defp high_water(event_source, tenant, after_sequence, last) do
-    case event_source.stream(tenant, after_sequence, @batch) do
-      {:ok, {[], _}} ->
-        last || 0
-
-      {:ok, {events, _}} ->
-        last = event_source.sequence(List.last(events))
-        high_water(event_source, tenant, last, last)
-    end
-  end
+  # Paid once per tenant, before anything dispatches.
+  defp high_water(event_source, tenant), do: AshBpmn.EventSource.high_water(event_source, tenant)
 end

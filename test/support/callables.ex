@@ -208,6 +208,34 @@ defmodule AshBpmn.Test.CallablesGuardedResource do
   end
 end
 
+defmodule AshBpmn.Test.LoopWriter do
+  @moduledoc """
+  A callable that writes the resource a subscription watches, the shape of a recipe whose
+  process writes what it listens to.
+
+  The write is a synthetic event appended to `TriggerTest.EventSource` for the tenant the
+  call ran in. Its metadata carries the `trigger_depth` the engine put in the action's
+  context, which is what a host's audit layer stamps on the row it writes. Without the
+  engine passing it, every lap of the loop looks like a person's write.
+  """
+
+  use Ash.Resource, domain: AshBpmn.Test.RuntimeCallablesDomain
+
+  actions do
+    action :touch, :string do
+      run fn input, context ->
+        depth = get_in(input.context, [:ash_bpmn, :trigger_depth])
+
+        TriggerTest.EventSource.append!(context.tenant, %{
+          metadata: if(is_nil(depth), do: %{}, else: %{"trigger_depth" => depth})
+        })
+
+        {:ok, "touched"}
+      end
+    end
+  end
+end
+
 defmodule AshBpmn.Test.RuntimeCallablesDomain do
   @moduledoc false
 
@@ -217,6 +245,7 @@ defmodule AshBpmn.Test.RuntimeCallablesDomain do
     resource AshBpmn.Test.CallablesRuntimeResource
     resource AshBpmn.Test.CallablesEnrollee
     resource AshBpmn.Test.CallablesGuardedResource
+    resource AshBpmn.Test.LoopWriter
   end
 
   callables do
@@ -232,6 +261,7 @@ defmodule AshBpmn.Test.RuntimeCallablesDomain do
     callable(:deny_coverage, AshBpmn.Test.CallablesRuntimeResource, :deny_coverage)
     callable(:enroll, AshBpmn.Test.CallablesEnrollee, :enroll)
     callable(:engine_check, AshBpmn.Test.CallablesGuardedResource, :engine_only)
+    callable(:touch_watched, AshBpmn.Test.LoopWriter, :touch)
   end
 end
 

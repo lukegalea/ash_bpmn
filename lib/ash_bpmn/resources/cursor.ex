@@ -81,7 +81,8 @@ defmodule AshBpmn.Resources.Cursor do
       # what this replaces and what it deliberately does not claim to be.
       if unquote(policies?) do
         policies do
-          bypass AshBpmn.Checks.AshBpmnInteraction do
+          bypass {AshBpmn.Checks.AshBpmnInteraction,
+                  actions: unquote(AshBpmn.Checks.AshBpmnInteraction.engine_actions(:cursor))} do
             authorize_if always()
           end
         end

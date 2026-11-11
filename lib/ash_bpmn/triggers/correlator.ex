@@ -52,18 +52,53 @@ defmodule AshBpmn.Triggers.Correlator do
   dispatched: the dispatch rows and the instances they started are history, and
   no switch rewrites them.
 
-  ## Depth, and why it rides on the dispatch row
+  ## Depth: on the dispatch row, on the instance, and on what the instance writes
 
   Subscriptions may not match `ash_bpmn` resources (publish-time refusal),
-  which closes the direct cycle; a cycle through `AshBpmn.Resources.Signal`
-  remains structurally possible, and `depth` bounds it (G-5). The bound travels
-  on the dispatch row: an event's depth is read from its context metadata
-  (`trigger_depth`, `0` when absent — an event a person caused), and the
-  dispatch records `depth + 1`. `AshBpmn.start_instance/2` has no depth
-  parameter, so the bound cannot reach the instance itself — it is carried in
-  dispatch metadata, the reference application's arrangement, and the row is
-  what an auditor reads. Past `AshBpmn.Config.trigger_max_depth/0` the dispatch
-  refuses with `:depth_exceeded` and starts nothing.
+  which closes the direct cycle. Two cycles remain: a process whose steps write
+  the host resource its own subscription watches, and a cycle through
+  `AshBpmn.Resources.Signal`. `depth` bounds both (G-5).
+
+    * An event's depth is read from its context metadata (`trigger_depth`, `0`
+      when absent — an event a person caused). A signal row carries its own
+      `depth` (the thrower's `trigger_depth + 1`), which counts as the hop
+      already taken.
+    * The dispatch records `depth + 1`, and the instance it starts is started
+      with `trigger_depth: depth`, so the instance knows which hop it is.
+    * The engine passes the instance's `trigger_depth` to everything its steps
+      write through: an `ash:call` action finds it at
+      `context.ash_bpmn.trigger_depth`, and the host's `AshBpmn.ActionInvoker`
+      finds it at `ctx.trigger_depth`. **Stamping it into the audit metadata of
+      the rows those writes produce is the host's half**, the same way the host
+      stamps the correlation id; without it every lap looks like a person's
+      write and the bound never fires.
+
+  Past `AshBpmn.Config.trigger_max_depth/0` the dispatch refuses with
+  `:depth_exceeded` and starts nothing.
+
+  ## Versions, and the event window
+
+  A superseded subscription version keeps the events up to its
+  `retired_sequence`, and its successor takes the events after its
+  `effective_sequence` (see `AshBpmn.Resources.Subscription`). The funnel
+  offers an event only to the versions in force for its sequence, so a replay
+  or a re-drive of an old event can never start it again under the new version.
+
+  ## Re-drive
+
+  `dispatch_event/4` with `redrive: true` runs the funnel again for an event
+  whose dispatch failed. A `:failed` row is not counted as "already
+  dispatched" then (nor by the dispatch identity), while any other row still
+  is, so a re-drive can turn a failure into a start but never start twice. An
+  ordinary sweep treats every row, failed included, as the record and does not
+  retry it. Catch delivery is not repeated by a re-drive.
+
+  ## A funnel that raises
+
+  An exception the funnel does not catch rolls back the event's transaction.
+  The sweep then calls `record_aborted/4`, which writes a `:failed` row with
+  reason `:funnel_error` for each subscription the event could have reached,
+  in a fresh transaction, and the cursor passes the event only after that.
   """
 
   require Ash.Query
@@ -95,32 +130,158 @@ defmodule AshBpmn.Triggers.Correlator do
   impossible under a partial failure: the loser's insert conflicts and its
   instance rolls back with it.
   """
-  @spec dispatch_event(term(), [struct()], map()) :: :ok
-  def dispatch_event(event, subscriptions, ctx) do
+  @spec dispatch_event(term(), [struct()], map(), keyword()) :: :ok
+  def dispatch_event(event, subscriptions, ctx, opts \\ []) do
+    redrive? = Keyword.get(opts, :redrive, false)
     raw_ctx = ctx.event_source.context(event)
     feel_ctx = Feel.to_feel_value(raw_ctx)
 
     if listening?(feel_ctx) do
       signal? = signal_event?(feel_ctx, ctx)
+      depth = event_depth(raw_ctx, signal?) + 1
 
       subscriptions
-      |> Enum.filter(fn subscription ->
-        # A signal subscription is only ever offered signal events, and a message
-        # subscription never is. Without this a `:message` subscription matching the signal
-        # resource by name would start a process on every signal thrown.
-        subscription.kind == :signal == signal? and matches?(subscription, feel_ctx)
-      end)
-      |> Enum.each(&dispatch(&1, raw_ctx, feel_ctx, ctx))
+      |> candidates(feel_ctx, signal?, event_sequence(event, raw_ctx, ctx))
+      |> Enum.each(&dispatch(&1, raw_ctx, feel_ctx, ctx, depth, redrive?))
     end
 
     # Deliberately outside the index gate above. `Index` is built from published
     # *subscriptions*, and a token parked at a message catch is not one -- it is a running
     # instance's private interest in something. Putting delivery behind that gate would mean a
     # process waiting for a payment was woken only if some unrelated subscription happened to
-    # be watching payments too.
-    deliver_to_waiting(feel_ctx, ctx)
+    # be watching payments too. A re-drive is about subscriptions, and does not deliver again.
+    unless redrive?, do: deliver_to_waiting(feel_ctx, ctx)
 
     :ok
+  end
+
+  # The subscriptions this event is offered to: the right kind, a structural match, and the
+  # version in force for the event's sequence.
+  defp candidates(subscriptions, feel_ctx, signal?, sequence) do
+    Enum.filter(subscriptions, fn subscription ->
+      # A signal subscription is only ever offered signal events, and a message
+      # subscription never is. Without this a `:message` subscription matching the signal
+      # resource by name would start a process on every signal thrown.
+      subscription.kind == :signal == signal? and matches?(subscription, feel_ctx) and
+        in_force?(subscription, sequence)
+    end)
+  end
+
+  # See "Versions, and the event window" in the moduledoc. A sequence the funnel cannot read
+  # is offered to every version, which is what happened before versions had windows.
+  defp in_force?(_subscription, nil), do: true
+
+  defp in_force?(subscription, sequence) do
+    effective = Map.get(subscription, :effective_sequence)
+    retired = Map.get(subscription, :retired_sequence)
+
+    (is_nil(effective) or sequence > effective) and (is_nil(retired) or sequence <= retired)
+  end
+
+  defp event_sequence(event, raw_ctx, ctx) do
+    case get_in(raw_ctx, [@event, "sequence"]) do
+      sequence when is_integer(sequence) -> sequence
+      _ -> ctx.event_source.sequence(event)
+    end
+  rescue
+    _ -> nil
+  end
+
+  @doc """
+  Records that the funnel raised for `event`, after its transaction rolled back.
+
+  Writes one `:failed` dispatch with reason `:funnel_error` and the message in `error` for
+  each subscription the event could have reached: the ones it matches, when its context can
+  still be built, and every one offered otherwise (nothing else can be known about an event
+  whose context raises). A subscription that already has a row for the event is left alone.
+
+  Raises when a row is owed and cannot be written, so the caller does not move its cursor
+  past an event that left no trace. Call it in a transaction of its own.
+  """
+  @spec record_aborted(term(), [struct()], map(), String.t()) :: :ok
+  def record_aborted(event, subscriptions, ctx, message) do
+    {raw_ctx, owed} =
+      case safe_context(ctx.event_source, event) do
+        {:ok, raw_ctx} ->
+          feel_ctx = Feel.to_feel_value(raw_ctx)
+
+          if listening?(feel_ctx) do
+            signal? = signal_event?(feel_ctx, ctx)
+            sequence = event_sequence(event, raw_ctx, ctx)
+            {raw_ctx, candidates(subscriptions, feel_ctx, signal?, sequence)}
+          else
+            {raw_ctx, []}
+          end
+
+        :error ->
+          sequence = safe(fn -> ctx.event_source.sequence(event) end)
+          {nil, Enum.filter(subscriptions, &in_force?(&1, sequence))}
+      end
+
+    Enum.each(owed, &record_abort!(&1, event, raw_ctx, ctx, message))
+    :ok
+  end
+
+  defp record_abort!(subscription, event, raw_ctx, ctx, message) do
+    event_id = get_in(raw_ctx || %{}, [@event, "id"]) || adapter_event_id(event)
+
+    if is_nil(event_id) do
+      raise "ash_bpmn could not record the aborted dispatch of an event with no id " <>
+              "(subscription #{subscription.key}): #{message}"
+    end
+
+    unless already_dispatched?(ctx.resources.dispatch, subscription, event_id, ctx, false) do
+      signal? = raw_ctx != nil and Map.get(subscription, :kind) == :signal
+
+      attrs = %{
+        subscription_id: subscription.id,
+        event_id: event_id,
+        event_sequence:
+          get_in(raw_ctx || %{}, [@event, "sequence"]) || ctx.event_source.sequence(event),
+        event_occurred_at:
+          get_in(raw_ctx || %{}, [@event, "occurred_at"]) || adapter_occurred_at(event, ctx),
+        kind: :start,
+        status: :failed,
+        reason: :funnel_error,
+        error: String.slice(message, 0, 2_000),
+        correlation_id: get_in(raw_ctx || %{}, [@metadata, "correlation_id"]),
+        depth: if(raw_ctx, do: event_depth(raw_ctx, signal?) + 1, else: 0)
+      }
+
+      try do
+        ctx.resources.dispatch.create!(attrs, AshBpmn.Scope.engine(ctx.scope))
+      rescue
+        e ->
+          reraise RuntimeError,
+                  [
+                    message:
+                      "ash_bpmn could not record the aborted dispatch of event #{event_id} " <>
+                        "for subscription #{subscription.key}: #{Exception.message(e)}"
+                  ],
+                  __STACKTRACE__
+      end
+    end
+
+    :ok
+  end
+
+  defp safe_context(event_source, event) do
+    {:ok, event_source.context(event)}
+  rescue
+    _ -> :error
+  end
+
+  defp safe(fun) do
+    fun.()
+  rescue
+    _ -> nil
+  end
+
+  defp adapter_event_id(event) when is_map(event), do: Map.get(event, :id)
+  defp adapter_event_id(_event), do: nil
+
+  defp adapter_occurred_at(event, ctx) do
+    safe(fn -> ctx.event_source.occurred_at(event) end) || DateTime.utc_now()
   end
 
   # ── catch delivery ──────────────────────────────────────────────────────
@@ -446,8 +607,16 @@ defmodule AshBpmn.Triggers.Correlator do
     signal_module = Map.get(ctx.resources, :signal)
 
     signal_module != nil and
-      ResourceName.short(signal_module) == feel_ctx[@event]["resource"]
+      same_resource?(signal_module, feel_ctx[@event]["resource"])
   end
+
+  # Either spelling of the event's resource: `"MyApp.Signal"`, which an adapter that uses
+  # `inspect/1` emits (the reference one does), or `"Elixir.MyApp.Signal"`. Comparing only
+  # the second never recognised a signal row from the first kind of adapter.
+  defp same_resource?(module, name) when is_binary(name),
+    do: ResourceName.short(inspect(module)) == ResourceName.short(name)
+
+  defp same_resource?(_module, _name), do: false
 
   # ── stage 3: match ──────────────────────────────────────────────────────
 
@@ -498,10 +667,10 @@ defmodule AshBpmn.Triggers.Correlator do
   # `raw_ctx` is the adapter's own context — the ledger reads from it, because
   # the FEEL boundary turns integers into decimals and the ledger wants the
   # event's plain values. `feel_ctx` is what every expression evaluates over.
-  defp dispatch(subscription, raw_ctx, feel_ctx, ctx) do
+  defp dispatch(subscription, raw_ctx, feel_ctx, ctx, depth, redrive?) do
     event_id = raw_ctx[@event]["id"]
 
-    if already_dispatched?(ctx.resources.dispatch, subscription, event_id, ctx) do
+    if already_dispatched?(ctx.resources.dispatch, subscription, event_id, ctx, redrive?) do
       # A replayed batch hits here: the existing row is the record, and the
       # only alternative to the pre-check is re-running the funnel and letting
       # the identity abort the transaction — which works (the duplicate
@@ -514,13 +683,11 @@ defmodule AshBpmn.Triggers.Correlator do
 
       :already_dispatched
     else
-      do_dispatch(subscription, raw_ctx, feel_ctx, ctx)
+      do_dispatch(subscription, raw_ctx, feel_ctx, ctx, depth)
     end
   end
 
-  defp do_dispatch(subscription, raw_ctx, feel_ctx, ctx) do
-    depth = event_depth(raw_ctx) + 1
-
+  defp do_dispatch(subscription, raw_ctx, feel_ctx, ctx, depth) do
     if depth > Config.trigger_max_depth() do
       record(subscription, raw_ctx, ctx, status: :failed, reason: :depth_exceeded, depth: depth)
     else
@@ -737,7 +904,10 @@ defmodule AshBpmn.Triggers.Correlator do
              # answer.
              started_by_id: get_in(feel_ctx, ["actor", "user_id"]),
              tenant: ctx.tenant,
-             correlation_id: feel_ctx[@metadata]["correlation_id"]
+             correlation_id: feel_ctx[@metadata]["correlation_id"],
+             # The hop this instance is. What it writes carries it (see the moduledoc),
+             # which is what lets the next lap be counted.
+             trigger_depth: depth
            ) do
       record(subscription, raw_ctx, ctx,
         status: :started,
@@ -816,17 +986,55 @@ defmodule AshBpmn.Triggers.Correlator do
     end
   end
 
-  defp event_depth(raw_ctx), do: get_in(raw_ctx, [@metadata, "trigger_depth"]) || 0
+  # The hops already taken before this event: the metadata's `trigger_depth` (stamped by the
+  # host on what a triggered process writes), and for a signal row its own `depth`, which
+  # already counts the throw as a hop. A business record's `depth` field is not read: only a
+  # signal row's is the engine's.
+  defp event_depth(raw_ctx, signal?) do
+    stamped = to_depth(get_in(raw_ctx, [@metadata, "trigger_depth"]))
 
-  defp already_dispatched?(dispatch_resource, subscription, event_id, ctx) do
-    # `Ash.read_one/2` answers in a tuple, so the row's presence is a pattern
-    # match on the payload, not a nil check on the result.
-    match?(
-      {:ok, %{}},
+    if signal? do
+      max(stamped, to_depth(signal_depth(raw_ctx)) - 1)
+    else
+      stamped
+    end
+  end
+
+  defp signal_depth(raw_ctx) do
+    case raw_ctx[@data] do
+      %{"depth" => depth} -> depth
+      %{depth: depth} -> depth
+      _ -> nil
+    end
+  end
+
+  defp to_depth(depth) when is_integer(depth), do: depth
+  defp to_depth(%Decimal{} = depth), do: Decimal.to_integer(depth)
+
+  defp to_depth(depth) when is_binary(depth) do
+    case Integer.parse(depth) do
+      {value, ""} -> value
+      _ -> 0
+    end
+  end
+
+  defp to_depth(_depth), do: 0
+
+  # A re-drive does not count a `:failed` row as the record: it is the record of the thing
+  # being retried. See "Re-drive" in the moduledoc.
+  defp already_dispatched?(dispatch_resource, subscription, event_id, ctx, redrive?) do
+    query =
       dispatch_resource
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(subscription_id == ^subscription.id and event_id == ^event_id)
-      |> Ash.read_one(AshBpmn.Scope.engine(ctx.scope))
+
+    query = if redrive?, do: Ash.Query.filter(query, status != :failed), else: query
+
+    # `Ash.read/2` answers in a tuple, so the rows' presence is a pattern match on the
+    # payload, not a nil check on the result. Several failed rows may share the pair.
+    match?(
+      {:ok, [_ | _]},
+      query |> Ash.Query.limit(1) |> Ash.read(AshBpmn.Scope.engine(ctx.scope))
     )
   end
 
@@ -841,8 +1049,7 @@ defmodule AshBpmn.Triggers.Correlator do
           event_sequence: raw_ctx[@event]["sequence"],
           event_occurred_at: occurred_at(raw_ctx),
           kind: :start,
-          correlation_id: raw_ctx[@metadata]["correlation_id"],
-          depth: event_depth(raw_ctx) + 1
+          correlation_id: raw_ctx[@metadata]["correlation_id"]
         },
         Map.new(opts)
       )

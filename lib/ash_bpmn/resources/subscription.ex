@@ -45,6 +45,26 @@ defmodule AshBpmn.Resources.Subscription do
   disabled subscription for the same reason: it answers "what is deployed",
   not "what is switched on".
 
+  ## A new version supersedes the old one, at a boundary in the log
+
+  Publishing version 2 of a key retires every published version of that key in the
+  same transaction, so a key never has two versions in force and one event cannot
+  start a process under each. The publish also stamps the boundary between them: the
+  tenant's newest event sequence at that moment (`AshBpmn.EventSource.high_water/2`).
+  The new version's `effective_sequence` and the old one's `retired_sequence` are
+  that number, and the sweep offers each event to the version in force when it
+  committed:
+
+    * a version with an `effective_sequence` takes events **after** it;
+    * a superseded version keeps the events **up to and including** its
+      `retired_sequence`, so the backlog the sweep had not reached when v2 was
+      published is still dispatched, once, under v1.
+
+  A first version has no `effective_sequence` (no lower bound, as before), and a
+  version retired with `:retire` rather than superseded has no `retired_sequence`
+  and hears nothing more. Both columns are the answer to "which version of the rule
+  handled this event", read off the dispatch's `event_sequence`.
+
   ## Publish-time verification, in order
 
   Publishing runs the checks the sweep cannot afford to discover at three in
@@ -122,7 +142,9 @@ defmodule AshBpmn.Resources.Subscription do
       # what this replaces and what it deliberately does not claim to be.
       if unquote(policies?) do
         policies do
-          bypass AshBpmn.Checks.AshBpmnInteraction do
+          bypass {AshBpmn.Checks.AshBpmnInteraction,
+                  actions:
+                    unquote(AshBpmn.Checks.AshBpmnInteraction.engine_actions(:subscription))} do
             authorize_if always()
           end
         end
@@ -273,6 +295,20 @@ defmodule AshBpmn.Resources.Subscription do
           public? true
         end
 
+        attribute :effective_sequence, :integer do
+          public? true
+          writable? false
+
+          description "Set when this version superseded another: it takes the events after this sequence."
+        end
+
+        attribute :retired_sequence, :integer do
+          public? true
+          writable? false
+
+          description "Set when a later version superseded this one: it keeps the events up to this sequence."
+        end
+
         if unquote(tenant?) do
           attribute :organization_id, :uuid do
             allow_nil? false
@@ -350,6 +386,26 @@ defmodule AshBpmn.Resources.Subscription do
 
           change set_attribute(:status, :published)
           change AshBpmn.Resources.Subscription.CompileExpressions
+          # Last, so a refused publish retires nothing: see the moduledoc.
+          change AshBpmn.Resources.Subscription.SupersedePredecessor
+        end
+
+        # The other half of a publish: the version it replaces, retired at the
+        # boundary in the log. Only `SupersedePredecessor` calls it, inside the
+        # publish's transaction.
+        update :supersede do
+          accept []
+          require_atomic? false
+
+          argument :retired_sequence, :integer do
+            allow_nil? false
+          end
+
+          validate attribute_equals(:status, :published),
+            message: "only a published subscription can be superseded"
+
+          change set_attribute(:status, :retired)
+          change set_attribute(:retired_sequence, arg(:retired_sequence))
         end
 
         update :retire do
@@ -967,6 +1023,72 @@ defmodule AshBpmn.Resources.Subscription.CompileExpressions do
       nil -> "unknown"
       vsn -> to_string(vsn)
     end
+  end
+end
+
+defmodule AshBpmn.Resources.Subscription.SupersedePredecessor do
+  @moduledoc """
+  Retires the published versions of a key when a newer one is published, in the
+  publish's own transaction, and stamps the boundary between them.
+
+  The boundary is the tenant's newest event sequence when the publish runs. The new
+  version takes the events after it (`effective_sequence`), the old one keeps the
+  events up to it (`retired_sequence`), and the sweep offers each event to exactly one
+  of them. Without this, both versions stayed published and every matching event
+  started two processes.
+
+  The reads and the retire run as engine work in the changeset's tenant, the way
+  `AssignVersion` reads: they are part of an act the caller was already authorized
+  for.
+  """
+
+  use Ash.Resource.Change
+
+  require Ash.Query
+
+  alias AshBpmn.Scope
+
+  @impl true
+  def change(changeset, _opts, _context) do
+    Ash.Changeset.before_action(changeset, &supersede/1)
+  end
+
+  defp supersede(changeset) do
+    scope = Scope.from_changeset(changeset)
+    key = changeset.data.key
+    id = changeset.data.id
+
+    predecessors =
+      changeset.resource
+      |> Ash.Query.for_read(:read, %{}, Scope.engine(scope))
+      |> Ash.Query.filter(key == ^key and status == :published and id != ^id)
+      |> Ash.read!()
+
+    case predecessors do
+      [] ->
+        changeset
+
+      predecessors ->
+        boundary = boundary(changeset)
+
+        Enum.each(predecessors, fn predecessor ->
+          predecessor
+          |> Ash.Changeset.for_update(
+            :supersede,
+            %{retired_sequence: boundary},
+            Scope.engine(scope)
+          )
+          |> Ash.update!()
+        end)
+
+        Ash.Changeset.force_change_attribute(changeset, :effective_sequence, boundary)
+    end
+  end
+
+  # The tenant's log, read the way the sweep reads it: the tenant value it is keyed by.
+  defp boundary(changeset) do
+    tenant = Map.get(changeset, :to_tenant) || changeset.tenant
+    AshBpmn.EventSource.high_water(AshBpmn.Config.event_source!(), tenant)
   end
 end
 

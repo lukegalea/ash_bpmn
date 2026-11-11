@@ -33,6 +33,11 @@ defmodule AshBpmn.Runtime.Interpreter do
   the same on every redelivery of one execution of the node, and different for the
   next execution of it. The invoker finds it at `ctx[:invocation_key]`; an `ash:call`
   callable finds it in the action's context, at `context.ash_bpmn.invocation_key`.
+
+  Beside it travels the instance's **trigger depth** -- `ctx[:trigger_depth]` for the
+  invoker, `context.ash_bpmn.trigger_depth` for a callable -- which a host stamps on the
+  rows the step writes so that a process writing what its own trigger watches is bounded
+  (see `AshBpmn.Triggers.Correlator`).
   Record the result under the key and return the recorded result when the key
   comes back.
   """
@@ -378,7 +383,10 @@ defmodule AshBpmn.Runtime.Interpreter do
   # Ash action invoked through the engine scope. Both take their arguments from the
   # same declared FEEL inputs and promote onto the token under the same gating.
   defp service_task(graph, node_id, node, ctx) do
-    ctx = Map.put(ctx, :invocation_key, invocation_key(ctx, node_id))
+    ctx =
+      ctx
+      |> Map.put(:invocation_key, invocation_key(ctx, node_id))
+      |> Map.put(:trigger_depth, trigger_depth(ctx))
 
     if is_map_key(node, "call") do
       ash_call_task(graph, node_id, node, ctx)
@@ -392,6 +400,11 @@ defmodule AshBpmn.Runtime.Interpreter do
   # second visit to the node (a loop, a fan-out instance) runs a token of its own. So the key
   # names the token, and the instance and node beside it make it readable on its own.
   defp invocation_key(ctx, node_id), do: {ctx[:instance].id, ctx[:token].id, node_id}
+
+  # The hop the instance was started at (`AshBpmn.Triggers.Correlator`). Handed to whatever
+  # the step writes through, so the host can stamp it on the rows it audits and the next lap
+  # of a trigger cycle is counted rather than mistaken for a person's write.
+  defp trigger_depth(ctx), do: (ctx[:instance] && ctx[:instance].trigger_depth) || 0
 
   # ── serviceTask, ash:call binding ────────────────────────────────────────
 
@@ -512,7 +525,13 @@ defmodule AshBpmn.Runtime.Interpreter do
     opts =
       scope
       |> AshBpmn.Scope.engine()
-      |> Keyword.update!(:context, &Map.put(&1, :ash_bpmn, %{invocation_key: ctx.invocation_key}))
+      |> Keyword.update!(
+        :context,
+        &Map.put(&1, :ash_bpmn, %{
+          invocation_key: ctx.invocation_key,
+          trigger_depth: ctx[:trigger_depth] || 0
+        })
+      )
 
     case action_type do
       :action ->
