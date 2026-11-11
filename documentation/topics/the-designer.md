@@ -109,6 +109,39 @@ promotions; the panel narrows to those:
 
 ![A service task selected, showing only its action reference](../assets/designer-service-task.png)
 
+## The hooks module
+
+Importing `priv/js/ash_bpmn_designer.js` pulls bpmn-js into whatever bundle
+imports it. If you would rather register the hooks from one place — or fetch
+their code only on first use — the package also ships `priv/js/hooks.js`. It
+has **no top-level imports**: importing it never pulls in bpmn-js or any other
+hook dependency, and it needs no bundler tricks of its own. It exports `hooks`,
+mapping each hook's registered name (its `phx-hook` value) to the events it
+handles and a `load` that fetches its code:
+
+```js
+import {hooks} from "../../deps/ash_bpmn/priv/js/hooks.js"
+```
+
+An eager host resolves every `load` once and registers the results — the same
+hook objects the direct import above produces:
+
+```js
+const allHooks = Object.fromEntries(
+  await Promise.all(Object.entries(hooks).map(async ([n, h]) => [n, await h.load()]))
+)
+
+let liveSocket = new LiveSocket("/live", Socket, { hooks: allHooks })
+```
+
+A lazy host wraps each `load`: until the code arrives the wrapper cannot be
+handed events, so in `mounted()` it subscribes to every name in `hook.events`
+and buffers what arrives, loads the code on the first event, and replays the
+buffer into the real hook. `events` exists for exactly this subscription, and
+the package's test suite checks it against the hook sources, so a host can
+trust the list. The direct import stays the simplest registration — the hooks
+module is an addition, not a replacement.
+
 ## Business rule tasks in the panel
 
 A `businessRuleTask` gets the fullest panel, because it carries the most

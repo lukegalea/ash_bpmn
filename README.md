@@ -199,6 +199,8 @@ Then:
 - point `config :ash_bpmn, assignment_resolver: ...` and `action_invoker: ...` at
   your two callback modules,
 - add bpmn-js to your asset bundle and register the designer hook (one import),
+  or register through `priv/js/hooks.js` instead — see
+  [the designer](documentation/topics/the-designer.md#the-hooks-module),
 - generate migrations.
 
 `mix igniter.install ash_bpmn` does the formatter wiring; see the topics below for
