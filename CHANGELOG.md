@@ -18,6 +18,15 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Bug Fixes:
 
+- **The dialyzer job gates again.** The `mix dialyzer` CI job was made
+  advisory (`continue-on-error`) when CI was pinned to Elixir 1.20.4, on
+  warnings attributed to the compiler expanding `in` to `Enum.__in__/2` and
+  `quote` to `:elixir_quote` functions. Those warnings do not reproduce: on
+  the merged tree, `mix dialyzer --format short` exits clean under the exact
+  pinned toolchain (Elixir 1.20.4 and OTP 27.3.4, the bytes CI installs,
+  with a PLT built from scratch). The advisory band is removed so the job
+  fails the build on new warnings instead of hiding them.
+
 - **A reconnect no longer replaces unsaved edits in the designer.** Entering
   the route pushes `load_xml` again on every reconnect, and the hook imported
   it over whatever was on the canvas. That push now carries `route_key`, and

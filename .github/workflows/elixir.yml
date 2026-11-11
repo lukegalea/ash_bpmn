@@ -95,11 +95,8 @@ jobs:
       - run: mix credo --strict
 
   dialyzer:
-    name: mix dialyzer (advisory)
+    name: mix dialyzer
     runs-on: ubuntu-latest
-    # Non-blocking: Elixir 1.20.4 expands `in` to Enum.__in__/2 and quote to
-    # :elixir_quote functions that dialyzer reports as missing or private.
-    continue-on-error: true
     env:
       MIX_ENV: dev
     steps:
