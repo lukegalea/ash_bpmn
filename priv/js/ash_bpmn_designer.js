@@ -965,28 +965,25 @@ export const AshBpmnViewer = {
     this._highlightedIds = new Map();
 
     // The server pushes `highlight` from its first render, which can land
-    // before importXML resolves — and markers cannot be applied to elements
-    // that do not exist yet. Hold the last payload and replay it on import.
-    this._imported = false;
-    this._pendingHighlight = null;
+    // before the diagram is drawn — markers cannot be applied to elements
+    // that do not exist yet. `_imported` is the import's promise: highlight
+    // handlers wait on it, a new import replaces it so a highlight for the
+    // old diagram never reaches the new one, and a failed import settles it
+    // with false — the error is reported here, and no handler waits forever.
+    this._imported = Promise.resolve(true);
 
     // Initial import from data-xml attribute
     var xml = this.el.dataset.xml || '';
     if (xml) {
-      this._viewer
+      this._imported = this._viewer
         .importXML(xml)
         .then(function () {
           canvas.zoom('fit-viewport', 'auto');
-          this._imported = true;
-
-          if (this._pendingHighlight) {
-            var pending = this._pendingHighlight;
-            this._pendingHighlight = null;
-            this._applyHighlight(pending);
-          }
-        }.bind(this))
+          return true;
+        })
         .catch(function (err) {
           pushError(this, err);
+          return false;
         }.bind(this));
     }
 
@@ -1045,11 +1042,9 @@ export const AshBpmnViewer = {
     }.bind(this);
 
     this.handleEvent('highlight', function (payload) {
-      if (this._imported) {
-        this._applyHighlight(payload);
-      } else {
-        this._pendingHighlight = payload;
-      }
+      this._imported.then(function (imported) {
+        if (imported) this._applyHighlight(payload);
+      }.bind(this));
     }.bind(this));
 
     this.handleEvent('fit', function () {

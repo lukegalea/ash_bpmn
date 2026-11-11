@@ -147,6 +147,14 @@ Nothing has been released yet. Everything below is the initial body of work.
   designer and viewer against Postgres — plus the screenshot script
   that produces the images in the documentation.
 
+### Refactors:
+
+- **The viewer hook waits on one import promise.** A `highlight` pushed before
+  the diagram finished drawing used to sit in `_pendingHighlight` until the
+  import resolved and replayed it. The hook now keeps the import's promise and
+  the highlight handler waits on it; a new import replaces the promise, and a
+  failed one settles it, so no handler waits on an import that never finishes.
+
 ### Fixes:
 
 - **A receive task's lookback scan delivers only the events the wait
