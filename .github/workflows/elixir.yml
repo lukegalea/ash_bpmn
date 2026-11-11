@@ -95,11 +95,8 @@ jobs:
       - run: mix credo --strict
 
   dialyzer:
-    name: mix dialyzer (advisory)
+    name: mix dialyzer
     runs-on: ubuntu-latest
-    # Non-blocking: Elixir 1.20.4 expands `in` to Enum.__in__/2 and quote to
-    # :elixir_quote functions that dialyzer reports as missing or private.
-    continue-on-error: true
     env:
       MIX_ENV: dev
     steps:
@@ -116,7 +113,8 @@ jobs:
       - name: Capture resolved toolchain versions for the PLT cache key
         run: |
           echo "PLT_KEY_OTP=$(erl -noshell -eval 'io:format("~s-~s", [erlang:system_info(otp_release), erlang:system_info(version)]), halt().')" >> "$GITHUB_ENV"
-          echo "PLT_KEY_ELIXIR=$(elixir --version | awk 'NR==2 {print $2}')" >> "$GITHUB_ENV"
+          echo "PLT_KEY_ELIXIR=$(elixir -e 'IO.write(System.version())')" >> "$GITHUB_ENV"
+          grep -q '^PLT_KEY_ELIXIR=.' "$GITHUB_ENV"
       - uses: actions/cache@v6.1.0
         with:
           path: priv/plts
