@@ -163,6 +163,78 @@ defmodule AshBpmn.RecipesDeliveryTest do
       assert length(instance_ids!(@acme)) == 2
     end
 
+    # The trigger index lists published, enabled subscriptions only. A superseded version
+    # still finishing its window is not among them, and its backlog must not be skipped
+    # behind that gate.
+    test "v1's backlog is dispatched when v2 no longer matches the event" do
+      start_supervised!(AshBpmn.Triggers.Index)
+      publish_definition!(@acme, "onboarding_sweep")
+      v1 = subscribe!(@acme, "rule", %{})
+      backlog = TriggerTest.EventSource.append!(@acme)
+
+      # v2 narrows the action type: the index now lists only (Payout, update).
+      _v2 = subscribe!(@acme, "rule", %{match_action_type: :update})
+      assert :ok = AshBpmn.Triggers.Index.reload!()
+      refute AshBpmn.Triggers.Index.interested?("TriggerTest.Payout", "create")
+
+      sweep!(@acme)
+
+      assert [%{status: :started, event_id: event_id}] = dispatches!(@acme, v1.id)
+      assert event_id == backlog.id
+    end
+
+    test "v1's backlog is dispatched when v2 has been disabled" do
+      start_supervised!(AshBpmn.Triggers.Index)
+      publish_definition!(@acme, "onboarding_sweep")
+      v1 = subscribe!(@acme, "rule", %{})
+      backlog = TriggerTest.EventSource.append!(@acme)
+
+      v2 = subscribe!(@acme, "rule", %{})
+      Subscription.disable!(v2, engine_scope(@acme))
+      assert :ok = AshBpmn.Triggers.Index.reload!()
+      refute AshBpmn.Triggers.Index.interested?("TriggerTest.Payout", "create")
+
+      sweep!(@acme)
+
+      assert [%{status: :started, event_id: event_id}] = dispatches!(@acme, v1.id)
+      assert event_id == backlog.id
+    end
+
+    test "a funnel error in v1's backlog leaves a failed row when the index has moved on" do
+      start_supervised!(AshBpmn.Triggers.Index)
+      publish_definition!(@acme, "onboarding_sweep")
+
+      v1 =
+        subscribe!(@acme, "routed", %{
+          process_key: nil,
+          route_kind: :decision,
+          decision_key: "routing"
+        })
+
+      TriggerTest.DecisionResolver.set_decide(fn _ref, _inputs, _ctx ->
+        raise "the routing table could not be read"
+      end)
+
+      backlog = TriggerTest.EventSource.append!(@acme)
+
+      _v2 =
+        subscribe!(@acme, "routed", %{
+          process_key: nil,
+          route_kind: :decision,
+          decision_key: "routing",
+          match_action_type: :update
+        })
+
+      assert :ok = AshBpmn.Triggers.Index.reload!()
+
+      assert :ok = sweep!(@acme)
+
+      assert [%{status: :failed, reason: :funnel_error, event_id: event_id}] =
+               dispatches!(@acme, v1.id)
+
+      assert event_id == backlog.id
+    end
+
     test "a later version in another tenant leaves this tenant's version live" do
       publish_definition!(@acme, "onboarding_sweep")
       acme_v1 = subscribe!(@acme, "shared_key", %{process_key: "onboarding_sweep"})

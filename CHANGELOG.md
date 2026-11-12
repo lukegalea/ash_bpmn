@@ -44,6 +44,10 @@ Nothing has been released yet. Everything below is the initial body of work.
   the boundary under the old version, once. New optional
   `AshBpmn.EventSource.latest_sequence/1` callback; without it the boundary is
   found by paging the log.
+  The trigger index lists published versions only, so while the sweep offers
+  a retired version the funnel no longer gates on it: a backlog whose new
+  version watches another resource or action type, or has been disabled, is
+  still dispatched, and a funnel error in it still leaves its failed row.
 
 - **Trigger depth reaches the instance and what it writes.** The correlator
   now starts each instance with `trigger_depth` set to its dispatch's depth

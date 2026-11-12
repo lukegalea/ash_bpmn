@@ -12,7 +12,10 @@ defmodule AshBpmn.Triggers.Correlator do
 
     1. **Index check** — nobody listening? done, no rows. One ETS lookup
        against `AshBpmn.Triggers.Index`; skipped entirely when the index
-       process is not running (the sweep's subscription query is then the gate).
+       process is not running (the sweep's subscription query is then the gate),
+       and when the sweep offers a superseded version still finishing its window:
+       the index lists published versions only, and the backlog that version owns
+       is dispatched whatever the index says.
     2. **Context** — `AshBpmn.EventSource.context/1`, with every value through
        `AshBpmn.Feel.to_feel_value/1` at the boundary. FEEL numbers are
        decimal, so a plain Elixir integer in the context makes every numeric
@@ -136,7 +139,7 @@ defmodule AshBpmn.Triggers.Correlator do
     raw_ctx = ctx.event_source.context(event)
     feel_ctx = Feel.to_feel_value(raw_ctx)
 
-    if listening?(feel_ctx) do
+    if listening?(feel_ctx, subscriptions) do
       signal? = signal_event?(feel_ctx, ctx)
       depth = event_depth(raw_ctx, signal?) + 1
 
@@ -205,7 +208,7 @@ defmodule AshBpmn.Triggers.Correlator do
         {:ok, raw_ctx} ->
           feel_ctx = Feel.to_feel_value(raw_ctx)
 
-          if listening?(feel_ctx) do
+          if listening?(feel_ctx, subscriptions) do
             signal? = signal_event?(feel_ctx, ctx)
             sequence = event_sequence(event, raw_ctx, ctx)
             {raw_ctx, candidates(subscriptions, feel_ctx, signal?, sequence)}
@@ -595,8 +598,14 @@ defmodule AshBpmn.Triggers.Correlator do
   # nothing further. The index is an optimisation, not a gate: when it is not
   # running, the sweep's subscription read is what decides, so a missing index
   # costs queries, never correctness.
-  defp listening?(feel_ctx) do
+  #
+  # The index is built from published, enabled subscriptions. A retired version the sweep
+  # still offers is finishing the window it owned before its successor was published, and its
+  # successor may watch another resource or action type, or be disabled: the index would then
+  # skip the backlog, leaving no row. While the sweep offers one, the match decides.
+  defp listening?(feel_ctx, subscriptions) do
     not Index.started?() or
+      Enum.any?(subscriptions, &(Map.get(&1, :status) == :retired)) or
       Index.interested?(feel_ctx[@event]["resource"], feel_ctx[@event]["action_type"])
   end
 
