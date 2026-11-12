@@ -344,8 +344,14 @@ defmodule AshBpmn.TriggersRuntimeTest do
 
       assert :ok = sweep!(@acme)
 
-      event_ids = dispatches!(@acme, sub.id) |> Enum.map(& &1.event_id) |> Enum.sort()
-      assert event_ids == Enum.sort([first.id, last.id])
+      rows = dispatches!(@acme, sub.id)
+
+      started = rows |> Enum.filter(&(&1.status == :started)) |> Enum.map(& &1.event_id)
+      assert Enum.sort(started) == Enum.sort([first.id, last.id])
+
+      # The bad event is not lost behind the cursor: it left a failed row first.
+      assert [%{status: :failed, reason: :funnel_error}] =
+               Enum.filter(rows, &(&1.event_id == poisoned.id))
 
       assert cursor!(@acme).last_sequence == last.sequence
     end

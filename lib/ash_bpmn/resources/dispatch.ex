@@ -28,6 +28,12 @@ defmodule AshBpmn.Resources.Dispatch do
   an unqualified unique index would happily dedupe nothing on the side that is
   nil. Together they are both halves of the G-1 guarantee.
 
+  `:once_per_event` does not count `:failed` rows. A failure is a record that
+  something did not happen, so it must not occupy the place of the thing that
+  did not happen: a failed event can be driven again
+  (`AshBpmn.Triggers.Correlator.dispatch_event/4` with `redrive: true`), as many
+  times as it takes, and its start is still the only start it can have.
+
   More usefully, a dispatch answers **"why did this process start?"** — the
   question anyone asks first when a process appears that nobody remembers
   requesting. It records the subscription, the event, the decision and the rule
@@ -39,7 +45,10 @@ defmodule AshBpmn.Resources.Dispatch do
   ## Failures are rows, not exceptions
 
   A subscription that could not dispatch records `:failed` (or `:skipped`) with
-  a `reason`, and the cursor advances past it. That is deliberate: a broken
+  a `reason`, and the cursor advances past it. When the funnel itself raised,
+  the sweep writes the `:failed` row (reason `:funnel_error`, the message in
+  `error`) in a fresh transaction, and the cursor passes the event only once
+  that row exists. That is deliberate: a broken
   subscription must never wedge a tenant's event stream, and a failure that is
   queryable is one somebody can find.
 
@@ -95,9 +104,12 @@ defmodule AshBpmn.Resources.Dispatch do
           # Both sides of G-1, as partial unique indexes: the nil side must not
           # participate, or a unique index would dedupe nothing where Postgres
           # treats NULLs as distinct.
+          #
+          # A `:failed` row is outside the start side's index, so a failed event
+          # can be re-driven; a second start for it still conflicts.
           index [:subscription_id, :event_id],
             unique: true,
-            where: "subscription_id IS NOT NULL"
+            where: "subscription_id IS NOT NULL AND status <> 'failed'"
 
           index [:waiting_token_id, :event_id],
             unique: true,
@@ -121,7 +133,8 @@ defmodule AshBpmn.Resources.Dispatch do
       # what this replaces and what it deliberately does not claim to be.
       if unquote(policies?) do
         policies do
-          bypass AshBpmn.Checks.AshBpmnInteraction do
+          bypass {AshBpmn.Checks.AshBpmnInteraction,
+                  actions: unquote(AshBpmn.Checks.AshBpmnInteraction.engine_actions(:dispatch))} do
             authorize_if always()
           end
         end
@@ -189,11 +202,21 @@ defmodule AshBpmn.Resources.Dispatch do
                         :fan_out_exceeded,
                         :disabled,
                         :already_dispatched,
-                        :depth_exceeded
+                        :depth_exceeded,
+                        # The funnel raised for this event and its transaction rolled
+                        # back. Written by the sweep, after the fact, in a transaction
+                        # of its own; `error` carries what was raised.
+                        :funnel_error
                       ]
 
           public? true
           description "Why a dispatch was skipped or failed. Nil when it started."
+        end
+
+        attribute :error, :string do
+          public? true
+
+          description "What the funnel raised, on a :funnel_error row. Nil otherwise."
         end
 
         attribute :process_key, :string do
@@ -291,7 +314,8 @@ defmodule AshBpmn.Resources.Dispatch do
             :decision_key,
             :fired_rule,
             :correlation_id,
-            :depth
+            :depth,
+            :error
           ]
 
           validate AshBpmn.Resources.Dispatch.RequiresTarget

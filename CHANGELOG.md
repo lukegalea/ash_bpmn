@@ -27,6 +27,52 @@ Nothing has been released yet. Everything below is the initial body of work.
   fresh PLT, `mix dialyzer --format short` reports nothing, so the job is no
   longer advisory and fails the build on new warnings.
 
+- **A funnel that raises leaves a failed row, and the cursor waits for it
+  (behaviour change).** The sweep used to log the exception and move its
+  cursor past the event, which then left no trace. It now writes a `:failed`
+  dispatch with reason `:funnel_error` and the message in a new `error`
+  column, in a fresh transaction, for each subscription the event could have
+  reached, and advances only after that row exists. If the row cannot be
+  written the job raises and the cursor stays.
+
+- **Publishing a subscription's next version retires the previous one
+  (behaviour change).** Both used to stay published, so every matching event
+  started a process under each. The publish now retires the published
+  versions of the key in the same transaction and stamps the tenant's newest
+  event sequence as the boundary: `effective_sequence` on the new version,
+  `retired_sequence` on the old. The sweep still dispatches the backlog before
+  the boundary under the old version, once. New optional
+  `AshBpmn.EventSource.latest_sequence/1` callback; without it the boundary is
+  found by paging the log.
+  The trigger index lists published versions only, so while the sweep offers
+  a retired version the funnel no longer gates on it: a backlog whose new
+  version watches another resource or action type, or has been disabled, is
+  still dispatched, and a funnel error in it still leaves its failed row.
+
+- **Trigger depth reaches the instance and what it writes.** The correlator
+  now starts each instance with `trigger_depth` set to its dispatch's depth
+  (its moduledoc said it could not). Service tasks receive it as
+  `ctx[:trigger_depth]`, `ash:call` callables as
+  `context.ash_bpmn.trigger_depth`, and a signal row's own `depth` now counts
+  as the hop it is. A signal row is now recognised whichever spelling the
+  adapter gives its resource (`"MyApp.Signal"` or `"Elixir.MyApp.Signal"`);
+  before, only the prefixed one matched. A host that stamps the value into the audit metadata of
+  what a process writes bounds a process that writes the resource its own
+  subscription watches.
+
+- **A failed dispatch can be re-driven (behaviour change).** The
+  `(subscription_id, event_id)` unique index now excludes `:failed` rows, and
+  `Correlator.dispatch_event/4` takes `redrive: true`. An ordinary sweep still
+  treats a failed row as the record and does not retry it. Hosts regenerate
+  the index with `mix ash.codegen`.
+
+- **The generated engine bypass covers only the generated actions (behaviour
+  change).** It used to authorize any action carrying the engine's mark,
+  including actions a host added to a generated resource and kept for people.
+  `AshBpmn.Checks.AshBpmnInteraction` now takes `actions:`, and every macro
+  passes its own list (`engine_actions/1`). A host action reached with
+  `AshBpmn.Scope.engine/2` needs a host policy now.
+
 - **A reconnect no longer replaces unsaved edits in the designer.** Entering
   the route pushes `load_xml` again on every reconnect, and the hook imported
   it over whatever was on the canvas. That push now carries `route_key`, and

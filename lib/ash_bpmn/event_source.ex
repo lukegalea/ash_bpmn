@@ -84,4 +84,44 @@ defmodule AshBpmn.EventSource do
   silently waiting forever.
   """
   @callback audited?(resource :: module()) :: boolean()
+
+  @doc """
+  The newest sequence in `tenant`'s log, or `0` when the log is empty.
+
+  Optional. Without it the engine finds the high-water mark by paging `c:stream/3` to the
+  end, which costs a walk of the tenant's log; an adapter that can answer with one query
+  should. Read when a fresh cursor is created and when a subscription version supersedes
+  another (the boundary between the two versions' events).
+  """
+  @callback latest_sequence(tenant :: term()) :: integer()
+
+  @optional_callbacks latest_sequence: 1
+
+  @high_water_batch 500
+
+  @doc """
+  The newest sequence in `tenant`'s log through `event_source`, `0` when the log is empty:
+  `c:latest_sequence/1` when the adapter implements it, otherwise by paging `c:stream/3`.
+  """
+  @spec high_water(module(), term()) :: integer()
+  def high_water(event_source, tenant) do
+    Code.ensure_loaded(event_source)
+
+    if function_exported?(event_source, :latest_sequence, 1) do
+      event_source.latest_sequence(tenant) || 0
+    else
+      page_to_end(event_source, tenant, 0, nil)
+    end
+  end
+
+  defp page_to_end(event_source, tenant, after_sequence, last) do
+    case event_source.stream(tenant, after_sequence, @high_water_batch) do
+      {:ok, {[], _}} ->
+        last || 0
+
+      {:ok, {events, _}} ->
+        last = event_source.sequence(List.last(events))
+        page_to_end(event_source, tenant, last, last)
+    end
+  end
 end

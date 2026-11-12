@@ -64,7 +64,9 @@ defmodule AshBpmn.Resources.ProcessEvent do
       # deliberately does not claim to be.
       if unquote(policies?) do
         policies do
-          bypass AshBpmn.Checks.AshBpmnInteraction do
+          bypass {AshBpmn.Checks.AshBpmnInteraction,
+                  actions:
+                    unquote(AshBpmn.Checks.AshBpmnInteraction.engine_actions(:process_event))} do
             authorize_if always()
           end
         end

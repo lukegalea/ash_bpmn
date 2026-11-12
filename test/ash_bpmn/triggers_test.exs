@@ -160,9 +160,10 @@ defmodule AshBpmn.TriggersTest do
 
       assert [%{version: 2}] = Subscription.latest_published!("fetch", engine_scope(@acme))
 
-      # A retired version stops being the published answer.
+      # Publishing v2 retired v1, so retiring v2 leaves nothing published for the key.
+      assert Subscription.by_key_version!("fetch", 1, engine_scope(@acme)).status == :retired
       Subscription.retire!(v2, engine_scope(@acme))
-      assert [%{version: 1}] = Subscription.latest_published!("fetch", engine_scope(@acme))
+      assert [] = Subscription.latest_published!("fetch", engine_scope(@acme))
     end
 
     test "match_resource is accepted in either spelling and stored in the short one" do

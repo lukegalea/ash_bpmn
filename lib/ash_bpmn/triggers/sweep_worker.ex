@@ -38,7 +38,7 @@ defmodule AshBpmn.Triggers.SweepWorker do
   and the cursor makes completeness independent of either: an event a racing
   sweep missed is still behind some cursor and gets picked up.
 
-  ## The cursor advances past failures
+  ## The cursor advances past failures, once they are rows
 
   A subscription whose guard records `:guard_error`, whose decision errors, or
   whose process key has no published definition records a failed dispatch
@@ -46,6 +46,14 @@ defmodule AshBpmn.Triggers.SweepWorker do
   tenant's event stream. The failure is a queryable row rather than a stuck
   queue, which is the difference between a problem someone finds and a problem
   someone reports.
+
+  The same holds when the funnel itself raises. The event's transaction rolls
+  back, taking any row it wrote with it, so the sweep writes the `:failed` rows
+  (`AshBpmn.Triggers.Correlator.record_aborted/4`, reason `:funnel_error`, the
+  message in `error`) in a **fresh** transaction under the same lock. If even
+  that cannot be written, the job raises and the cursor stays where it was:
+  an event is passed only once it has left a row, so a failure can be found and
+  re-driven instead of vanishing behind the cursor.
 
   ## A fresh cursor starts at the newest event
 
@@ -126,7 +134,7 @@ defmodule AshBpmn.Triggers.SweepWorker do
         :ok
 
       {:ok, {events, _}} ->
-        subscriptions = subscriptions(resources.subscription, scope)
+        subscriptions = subscriptions(resources.subscription, scope, position)
 
         ctx = %{
           scope: scope,
@@ -154,20 +162,45 @@ defmodule AshBpmn.Triggers.SweepWorker do
   # not the batch — found by building the batch-sized alternative and watching
   # one bad event take the whole sweep, instance and all.
   defp dispatch_isolated(repo, tenant, event, subscriptions, ctx) do
-    repo.transaction(fn ->
-      lock(repo, tenant)
-      Correlator.dispatch_event(event, subscriptions, ctx)
-    end)
+    outcome =
+      try do
+        repo.transaction(fn ->
+          lock(repo, tenant)
+          Correlator.dispatch_event(event, subscriptions, ctx)
+        end)
+      rescue
+        e -> {:raised, Exception.message(e)}
+      end
+
+    case outcome do
+      {:ok, _} ->
+        :ok
+
+      # A statement failed inside the funnel and the transaction could not commit. Nothing it
+      # wrote survived, so it is recorded like a raise.
+      {:error, reason} ->
+        record_aborted(repo, tenant, event, subscriptions, ctx, inspect(reason, limit: 10))
+
+      {:raised, message} ->
+        record_aborted(repo, tenant, event, subscriptions, ctx, message)
+    end
+  end
+
+  # In a transaction of its own: the funnel's rolled back. A failure here raises out of the
+  # job, so the cursor does not pass an event that left no row.
+  defp record_aborted(repo, tenant, event, subscriptions, ctx, message) do
+    Logger.error(
+      "ash_bpmn trigger dispatch for event #{event_id(event)} failed and was rolled back: " <>
+        message
+    )
+
+    {:ok, :ok} =
+      repo.transaction(fn ->
+        lock(repo, tenant)
+        Correlator.record_aborted(event, subscriptions, ctx, message)
+      end)
 
     :ok
-  rescue
-    e ->
-      Logger.error(
-        "ash_bpmn trigger dispatch for event #{event_id(event)} failed and was rolled back: " <>
-          Exception.message(e)
-      )
-
-      :ok
   end
 
   defp advance_position(repo, tenant, last_sequence, store_ctx) do
@@ -202,10 +235,20 @@ defmodule AshBpmn.Triggers.SweepWorker do
   # subscription is not matched, and nothing is recorded for it (which is also
   # why disabling is not retroactive: the rows and instances that predate the
   # switch are history, not pending work).
-  defp subscriptions(subscription_resource, scope) do
+  #
+  # Plus the superseded versions whose window still reaches past the cursor: the
+  # events committed before their successor was published are still theirs (see
+  # `AshBpmn.Resources.Subscription`). The funnel offers each event only to the
+  # version in force for it.
+  defp subscriptions(subscription_resource, scope, position) do
     subscription_resource
     |> Ash.Query.for_read(:read)
-    |> Ash.Query.filter(status == :published and enabled == true and kind == :message)
+    |> Ash.Query.filter(
+      enabled == true and kind == :message and
+        (status == :published or
+           (status == :retired and not is_nil(retired_sequence) and
+              retired_sequence > ^position))
+    )
     |> Ash.read!(Scope.engine(scope))
   end
 

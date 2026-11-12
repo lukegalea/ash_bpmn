@@ -21,9 +21,18 @@ defmodule AshBpmn.EventSourceTest do
       # ...and the double declares it, so dialyzer checks conformance.
       assert AshBpmn.EventSource in @double.module_info(:attributes)[:behaviour]
 
-      for {name, arity} <- callbacks do
+      # The optional `latest_sequence/1` has a fallback (paging `stream/3`), so the double
+      # leaves it out on purpose: that is the path a minimal adapter takes.
+      optional = AshBpmn.EventSource.behaviour_info(:optional_callbacks)
+      assert {:latest_sequence, 1} in optional
+
+      for {name, arity} <- callbacks -- optional do
         assert function_exported?(@double, name, arity)
       end
+    end
+
+    test "the high-water mark is found by paging when the adapter has no latest_sequence/1" do
+      assert AshBpmn.EventSource.high_water(@double, "org-1") == 2
     end
 
     test "stream/3 returns events above the cursor, ascending, bounded" do
