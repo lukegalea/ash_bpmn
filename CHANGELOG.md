@@ -83,6 +83,17 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Features:
 
+- **A task nobody can act on is answered, not left to sit.** A user task, or
+  a `RequireApproval` task, whose candidates minus its exclusions leave
+  nobody used to be written with no candidate rows and stay open for ever.
+  A resolver may now implement the optional `no_eligible_candidate/2`: it is
+  called at task creation with the node, the specs, the resolved candidates
+  and the excluded ids, and returns fallback principals. The engine subtracts
+  the exclusions from them again, writes the task with what remains, and
+  records a `:no_eligible_candidate` process event naming the task, with the
+  counts, the excluded ids, whether it escalated and any error the fallback
+  returned or raised. A resolver without the callback sees no change.
+
 - **The hooks are exported with the events they handle.** `priv/js/hooks.js`
   maps each hook's registered name to the events it passes to `handleEvent`
   and a `load` that fetches its code, with no top-level imports of its own —

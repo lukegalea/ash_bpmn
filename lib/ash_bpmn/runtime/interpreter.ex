@@ -670,8 +670,21 @@ defmodule AshBpmn.Runtime.Interpreter do
     {:ok, candidates} = resolver.candidates(candidate_specs, candidate_ctx)
     {:ok, exclusions} = resolver.exclusions(exclusion_specs, candidate_ctx)
 
-    filtered_candidates =
-      Enum.reject(candidates, fn c -> c.id in exclusions end)
+    # Nobody left after the exclusions is answered by the host, if it implements
+    # `no_eligible_candidate/2`; see "A task nobody can act on" in `AshBpmn.AssignmentResolver`.
+    {filtered_candidates, unassignable} =
+      AshBpmn.AssignmentResolver.settle(
+        resolver,
+        Enum.reject(candidates, fn c -> c.id in exclusions end),
+        %{
+          node_id: node_id,
+          candidate_specs: candidate_specs,
+          exclusion_specs: exclusion_specs,
+          candidates: candidates,
+          exclusions: exclusions
+        },
+        candidate_ctx
+      )
 
     # A placeholder key, not a real id: the interpreter is pure, so it cannot
     # know the id the data layer will assign. It labels the task here and the
@@ -700,7 +713,9 @@ defmodule AshBpmn.Runtime.Interpreter do
       # directly. Leaving both nil is what keeps it out of the correlator's query
       # rather than something that needs excluding from it.
       park_token: %{},
-      events: [event_attrs(ctx, node_id, :task_created)],
+      events:
+        [event_attrs(ctx, node_id, :task_created)] ++
+          unassignable_event(ctx, node_id, task_ref, unassignable),
       tasks: [{task_ref, task_attrs}],
       candidates: {task_ref, candidate_attrs},
       timers: {task_ref, timer_jobs(node["timers"] || [])},
@@ -708,6 +723,18 @@ defmodule AshBpmn.Runtime.Interpreter do
     ]
 
     {:ok, effects}
+  end
+
+  # Carries the task's placeholder key, which the worker swaps for the task id it creates in the
+  # same step, so the event names the task a host raises its finding against.
+  defp unassignable_event(_ctx, _node_id, _task_ref, nil), do: []
+
+  defp unassignable_event(ctx, node_id, task_ref, data) do
+    [
+      ctx
+      |> event_attrs(node_id, :no_eligible_candidate, data)
+      |> Map.put(:task_ref, task_ref)
+    ]
   end
 
   # ── intermediateCatchEvent ───────────────────────────────────────────────
