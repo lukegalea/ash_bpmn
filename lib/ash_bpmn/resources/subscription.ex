@@ -76,6 +76,11 @@ defmodule AshBpmn.Resources.Subscription do
   and hears nothing more. Both columns are the answer to "which version of the rule
   handled this event", read off the dispatch's `event_sequence`.
 
+  The retire is the generated `:supersede` action, and only the publish runs it:
+  `AshBpmn.Resources.Subscription.SupersedeFromPublish` refuses any other caller,
+  whatever the host's policies grant on update actions. To take a version out of
+  force without a successor, use `:retire`.
+
   ## Publish-time verification, in order
 
   Publishing runs the checks the sweep cannot afford to discover at three in
@@ -402,15 +407,20 @@ defmodule AshBpmn.Resources.Subscription do
         end
 
         # The other half of a publish: the version it replaces, retired at the
-        # boundary in the log. Only `SupersedePredecessor` calls it, inside the
-        # publish's transaction.
+        # boundary in the log. Only `SupersedePredecessor` reaches it, inside the
+        # publish's transaction; `SupersedeFromPublish` refuses every other
+        # caller, whatever a host's policies grant. The boundary is a private
+        # argument, so no public interface can supply one.
         update :supersede do
           accept []
           require_atomic? false
 
           argument :retired_sequence, :integer do
             allow_nil? false
+            public? false
           end
+
+          validate AshBpmn.Resources.Subscription.SupersedeFromPublish
 
           validate attribute_equals(:status, :published),
             message: "only a published subscription can be superseded"
@@ -1050,7 +1060,9 @@ defmodule AshBpmn.Resources.Subscription.SupersedePredecessor do
 
   The reads and the retire run as engine work in the changeset's tenant, the way
   `AssignVersion` reads: they are part of an act the caller was already authorized
-  for.
+  for. The retire also carries the publish's mark
+  (`AshBpmn.Resources.Subscription.SupersedeFromPublish.mark/3`), because `:supersede`
+  refuses any caller that does not.
   """
 
   use Ash.Resource.Change
@@ -1082,13 +1094,14 @@ defmodule AshBpmn.Resources.Subscription.SupersedePredecessor do
       predecessors ->
         boundary = boundary(changeset)
 
+        opts =
+          scope
+          |> Scope.engine(private_arguments: %{retired_sequence: boundary})
+          |> AshBpmn.Resources.Subscription.SupersedeFromPublish.mark(key, id)
+
         Enum.each(predecessors, fn predecessor ->
           predecessor
-          |> Ash.Changeset.for_update(
-            :supersede,
-            %{retired_sequence: boundary},
-            Scope.engine(scope)
-          )
+          |> Ash.Changeset.for_update(:supersede, %{}, opts)
           |> Ash.update!()
         end)
 
@@ -1101,6 +1114,74 @@ defmodule AshBpmn.Resources.Subscription.SupersedePredecessor do
     tenant = Map.get(changeset, :to_tenant) || changeset.tenant
     AshBpmn.EventSource.high_water(AshBpmn.Config.event_source!(), tenant)
   end
+end
+
+defmodule AshBpmn.Resources.Subscription.SupersedeFromPublish do
+  @moduledoc """
+  Refuses `:supersede` unless a publish of the same key is running it, inside the
+  publish's transaction.
+
+  `:supersede` retires a published version and stamps the boundary the sweep reads. It is
+  half of a publish, and has no meaning on its own: run directly, it would retire a
+  version that nothing replaces, at a boundary the caller chose. It is an update action,
+  though, so a host policy that lets someone update subscriptions (`action_type(:update)`,
+  say) would otherwise let them run it.
+
+  So the action holds whatever the host's policies say, `policies?: false` included. It
+  passes only when all of these are true:
+
+    * the engine is the caller (the private context flag `AshBpmn.Scope.engine/2` sets,
+      the same one `AshBpmn.Checks.AshBpmnInteraction` reads);
+    * the call carries the publish's own mark, naming the version being published, and
+      that version shares this row's key and is not this row;
+    * it runs inside a transaction, which is the publish's: `SupersedePredecessor` calls
+      it from the publish's `before_action`.
+
+  A person or an agent never satisfies the first, and the engine's mark alone does not
+  satisfy the second. As `AshBpmn.Checks.AshBpmnInteraction` says of the flag, this is not
+  a boundary against code in the same application, which can set private context itself:
+  it stops a policy from opening the action by accident.
+  """
+
+  use Ash.Resource.Validation
+
+  @key :ash_bpmn_superseded_by
+
+  @doc """
+  Adds the publish's mark to engine options: the version being published, by key and id.
+
+  Called by `AshBpmn.Resources.Subscription.SupersedePredecessor` only.
+  """
+  @spec mark(keyword(), String.t(), Ecto.UUID.t()) :: keyword()
+  def mark(opts, key, id) do
+    Keyword.update(opts, :context, %{private: %{@key => %{key: key, id: id}}}, fn context ->
+      private = context |> Map.get(:private, %{}) |> Map.put(@key, %{key: key, id: id})
+      Map.put(context, :private, private)
+    end)
+  end
+
+  @impl true
+  def validate(changeset, _opts, _context) do
+    private = Map.get(changeset.context, :private) || %{}
+
+    if Map.get(private, :ash_bpmn?) == true and
+         from_publish?(Map.get(private, @key), changeset.data) and
+         Ash.DataLayer.in_transaction?(changeset.resource) do
+      :ok
+    else
+      {:error,
+       field: :status,
+       message:
+         "supersede is run by publish, inside its transaction; publish the next version " <>
+           "to retire this one, or retire it"}
+    end
+  end
+
+  defp from_publish?(%{key: key, id: id}, %{key: key, id: own_id})
+       when is_binary(key) and not is_nil(id) and id != own_id,
+       do: true
+
+  defp from_publish?(_mark, _data), do: false
 end
 
 defmodule AshBpmn.Resources.Subscription.FilterLatestPublished do

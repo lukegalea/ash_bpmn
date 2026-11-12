@@ -18,6 +18,19 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Bug Fixes:
 
+- **Only a publish runs a subscription's `:supersede` (behaviour change).**
+  `:supersede` is the half of a publish that retires the previous version and
+  stamps its `retired_sequence`. It is an update action, so a host policy
+  that let someone update subscriptions (`action_type(:update)`, say) let
+  them run it directly: retire a live version that nothing replaced, at a
+  boundary they chose. It now refuses every caller except
+  `SupersedePredecessor` running inside the publish's transaction
+  (`AshBpmn.Resources.Subscription.SupersedeFromPublish`), whatever the host's
+  policies grant, `policies?: false` included, and `retired_sequence` is a
+  private argument that no public interface can supply. The engine bypass
+  still lists `:supersede`, so the publish's own call is authorized as
+  before. Retire a version on its own with `:retire`.
+
 - **The dialyzer job gates again.** CI reported 59 calls to missing
   functions (`Enum.__in__/2`, `:elixir_quote.validate_quote/1` and
   `unquote/1`) because the PLT cache key had no Elixir version in it: the
