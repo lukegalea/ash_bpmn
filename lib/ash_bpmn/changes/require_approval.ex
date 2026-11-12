@@ -106,8 +106,23 @@ defmodule AshBpmn.Changes.RequireApproval do
         resolver_ctx
       )
 
-    filtered_candidates =
-      Enum.reject(candidates, fn c -> c.id in exclusions end)
+    # As a diagram's user task: an empty set is answered by the host's
+    # `no_eligible_candidate/2`, if it implements one.
+    {filtered_candidates, unassignable} =
+      AssignmentResolver.settle(
+        resolver,
+        Enum.reject(candidates, fn c -> c.id in exclusions end),
+        %{
+          node_id: key,
+          candidate_specs:
+            Enum.map(candidate_specs, &AssignmentResolver.normalize_candidate_spec/1),
+          exclusion_specs:
+            Enum.map(exclusion_specs, &AssignmentResolver.normalize_exclusion_spec/1),
+          candidates: candidates,
+          exclusions: exclusions
+        },
+        resolver_ctx
+      )
 
     subject_type = subject.__struct__ |> to_string()
     subject_id = subject.id
@@ -144,6 +159,7 @@ defmodule AshBpmn.Changes.RequireApproval do
         expire_in: expire_in,
         candidates: filtered_candidates,
         exclusions: exclusions,
+        unassignable: unassignable,
         result: result
       })
     end
@@ -172,6 +188,7 @@ defmodule AshBpmn.Changes.RequireApproval do
       expire_in: expire_in,
       candidates: filtered_candidates,
       exclusions: exclusions,
+      unassignable: unassignable,
       result: result
     } = spec
 
@@ -225,6 +242,13 @@ defmodule AshBpmn.Changes.RequireApproval do
         },
         AshBpmn.Scope.engine(scope)
       )
+
+      if unassignable do
+        resources.process_event.create!(
+          %{kind: :no_eligible_candidate, task_id: task.id, data: unassignable},
+          AshBpmn.Scope.engine(scope)
+        )
+      end
 
       {:ok, result}
     rescue

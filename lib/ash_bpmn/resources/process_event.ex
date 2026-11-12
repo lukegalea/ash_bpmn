@@ -103,6 +103,10 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         :node_completed,
                         :gateway_branch_taken,
                         :task_created,
+                        # A task's candidates, minus its exclusions, left nobody, and the
+                        # host's `no_eligible_candidate/2` was asked who gets it. Names the
+                        # task, and whether anyone did.
+                        :no_eligible_candidate,
                         :task_claimed,
                         :task_delegated,
                         :task_completed,

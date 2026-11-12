@@ -714,7 +714,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
       {:events, event_attrs_list} ->
         Enum.each(event_attrs_list, fn attrs ->
-          resources.process_event.create!(attrs, Scope.engine(scope))
+          resources.process_event.create!(with_task_id(attrs, task_id_map), Scope.engine(scope))
         end)
 
       {:jobs, job_list} ->
@@ -885,6 +885,15 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     # the row from before it did; a plain end event already asked, before it completed.
     unless Enum.any?(effects, &ends_instance?/1) do
       release_stranded_joins(resources, graph, ctx[:instance], scope)
+    end
+  end
+
+  # An event the interpreter labelled with a task's placeholder key names the task this step
+  # just created. Only `:no_eligible_candidate` carries one; every other event passes as it was.
+  defp with_task_id(attrs, task_id_map) do
+    case Map.pop(attrs, :task_ref) do
+      {nil, attrs} -> attrs
+      {task_ref, attrs} -> Map.put(attrs, :task_id, Map.fetch!(task_id_map, task_ref))
     end
   end
 

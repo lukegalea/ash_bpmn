@@ -200,3 +200,50 @@ defmodule AshBpmn.Test.NoEscalateResolver do
   defdelegate candidates(specs, ctx), to: AshBpmn.Test.Resolver
   defdelegate exclusions(specs, ctx), to: AshBpmn.Test.Resolver
 end
+
+defmodule AshBpmn.Test.FallbackResolver do
+  @moduledoc """
+  `AshBpmn.Test.Resolver` with a `no_eligible_candidate/2`, for the tests of a task whose
+  candidates, minus its exclusions, leave nobody.
+
+  A separate module rather than a callback on the shared double, so every other test keeps
+  running against a host that does not implement it, which is what each existing host is.
+
+  `stage/1` sets what the callback answers: `{:ok, principals}`, `{:error, reason}`,
+  `{:__raise__, message}`, or any other term to return verbatim. `stage_empty_candidates/0`
+  makes `candidates/2` resolve nobody, to reach the empty set from a `RequireApproval` change.
+  """
+
+  defdelegate exclusions(specs, ctx), to: AshBpmn.Test.Resolver
+
+  def candidates(specs, ctx) do
+    if Process.get({__MODULE__, :empty_candidates}),
+      do: {:ok, []},
+      else: AshBpmn.Test.Resolver.candidates(specs, ctx)
+  end
+
+  def no_eligible_candidate(info, _ctx) do
+    Process.put({__MODULE__, :calls}, calls() ++ [info])
+
+    case Process.get({__MODULE__, :result}, {:ok, []}) do
+      {:__raise__, message} -> raise message
+      result -> result
+    end
+  end
+
+  @doc "Stages what `no_eligible_candidate/2` returns."
+  def stage(result), do: Process.put({__MODULE__, :result}, result)
+
+  @doc "Makes `candidates/2` resolve nobody."
+  def stage_empty_candidates, do: Process.put({__MODULE__, :empty_candidates}, true)
+
+  @doc "The `info` maps `no_eligible_candidate/2` was called with, in order."
+  def calls, do: Process.get({__MODULE__, :calls}, [])
+
+  @doc "Forgets what was staged and recorded."
+  def clear do
+    Process.delete({__MODULE__, :calls})
+    Process.delete({__MODULE__, :result})
+    Process.delete({__MODULE__, :empty_candidates})
+  end
+end

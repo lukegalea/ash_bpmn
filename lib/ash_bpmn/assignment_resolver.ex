@@ -42,6 +42,40 @@ defmodule AshBpmn.AssignmentResolver do
     * `escalate/2` — (optional) handle escalation for a task.
     * `team_ids/2` — (optional) the teams a person acts for, so a `:team`
       candidate row is matched. See "Team candidates" below.
+    * `no_eligible_candidate/2` — (optional) who gets a task when its
+      candidates, minus its exclusions, leave nobody. See "A task nobody can
+      act on" below.
+
+  ## A task nobody can act on
+
+  A task whose candidates are all excluded is written with no candidate rows,
+  and nobody can ever claim or complete it. Without this callback that is what
+  happens, silently: the engine cannot tell an empty set the modeller meant
+  from one the organization's shape produced (the only administrator granted
+  the role a review is about, and excluding the granter leaves nobody).
+
+  A host that implements `no_eligible_candidate/2` is told, at task creation:
+
+      @impl true
+      def no_eligible_candidate(_info, ctx),
+        do: candidates([%{"kind" => "role", "of" => "Operator"}], ctx)
+
+  `info` carries `:node_id`, `:candidate_specs` and `:exclusion_specs` (as the
+  other callbacks receive them), `:candidates` (what `candidates/2` resolved,
+  before the exclusions) and `:exclusions` (the excluded ids). Return the
+  fallback principals, `{:ok, []}` for none, or `{:error, reason}`.
+
+  The engine subtracts the exclusions from the fallback again, so a fallback
+  can widen who may act but never hands the task to someone the diagram
+  excluded. It writes the task with what remains and records a
+  `:no_eligible_candidate` process event carrying the task id, how many
+  candidates there were, the excluded ids, how many fallback principals remain
+  and whether the task was escalated, so a host can raise a finding from it in
+  the same transaction. A fallback that errors or raises is recorded on that
+  event and the task is written with nobody: the escalation failing must not
+  stop the task from existing.
+
+  A host that does not implement the callback sees no change.
 
   ## Team candidates
 
@@ -91,7 +125,75 @@ defmodule AshBpmn.AssignmentResolver do
   """
   @callback team_ids(principal :: map(), ctx :: map()) :: [Ash.UUID.t()]
 
-  @optional_callbacks escalate: 2, team_ids: 2
+  @doc """
+  Who may act on a task whose candidates, minus its exclusions, left nobody.
+
+  Called once, at task creation, and only when that set is empty. See "A task
+  nobody can act on" in the moduledoc for `info` and what the engine does with
+  the answer.
+  """
+  @callback no_eligible_candidate(info :: map(), ctx :: map()) ::
+              {:ok, [principal()]} | {:error, term()}
+
+  @optional_callbacks escalate: 2, team_ids: 2, no_eligible_candidate: 2
+
+  @doc """
+  The candidates a task is written with, and the `:no_eligible_candidate` event
+  data when it had none.
+
+  `eligible` is the candidates minus the exclusions. When it is non-empty, or
+  the resolver does not implement `no_eligible_candidate/2`, it is returned
+  unchanged with `nil`. Otherwise the resolver's fallback, minus the exclusions,
+  is returned with the event data. Both task-creating paths (a diagram's user
+  task and `AshBpmn.Changes.RequireApproval`) call this, so they answer an empty
+  set the same way.
+  """
+  @spec settle(module(), [principal()], map(), map()) :: {[principal()], map() | nil}
+  def settle(resolver, eligible, info, ctx)
+
+  def settle(_resolver, [_ | _] = eligible, _info, _ctx), do: {eligible, nil}
+
+  def settle(resolver, [], info, ctx) do
+    if Code.ensure_loaded?(resolver) and function_exported?(resolver, :no_eligible_candidate, 2) do
+      exclusions = info |> Map.get(:exclusions, []) |> Enum.reject(&is_nil/1) |> Enum.uniq()
+      {fallback, error} = fallback(resolver, info, ctx)
+
+      # The engine's guarantee, not the host's: an excluded person never comes back in
+      # through the fallback, whatever the fallback returned.
+      remaining =
+        fallback
+        |> Enum.reject(fn principal -> principal.id in exclusions end)
+        |> Enum.uniq_by(&{&1.type, &1.id})
+
+      data =
+        %{
+          "candidates" => length(Map.get(info, :candidates, [])),
+          "excluded" => exclusions,
+          "fallback" => length(remaining),
+          "escalated" => remaining != []
+        }
+        |> then(&if(error, do: Map.put(&1, "error", error), else: &1))
+
+      {remaining, data}
+    else
+      {[], nil}
+    end
+  end
+
+  defp fallback(resolver, info, ctx) do
+    case resolver.no_eligible_candidate(info, ctx) do
+      {:ok, principals} when is_list(principals) ->
+        {principals, nil}
+
+      {:error, reason} ->
+        {[], inspect(reason, limit: 5)}
+
+      other ->
+        {[], "no_eligible_candidate/2 returned an undeclared shape: #{inspect(other, limit: 5)}"}
+    end
+  rescue
+    exception -> {[], Exception.message(exception)}
+  end
 
   @doc """
   Normalizes a candidate spec into the string-keyed map resolvers receive.
