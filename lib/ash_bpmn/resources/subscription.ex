@@ -27,7 +27,10 @@ defmodule AshBpmn.Resources.Subscription do
       `AshBpmn.Resources.Base`.
     * `:base_opts` — options passed to `:base` verbatim, with `:domain` filled
       in. Ignored unless `:base` is set.
-    * `:policies?` — emit the engine bypass policy (default `true`). See
+    * `:policies?` — emit the engine bypass policy (default `true`). It covers
+      only the actions this macro generates
+      (`AshBpmn.Checks.AshBpmnInteraction.engine_actions(:subscription)`), so an
+      action the host adds is judged by the host's own policies. See
       `AshBpmn.Checks.AshBpmnInteraction`.
 
   ## `enabled` is not `status`, and disabling is not retroactive
@@ -38,12 +41,19 @@ defmodule AshBpmn.Resources.Subscription do
   version of it. So `enable`/`disable` are separate actions that touch nothing
   but the switch.
 
-  **Disabling does not un-fire what is already behind the cursor.** Events that
-  arrived while the subscription was enabled will still be dispatched when the
-  sweep reaches them. That is the opposite of what everyone assumes and is
-  stated here rather than discovered. `latest_published` keeps returning a
-  disabled subscription for the same reason: it answers "what is deployed",
-  not "what is switched on".
+  **Disabling takes effect at the next sweep batch, whenever the events
+  happened.** The sweep reads the enabled subscriptions once per batch
+  (`AshBpmn.Triggers.SweepWorker`), so an event it reaches after the switch is
+  not offered to a disabled subscription, even one that committed while the
+  subscription was enabled: no dispatch row is written for it, and the cursor
+  moves past it. Enabling the subscription again does not bring those events
+  back, and they leave no `:failed` row to re-drive
+  (`AshBpmn.Triggers.Correlator.dispatch_event/4` with `redrive: true`).
+
+  **Disabling does not un-fire what already dispatched.** The dispatch rows and
+  the instances they started stay as they are, and no switch rewrites them.
+  `latest_published` keeps returning a disabled subscription for the same
+  reason: it answers "what is deployed", not "what is switched on".
 
   ## A new version supersedes the old one, at a boundary in the log
 
@@ -58,7 +68,8 @@ defmodule AshBpmn.Resources.Subscription do
     * a version with an `effective_sequence` takes events **after** it;
     * a superseded version keeps the events **up to and including** its
       `retired_sequence`, so the backlog the sweep had not reached when v2 was
-      published is still dispatched, once, under v1.
+      published is still dispatched, once, under v1 (while v1 stays enabled:
+      disabling it drops the rest of its window, as above).
 
   A first version has no `effective_sequence` (no lower bound, as before), and a
   version retired with `:retire` rather than superseded has no `retired_sequence`
