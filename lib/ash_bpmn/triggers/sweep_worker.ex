@@ -117,12 +117,8 @@ defmodule AshBpmn.Triggers.SweepWorker do
     started = System.monotonic_time(:millisecond)
     tenant = args["tenant"]
 
-    # Refuses, with an instructive message, when no adapter is configured: the
-    # sweep is the one caller that cannot work without the host's log.
-    event_source = Config.event_source!()
-    {domain, resources} = Resources.resolve!(args["domain"])
-
-    scope = %Scope{Scope.from_job(args, :sweep) | domain: domain}
+    ctx = context(args["domain"], tenant)
+    %{scope: scope, resources: resources, event_source: event_source} = ctx
     repo = AshPostgres.DataLayer.Info.repo(resources.cursor)
 
     # Through the cursor store rather than the cursor resource, per ADR 0036. The sweep does
@@ -138,14 +134,6 @@ defmodule AshBpmn.Triggers.SweepWorker do
       {:ok, {events, _}} ->
         subscriptions = subscriptions(resources.subscription, scope, position)
 
-        ctx = %{
-          scope: scope,
-          tenant: tenant,
-          domain: domain,
-          resources: resources,
-          event_source: event_source
-        }
-
         Enum.each(events, &dispatch_isolated(repo, tenant, &1, subscriptions, ctx))
 
         last_sequence = event_source.sequence(List.last(events))
@@ -159,6 +147,42 @@ defmodule AshBpmn.Triggers.SweepWorker do
     end
   end
 
+  @doc """
+  The context the sweep runs the funnel in for `tenant`: the scope it acts with, the trigger
+  resources of `domain` (a module, its name, or `nil` to scan the configured domains) and
+  the configured `AshBpmn.EventSource`. For running the funnel outside a sweep, as a
+  re-drive does (`AshBpmn.Triggers.Correlator.dispatch_event/4`).
+
+  Raises, with an instructive message, when no event source is configured: the sweep is the
+  one caller that cannot work without the host's log.
+  """
+  @spec context(module() | String.t() | nil, term()) :: map()
+  def context(domain, tenant) do
+    event_source = Config.event_source!()
+    {domain, resources} = Resources.resolve!(domain)
+
+    %{
+      scope: %Scope{Scope.from_job(%{"tenant" => tenant}, :sweep) | domain: domain},
+      tenant: tenant,
+      domain: domain,
+      resources: resources,
+      event_source: event_source
+    }
+  end
+
+  @doc """
+  Takes `tenant`'s sweep lock for the rest of the current transaction on `repo`.
+
+  Every write the sweep makes for a tenant holds it, so anything else that runs the funnel
+  for that tenant (a re-drive) and takes it too is serialized against the sweep at event
+  granularity. Call it inside a transaction: outside one the lock is released at once.
+  """
+  @spec lock_tenant(module(), term()) :: :ok
+  def lock_tenant(repo, tenant) do
+    repo.query!("SELECT pg_advisory_xact_lock($1, $2)", [@lock_class, tenant_key(tenant)])
+    :ok
+  end
+
   # Each event is dispatched in **its own transaction**, under the per-tenant
   # advisory lock. See the moduledoc for why the lock's scope is the event and
   # not the batch — found by building the batch-sized alternative and watching
@@ -167,7 +191,7 @@ defmodule AshBpmn.Triggers.SweepWorker do
     outcome =
       try do
         repo.transaction(fn ->
-          lock(repo, tenant)
+          lock_tenant(repo, tenant)
           Correlator.dispatch_event(event, subscriptions, ctx)
         end)
       rescue
@@ -198,7 +222,7 @@ defmodule AshBpmn.Triggers.SweepWorker do
 
     {:ok, :ok} =
       repo.transaction(fn ->
-        lock(repo, tenant)
+        lock_tenant(repo, tenant)
         Correlator.record_aborted(event, subscriptions, ctx, message)
       end)
 
@@ -207,15 +231,10 @@ defmodule AshBpmn.Triggers.SweepWorker do
 
   defp advance_position(repo, tenant, last_sequence, store_ctx) do
     repo.transaction(fn ->
-      lock(repo, tenant)
+      lock_tenant(repo, tenant)
       AshBpmn.Triggers.CursorStore.impl().advance(tenant, last_sequence, store_ctx)
     end)
 
-    :ok
-  end
-
-  defp lock(repo, tenant) do
-    repo.query!("SELECT pg_advisory_xact_lock($1, $2)", [@lock_class, tenant_key(tenant)])
     :ok
   end
 

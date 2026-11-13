@@ -94,7 +94,9 @@ defmodule AshBpmn.Triggers.Correlator do
   dispatched" then (nor by the dispatch identity), while any other row still
   is, so a re-drive can turn a failure into a start but never start twice. An
   ordinary sweep treats every row, failed included, as the record and does not
-  retry it. Catch delivery is not repeated by a re-drive.
+  retry it. Catch delivery is not repeated by a re-drive. A host re-drives
+  through `AshBpmn.Resources.Redrive`, which calls this for one failed row
+  under the version on it and records the outcome.
 
   ## A funnel that raises
 

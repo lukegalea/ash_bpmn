@@ -272,6 +272,16 @@ gateway conditions, never in resolver specs, never in the invoker.
     `lag` is only there when your adapter implements
     `AshBpmn.EventSource.latest_sequence/1`; implement it with one indexed read.
     See `AshBpmn.Triggers.Telemetry`.
+33. **Re-drive through a `Redrive` resource, as a person.** Instantiate
+    `AshBpmn.Resources.Redrive` in the BPMN domain, beside `Dispatch` and
+    `Subscription`, and call its `:redrive_failed` (a range of the log) or
+    `:record` (one failed dispatch) with the operator as `actor:`. It generates no
+    engine bypass and no policies: write the policy that says who may re-drive,
+    because a re-drive starts processes. Pass `authority:` when a version runs on
+    an authority that can lapse, so it is checked at the re-drive and not borrowed
+    from the moment the event happened. Implement `AshBpmn.EventSource.event/2`
+    with one indexed read. Prefer this to calling
+    `Correlator.dispatch_event/4` with `redrive: true` yourself.
 
 ## Testing
 

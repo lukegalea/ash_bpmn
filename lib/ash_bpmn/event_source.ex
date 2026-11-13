@@ -95,7 +95,16 @@ defmodule AshBpmn.EventSource do
   """
   @callback latest_sequence(tenant :: term()) :: integer()
 
-  @optional_callbacks latest_sequence: 1
+  @doc """
+  The one event `id` in `tenant`'s log: `{:ok, event}`, or `{:error, :not_found}`.
+
+  Optional. Read when a failed dispatch is driven again (`AshBpmn.Triggers.Redrive`), so
+  the engine can fetch that event without knowing the log. Without it the engine reads the
+  event at the sequence the dispatch recorded, through `c:stream/3`, and checks its id.
+  """
+  @callback event(tenant :: term(), id :: term()) :: {:ok, event :: term()} | {:error, :not_found}
+
+  @optional_callbacks latest_sequence: 1, event: 2
 
   @high_water_batch 500
 
@@ -105,13 +114,45 @@ defmodule AshBpmn.EventSource do
   """
   @spec high_water(module(), term()) :: integer()
   def high_water(event_source, tenant) do
-    Code.ensure_loaded(event_source)
-
-    if function_exported?(event_source, :latest_sequence, 1) do
+    if exported?(event_source, :latest_sequence, 1) do
       event_source.latest_sequence(tenant) || 0
     else
       page_to_end(event_source, tenant, 0, nil)
     end
+  end
+
+  @doc """
+  The event `id` in `tenant`'s log through `event_source`: `c:event/2` when the adapter
+  implements it, otherwise the event `c:stream/3` returns at `sequence`, when its id is `id`.
+  `{:error, :not_found}` when neither finds it.
+  """
+  @spec fetch_event(module(), term(), term(), integer() | nil) ::
+          {:ok, term()} | {:error, :not_found}
+  def fetch_event(event_source, tenant, id, sequence) do
+    if exported?(event_source, :event, 2) do
+      case event_source.event(tenant, id) do
+        {:ok, event} when not is_nil(event) -> {:ok, event}
+        _missing -> {:error, :not_found}
+      end
+    else
+      at_sequence(event_source, tenant, id, sequence)
+    end
+  end
+
+  defp at_sequence(_event_source, _tenant, _id, nil), do: {:error, :not_found}
+
+  defp at_sequence(event_source, tenant, id, sequence) do
+    with {:ok, {[event | _], _}} <- event_source.stream(tenant, sequence - 1, 1),
+         ^sequence <- event_source.sequence(event),
+         ^id <- get_in(event_source.context(event), ["event", "id"]) do
+      {:ok, event}
+    else
+      _ -> {:error, :not_found}
+    end
+  end
+
+  defp exported?(event_source, function, arity) do
+    Code.ensure_loaded?(event_source) and function_exported?(event_source, function, arity)
   end
 
   defp page_to_end(event_source, tenant, after_sequence, last) do

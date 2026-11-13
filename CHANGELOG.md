@@ -96,6 +96,27 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Features:
 
+- **Failed trigger dispatches are re-driven by a resource the host
+  instantiates.** `AshBpmn.Resources.Redrive` is a macro like `Dispatch`
+  (`domain:`, `repo:`, `table:` defaulting to `"bpmn_redrives"`, `base:`,
+  `base_opts:`, `tenant?:`) with `:record`, which drives one failed start
+  dispatch again under the subscription version on its row, and
+  `:redrive_failed`, which drives every failed dispatch whose event lies in a
+  range of the tenant's log (by sequence, by time or both; one bound is
+  required). Each re-drive is a row: who asked (`redriven_by_id`, or the
+  base's own creator column with `redriven_by?: false`), the version, the
+  event, and the outcome (`:started`, `:already_started`, `:not_started` or
+  `:no_authority`) with its reason. It starts an event at most once, skips a
+  disabled version, and holds the tenant's sweep lock while it runs the
+  funnel. An optional `authority:` `{module, function, args}` lets a host
+  re-check, at the re-drive, an authority the version runs on. The macro
+  generates no engine bypass: who may re-drive is the host's policy. The
+  engine half is `AshBpmn.Triggers.Redrive`. New optional
+  `c:AshBpmn.EventSource.event/2` callback fetches the one event; without it
+  the event is read at the dispatch's sequence through `stream/3`.
+  `AshBpmn.Triggers.SweepWorker.context/2` and `lock_tenant/2` are public,
+  for running the funnel outside a sweep.
+
 - **The trigger sweep reports its lag and each start's latency itself.**
   Each sweep batch's `[:ash_bpmn, :triggers, :sweep]` event now carries
   `lag`, the events of the tenant's log beyond the cursor, when the adapter

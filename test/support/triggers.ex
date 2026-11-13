@@ -158,6 +158,19 @@ defmodule TriggerTest.EventSource do
   @doc "How many times `context/1` has built a context since the last `reset!/0`."
   def context_calls, do: counter(:context_calls)
 
+  @doc "Every event in `tenant`'s log, in sequence order."
+  def all(tenant) do
+    {:ok, {events, _}} = stream(tenant, 0, 1_000_000)
+    events
+  end
+
+  @doc "Forgets one event, the shape of a log that no longer has it."
+  def forget!(event) do
+    ensure_tables()
+    :ets.delete(@log, {event.tenant, event.sequence})
+    :ok
+  end
+
   @doc "The newest sequence appended to `tenant`'s log, `0` when it has none."
   def newest(tenant) do
     ensure_tables()
@@ -283,7 +296,8 @@ defmodule TriggerTest.LatestEventSource do
   `TriggerTest.EventSource` with the optional callbacks implemented, for the paths that
   use them when an adapter has them.
 
-  `latest_sequence/1` answers from the double's log. `ahead!/1` makes it answer `n` more
+  `event/2` finds the event in the double's log, and tells the calling process it was
+  asked. `latest_sequence/1` answers from the double's log. `ahead!/1` makes it answer `n` more
   than the sweep can read (events committed after the batch was read), and `ahead!(:raise)`
   makes it raise, the shape of a log that cannot be read.
   """
@@ -317,11 +331,41 @@ defmodule TriggerTest.LatestEventSource do
   defdelegate audited?(resource), to: TriggerTest.EventSource
 
   @impl true
+  def event(tenant, id) do
+    send(self(), {:event_source_event, tenant, id})
+
+    case Enum.find(TriggerTest.EventSource.all(tenant), &(&1.id == id)) do
+      nil -> {:error, :not_found}
+      event -> {:ok, event}
+    end
+  end
+
+  @impl true
   def latest_sequence(tenant) do
     case :persistent_term.get(@ahead, 0) do
       :raise -> raise "the log could not be read"
       n -> TriggerTest.EventSource.newest(tenant) + n
     end
+  end
+end
+
+defmodule TriggerTest.RedriveAuthority do
+  @moduledoc """
+  The host's authority check for a re-drive, whose answer the test sets. Records what it
+  was called with, so a test can see it ran with the version and the tenant.
+  """
+
+  @answer {__MODULE__, :answer}
+
+  @doc "Sets the answer: `:ok` or `{:error, reason}`."
+  def answer!(value), do: :persistent_term.put(@answer, value)
+
+  @doc "Back to `:ok`."
+  def reset!, do: :persistent_term.erase(@answer)
+
+  def check(subscription, tenant, tag) do
+    send(self(), {:redrive_authority, subscription.id, tenant, tag})
+    :persistent_term.get(@answer, :ok)
   end
 end
 

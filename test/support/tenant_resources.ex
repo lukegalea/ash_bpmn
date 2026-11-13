@@ -128,6 +128,26 @@ defmodule AshBpmn.TenantTest.Dispatch do
     tenant?: true
 end
 
+# The re-drive ledger, with the policy a host writes for it (the macro generates none: a
+# re-drive is a person's act) and the host's authority check.
+defmodule AshBpmn.TenantTest.Redrive do
+  @moduledoc false
+  use AshBpmn.Resources.Redrive,
+    domain: AshBpmn.TenantTest.Domain,
+    repo: AshBpmn.TestRepo,
+    dispatch: AshBpmn.TenantTest.Dispatch,
+    subscription: AshBpmn.TenantTest.Subscription,
+    authority: {TriggerTest.RedriveAuthority, :check, [:standing]},
+    table: "tenant_bpmn_redrives",
+    tenant?: true
+
+  policies do
+    policy always() do
+      authorize_if actor_attribute_equals(:operator?, true)
+    end
+  end
+end
+
 defmodule AshBpmn.TenantTest.Domain do
   @moduledoc false
   use Ash.Domain
@@ -144,5 +164,6 @@ defmodule AshBpmn.TenantTest.Domain do
     resource AshBpmn.TenantTest.Dispatch
     resource AshBpmn.TenantTest.TimerJob
     resource AshBpmn.TenantTest.Signal
+    resource AshBpmn.TenantTest.Redrive
   end
 end
