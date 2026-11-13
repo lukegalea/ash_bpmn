@@ -96,6 +96,16 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Features:
 
+- **The trigger sweep reports its lag and each start's latency itself.**
+  Each sweep batch's `[:ash_bpmn, :triggers, :sweep]` event now carries
+  `lag`, the events of the tenant's log beyond the cursor, when the adapter
+  implements the optional `c:AshBpmn.EventSource.latest_sequence/1`. A dispatch
+  that starts a process emits `[:ash_bpmn, :triggers, :dispatch, :start]`
+  with `latency`, the native time from the event's `occurred_at` to the row,
+  and metadata `tenant`, `kind` and `subscription_id`. A host declares
+  metrics over these names instead of attaching its own handler. See
+  `AshBpmn.Triggers.Telemetry`.
+
 - **A task nobody can act on is answered, not left to sit.** A user task, or
   a `RequireApproval` task, whose candidates minus its exclusions leave
   nobody used to be written with no candidate rows and stay open for ever.

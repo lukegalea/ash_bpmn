@@ -52,6 +52,13 @@ defmodule AshBpmn.Resources.Dispatch do
   subscription must never wedge a tenant's event stream, and a failure that is
   queryable is one somebody can find.
 
+  ## Telemetry
+
+  A dispatch that starts a process reports how long its event waited for it,
+  as `[:ash_bpmn, :triggers, :dispatch, :start]` with `latency`
+  (`AshBpmn.Triggers.Telemetry`). The `:create` action emits it, so every
+  start reports, a re-driven one included.
+
   ## Not audited, by refusal
 
   Setting `audit?: true` on a dispatch (or any host-base equivalent) is
@@ -319,6 +326,7 @@ defmodule AshBpmn.Resources.Dispatch do
           ]
 
           validate AshBpmn.Resources.Dispatch.RequiresTarget
+          change AshBpmn.Resources.Dispatch.ReportLatency
         end
       end
 
@@ -350,5 +358,23 @@ defmodule AshBpmn.Resources.Dispatch.RequiresTarget do
     else
       :ok
     end
+  end
+end
+
+defmodule AshBpmn.Resources.Dispatch.ReportLatency do
+  @moduledoc """
+  Reports how long an event waited for the process its dispatch started, as the row is
+  written (`AshBpmn.Triggers.Telemetry.dispatch_started/2`). Nothing for a dispatch that
+  started nothing.
+  """
+
+  use Ash.Resource.Change
+
+  @impl true
+  def change(changeset, _opts, _context) do
+    Ash.Changeset.after_action(changeset, fn changeset, dispatch ->
+      AshBpmn.Triggers.Telemetry.dispatch_started(changeset.tenant, dispatch)
+      {:ok, dispatch}
+    end)
   end
 end

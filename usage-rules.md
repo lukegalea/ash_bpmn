@@ -266,6 +266,12 @@ gateway conditions, never in resolver specs, never in the invoker.
     (`AshBpmn.Checks.AshBpmnInteraction.engine_actions/1`). An action you add to a
     generated resource is yours to authorize: the engine's mark does not reach
     it. Keep that in mind before calling a host action with `AshBpmn.Scope.engine/2`.
+32. **Metrics come from the package's events.** Declare sweep lag over
+    `[:ash_bpmn, :triggers, :sweep]` (`lag`) and event-to-start latency over
+    `[:ash_bpmn, :triggers, :dispatch, :start]` (`latency`, native units).
+    `lag` is only there when your adapter implements
+    `AshBpmn.EventSource.latest_sequence/1`; implement it with one indexed read.
+    See `AshBpmn.Triggers.Telemetry`.
 
 ## Testing
 
