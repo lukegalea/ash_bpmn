@@ -96,6 +96,14 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Features:
 
+- **`AshBpmn.Diff` compares two process definition versions by meaning.**
+  `diff(old, new)` reads the compiled graph, never the XML, and returns plain
+  maps (`aspect`, `kind`, `subject`, `option`, `from`, `to`) for each step
+  (node) added, removed or changed property by property, each sequence flow
+  likewise, and a changed start node. `aspects/0` lists what it compares with
+  English labels for a host to translate. Moving shapes or reformatting the
+  document is not a change.
+
 - **Failed trigger dispatches are re-driven by a resource the host
   instantiates.** `AshBpmn.Resources.Redrive` is a macro like `Dispatch`
   (`domain:`, `repo:`, `table:` defaulting to `"bpmn_redrives"`, `base:`,
