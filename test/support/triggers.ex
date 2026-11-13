@@ -158,6 +158,16 @@ defmodule TriggerTest.EventSource do
   @doc "How many times `context/1` has built a context since the last `reset!/0`."
   def context_calls, do: counter(:context_calls)
 
+  @doc "The newest sequence appended to `tenant`'s log, `0` when it has none."
+  def newest(tenant) do
+    ensure_tables()
+
+    case :ets.lookup(@counters, {:sequence, tenant}) do
+      [{_key, n}] -> n
+      [] -> 0
+    end
+  end
+
   ## The behaviour
 
   @impl true
@@ -265,6 +275,53 @@ defmodule TriggerTest.EventSource do
   defp set_flag(key) do
     ensure_tables()
     :ets.insert(@counters, {key, true})
+  end
+end
+
+defmodule TriggerTest.LatestEventSource do
+  @moduledoc """
+  `TriggerTest.EventSource` with the optional callbacks implemented, for the paths that
+  use them when an adapter has them.
+
+  `latest_sequence/1` answers from the double's log. `ahead!/1` makes it answer `n` more
+  than the sweep can read (events committed after the batch was read), and `ahead!(:raise)`
+  makes it raise, the shape of a log that cannot be read.
+  """
+
+  @behaviour AshBpmn.EventSource
+
+  @ahead {__MODULE__, :ahead}
+
+  @doc "How far the log runs ahead of what `stream/3` returns: a count, or `:raise`."
+  def ahead!(value), do: :persistent_term.put(@ahead, value)
+
+  @doc "Back to a log that reports exactly what it streams."
+  def reset!, do: :persistent_term.erase(@ahead)
+
+  @impl true
+  defdelegate stream(tenant, after_sequence, limit), to: TriggerTest.EventSource
+
+  @impl true
+  defdelegate context(event), to: TriggerTest.EventSource
+
+  @impl true
+  defdelegate sequence(event), to: TriggerTest.EventSource
+
+  @impl true
+  defdelegate occurred_at(event), to: TriggerTest.EventSource
+
+  @impl true
+  defdelegate order_guarantee(tenant), to: TriggerTest.EventSource
+
+  @impl true
+  defdelegate audited?(resource), to: TriggerTest.EventSource
+
+  @impl true
+  def latest_sequence(tenant) do
+    case :persistent_term.get(@ahead, 0) do
+      :raise -> raise "the log could not be read"
+      n -> TriggerTest.EventSource.newest(tenant) + n
+    end
   end
 end
 

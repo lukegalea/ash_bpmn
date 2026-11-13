@@ -61,10 +61,11 @@ defmodule AshBpmn.Triggers.SweepWorker do
   start a process for every historical event that matches — the first symptom
   is the queue rather than the mistake. A subscription fires on what happens
   *after* it exists, so a cursor created by the sweep begins at the log's
-  current high-water mark. `AshBpmn.EventSource` exposes no "latest sequence"
-  callback, so the high-water mark is found by paging `stream/3` once — a
-  one-time cost per tenant, paid before anything dispatches. (The publish lane
-  may create the cursor earlier; the sweep only creates it when absent.)
+  current high-water mark (`AshBpmn.EventSource.high_water/2`): the adapter's
+  `latest_sequence/1` when it implements it, otherwise found by paging
+  `stream/3` once — a one-time cost per tenant, paid before anything
+  dispatches. (The publish lane may create the cursor earlier; the sweep only
+  creates it when absent.)
 
   Reading `sequence > cursor` is safe because, within a tenant, sequence order
   is commit order — a guarantee the configured adapter *declares* per chain via
@@ -76,9 +77,10 @@ defmodule AshBpmn.Triggers.SweepWorker do
   A batch is 500 events, bounded so a large backlog is swept in several passes
   rather than one very long job; the next sweep continues from the cursor. Each
   batch emits `[:ash_bpmn, :triggers, :sweep]` telemetry — measurements
-  `:duration_ms` and `:events`, metadata `:tenant` and `:last_sequence` — which
+  `:duration_ms`, `:events` and, when the adapter implements
+  `latest_sequence/1`, `:lag`; metadata `:tenant` and `:last_sequence` — which
   is what makes the one-sweeper-per-tenant throughput ceiling (TRD §12)
-  visible rather than anecdotal.
+  visible rather than anecdotal. See `AshBpmn.Triggers.Telemetry`.
   """
 
   use Oban.Worker, max_attempts: 3
@@ -130,7 +132,7 @@ defmodule AshBpmn.Triggers.SweepWorker do
 
     case event_source.stream(tenant, position, @batch) do
       {:ok, {[], _}} ->
-        telemetry(started, tenant, position, 0)
+        telemetry(started, tenant, position, 0, event_source)
         :ok
 
       {:ok, {events, _}} ->
@@ -151,7 +153,7 @@ defmodule AshBpmn.Triggers.SweepWorker do
         # Still inside the per-tenant advisory lock the dispatch loop holds: the position must
         # not move for a batch another sweep is also walking.
         advance_position(repo, tenant, last_sequence, store_ctx)
-        telemetry(started, tenant, last_sequence, length(events))
+        telemetry(started, tenant, last_sequence, length(events), event_source)
 
         :ok
     end
@@ -252,14 +254,15 @@ defmodule AshBpmn.Triggers.SweepWorker do
     |> Ash.read!(Scope.engine(scope))
   end
 
-  defp telemetry(started, tenant, last_sequence, events) do
-    :telemetry.execute(
-      [:ash_bpmn, :triggers, :sweep],
-      %{
-        duration_ms: System.monotonic_time(:millisecond) - started,
-        events: events
-      },
-      %{tenant: tenant, last_sequence: last_sequence}
+  # After the batch has committed: the lag read is the adapter's, and a lag read that raises
+  # must not undo or repeat a batch that already advanced the cursor.
+  defp telemetry(started, tenant, last_sequence, events, event_source) do
+    AshBpmn.Triggers.Telemetry.sweep(
+      tenant,
+      last_sequence,
+      events,
+      System.monotonic_time(:millisecond) - started,
+      event_source
     )
   end
 
