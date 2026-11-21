@@ -104,6 +104,15 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Features:
 
+- **A host can resolve which definition a call activity's child runs.**
+  `AshBpmn.DefinitionLoader` gains an optional `resolve/3`: a new instance
+  started by key with no version pinned (a call activity's child, or
+  `start_instance(process: key)`) runs the definition it names. A host that
+  ships baseline processes centrally uses it so a tenant's call activity
+  reaches the definition that tenant runs. `:default`, or no callback, keeps
+  the latest published definition in the caller's scope; `{:error, reason}`
+  fails the start like any child that could not start.
+
 - **`AshBpmn.Diff` compares two process definition versions by meaning.**
   `diff(old, new)` reads the compiled graph, never the XML, and returns plain
   maps (`aspect`, `kind`, `subject`, `option`, `from`, `to`) for each step

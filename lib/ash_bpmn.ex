@@ -1055,10 +1055,21 @@ defmodule AshBpmn do
     end
   end
 
+  # Unpinned: the host's loader may say which definition this key runs here (a baseline that
+  # lives outside the tenant); without an answer, the latest published one in this scope.
   defp published_definition(resources, process_key, nil, scope) do
-    case resources.definition.latest_published!(process_key, Scope.engine(scope)) do
-      [] -> {:error, "no published definition found for process: #{process_key}"}
-      [definition | _] -> {:ok, definition}
+    case AshBpmn.DefinitionLoader.resolve(resources.definition, process_key, scope) do
+      {:ok, definition} ->
+        {:ok, definition}
+
+      {:error, reason} ->
+        {:error, "the host refused to resolve process #{process_key}: #{inspect(reason)}"}
+
+      :default ->
+        case resources.definition.latest_published!(process_key, Scope.engine(scope)) do
+          [] -> {:error, "no published definition found for process: #{process_key}"}
+          [definition | _] -> {:ok, definition}
+        end
     end
   end
 
