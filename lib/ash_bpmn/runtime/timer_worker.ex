@@ -5,11 +5,20 @@ defmodule AshBpmn.Runtime.TimerWorker do
   @moduledoc """
   Oban worker that fires task timers (remind, escalate, expire).
 
-  Job args: `%{"task_id" => id, "kind" => "remind" | "escalate" | "expire"}`
+  Job args: `%{"task_id" => id, "kind" => "remind" | "escalate" | "expire", "index" => n}`,
+  and `"signal"` on an escalation that throws one.
 
-  - `remind` — records :timer_fired event
-  - `escalate` — calls resolver.escalate/2 + records event
-  - `expire` — force-completes task with :expired outcome, advances token
+  - `remind` -- records `:timer_fired` and delivers a `:remind` notice.
+  - `escalate` -- with `signal`, throws it. Otherwise asks the resolver's `escalate/2` whom to
+    add, writes them as candidates minus the task's exclusions (DESIGN.md §11.6), and
+    delivers an `:escalated` notice.
+  - `expire` -- force-completes the task with outcome `:expired`, routes the token, and
+    delivers an `:expired` notice when a notifier is configured.
+
+  Every firing has a key, `"<task id>/<node id>/<timer index>/<repetition>"`, the same on
+  every retry. Notices go through `AshBpmn.Runtime.Notices` after the firing's writes have
+  committed; a delivery that fails returns `{:error, _}` so Oban retries the job, and the
+  retry finds its writes already made under the same key and adds none.
   """
 
   use Oban.Worker, max_attempts: 3
@@ -19,6 +28,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
   alias AshBpmn.Config
   alias AshBpmn.FlightView
   alias AshBpmn.Runtime.DomainResolver
+  alias AshBpmn.Runtime.Notices
   alias AshBpmn.Runtime.Routing
   alias AshBpmn.Runtime.Step
   alias AshBpmn.Scope
@@ -26,72 +36,73 @@ defmodule AshBpmn.Runtime.TimerWorker do
   def queue, do: Config.queue()
 
   @impl true
-  def perform(%Oban.Job{args: args}) do
+  def perform(%Oban.Job{args: args} = job) do
     task_id = args["task_id"]
     kind = args["kind"]
 
     scope = Scope.from_job(args, :timer)
     resources = DomainResolver.resolve!(scope.domain)
 
-    # Load the task
     task =
       resources.human_task
       |> Ash.Query.for_read(:read)
       |> Ash.Query.filter(id == ^task_id)
       |> Ash.read_one!(Scope.engine(scope))
 
-    # Skip if already completed or cancelled
-    if task.status in [:completed, :cancelled] do
-      {:ok, :skipped}
-    else
-      fire_timer(resources, task, kind, scope, args)
+    cond do
+      is_nil(task) ->
+        {:ok, :skipped}
+
+      # Nothing fires for work that is over (DESIGN.md §11.4) -- except the retry of an expiry
+      # whose own completion is what ended the task, and whose notice has not gone yet.
+      task.status in [:completed, :cancelled] and kind == "expire" ->
+        resume_expired_notice(resources, task, scope, job)
+
+      task.status in [:completed, :cancelled] ->
+        {:ok, :skipped}
+
+      true ->
+        fire_timer(resources, task, kind, scope, job)
     end
   end
 
-  defp fire_timer(resources, task, "remind", scope, _args) do
-    resources.process_event.create!(
-      %{
-        instance_id: task.instance_id,
-        token_id: task.token_id,
-        node_id: task.node_id,
-        task_id: task.id,
-        kind: :timer_fired,
-        data: %{"timer_kind" => "remind"}
-      },
-      Scope.engine(scope)
-    )
+  # ── remind ────────────────────────────────────────────────────────────────
 
-    record_fire(resources, task, :remind, scope)
+  defp fire_timer(resources, task, "remind", scope, job) do
+    timer = timer_info(resources, task, job.args, scope)
 
-    {:ok, :reminded}
+    # One `:timer_fired` per key: a retry whose delivery failed finds it already written.
+    unless fired?(resources, task, timer.key, scope) do
+      resources.process_event.create!(
+        %{
+          instance_id: task.instance_id,
+          token_id: task.token_id,
+          node_id: task.node_id,
+          task_id: task.id,
+          kind: :timer_fired,
+          data: %{"timer_kind" => "remind", "key" => timer.key}
+        },
+        Scope.engine(scope)
+      )
+
+      record_fire(resources, task, :remind, scope)
+    end
+
+    case Notices.deliver(resources, task, :remind, timer, [], scope, job, notice_opts(job)) do
+      :ok -> {:ok, :reminded}
+      {:error, message} -> {:error, message}
+    end
   end
 
-  # Escalation had a clause-level `rescue _ -> {:ok, :escalated}`, which reported success for
-  # every possible failure. That was not a hypothetical: `escalate/2` is an optional callback
-  # and this repository's own test resolver does not implement it, so every escalation in the
-  # suite raised `UndefinedFunctionError`, was swallowed, and wrote no event -- while the test
-  # named "escalation timer fires" passed, because all it asserted was that the task was still
-  # open, which is true precisely when nothing happens.
-  #
-  # Three outcomes, told apart without a rescue where possible:
-  #
-  #   * the host did not implement the optional callback -- a configuration fact, not a
-  #     failure, and detectable with `function_exported?/3` rather than by raising;
-  #   * the handler ran;
-  #   * the handler failed.
-  #
-  # Only the third is an error, and it is a *survivable* one: escalation is a notification and
-  # never touches task state, so the process carries on regardless. It returns `{:error, _}`
-  # so Oban retries the notification -- which is the whole point of having armed it -- and the
-  # append-only log gets one row per attempt, which is a fair record of three attempts rather
-  # than a duplicate.
+  # ── escalate ──────────────────────────────────────────────────────────────
+
   # An escalation that names a signal throws it instead of calling the resolver.
   #
   # That is the difference between notifying somebody and starting something: a resolver's
   # `escalate/2` reaches a person through whatever the host wired up, and a signal reaches
   # every process listening for that name. A modeller who wants the second should not have to
   # ask an Elixir developer for it.
-  defp fire_timer(resources, task, "escalate", scope, %{"signal" => name})
+  defp fire_timer(resources, task, "escalate", scope, %Oban.Job{args: %{"signal" => name}})
        when is_binary(name) and name != "" do
     instance = load_instance(resources, task, scope)
 
@@ -103,40 +114,76 @@ defmodule AshBpmn.Runtime.TimerWorker do
            tenant: Map.get(scope, :tenant)
          ) do
       {:ok, _signal} ->
-        record_escalation(resources, task, {:signal, name}, scope)
+        record_task_event(resources, task, :timer_fired, scope, %{
+          "timer_kind" => "escalate",
+          "handler" => "signal",
+          "signal_name" => name
+        })
+
         record_fire(resources, task, :escalate, scope)
         {:ok, :escalated}
 
       {:error, reason} ->
-        record_escalation(resources, task, {:failed, inspect(reason)}, scope)
+        record_task_event(resources, task, :escalation_failed, scope, %{
+          "timer_kind" => "escalate",
+          "error" => inspect(reason)
+        })
+
         record_fire(resources, task, :escalate, scope)
         {:error, inspect(reason)}
     end
   end
 
-  defp fire_timer(resources, task, "escalate", scope, args) do
+  # Escalation adds people; the engine keeps the exclusions (DESIGN.md §11.6). The resolver
+  # answers whom to add, `{:ok, [principal]}`. The engine subtracts the task's exclusions,
+  # writes the rest as candidate rows in the task's tenant, never removes a candidate or the
+  # assignee, records `:task_escalated`, and only then -- after that commits -- hands the
+  # notice to the notifier, so a failed delivery never undoes the escalation.
+  #
+  # An answer that is empty, or that the exclusions empty, reached nobody: recorded as
+  # `:escalation_reached_nobody` and not retried, because the same organization gives the same
+  # answer. An error, a raise or any other shape (a bare `:ok` from the old contract included)
+  # is `:escalation_failed` and returned, so Oban retries.
+  #
+  # A host with no `escalate/2` (possible only for a definition published before the
+  # publish-time check) reaches nobody too, and says so, rather than recording a firing that
+  # told no one.
+  defp fire_timer(resources, task, "escalate", scope, job) do
     resolver = Config.assignment_resolver!()
-    ctx = escalation_ctx(resources, task, scope, args)
+    timer = timer_info(resources, task, job.args, scope)
 
-    outcome = invoke_escalation(resolver, task, ctx)
+    if Code.ensure_loaded?(resolver) and function_exported?(resolver, :escalate, 2) do
+      ctx = escalation_ctx(resources, task, scope, timer)
 
-    # Outside any rescue, and unconditional. The old code wrapped this write too, so a failure
-    # to record the escalation also reported success -- strictly worse than the handler case,
-    # because the row that would let anyone notice is the thing that went missing.
-    record_escalation(resources, task, outcome, scope)
-    record_fire(resources, task, :escalate, scope)
+      case invoke_escalation(resolver, task, ctx) do
+        {:ok, principals} ->
+          escalated(resources, task, principals, timer, scope, job, ctx)
 
-    case outcome do
-      :ok -> {:ok, :escalated}
-      :no_handler -> {:ok, :no_escalation_handler}
-      {:failed, message} -> {:error, message}
+        {:failed, message} ->
+          record_task_event(resources, task, :escalation_failed, scope, %{
+            "timer_kind" => "escalate",
+            "key" => timer.key,
+            "error" => message
+          })
+
+          {:error, message}
+      end
+    else
+      record_reached_nobody(resources, task, timer, scope, %{"reason" => "no_escalate_callback"})
+      {:ok, :no_escalation_handler}
     end
   end
+
+  # ── expire ────────────────────────────────────────────────────────────────
 
   # The expiry is one step, under the instance's lock: the forced completion, its events, the
   # wake and the token's next move commit together. An expiry that died after forcing the
   # task complete used to leave an `:expired` task on a token still parked for it.
-  defp fire_timer(resources, task, "expire", scope, _args) do
+  #
+  # The notice goes after the step commits. Expiry routes the graph whether or not anyone is
+  # told, so a notifier that fails retries the job, and the retry finds the task already
+  # expired and only delivers (`resume_expired_notice/4`).
+  defp fire_timer(resources, task, "expire", scope, job) do
     fun = fn -> expire(resources, task, scope) end
 
     case task.instance_id do
@@ -144,14 +191,45 @@ defmodule AshBpmn.Runtime.TimerWorker do
       id -> Step.transaction(resources, fn _locked -> fun.() end, lock: {id, scope})
     end
     |> case do
+      {:ok, {:ok, :expired}} -> deliver_expired(resources, task, scope, job)
       {:ok, result} -> result
       {:error, :instance_gone} -> {:ok, :skipped}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp fire_timer(_resources, _task, kind, _scope, _args) do
+  defp fire_timer(_resources, _task, kind, _scope, _job) do
     {:error, "unknown timer kind: #{kind}"}
+  end
+
+  # `task` is the row as it was before it expired: the assignee it had is who is told.
+  defp deliver_expired(resources, task, scope, job) do
+    timer = timer_info(resources, task, job.args, scope)
+
+    case Notices.deliver(resources, task, :expired, timer, [], scope, job, notice_opts(job)) do
+      :ok -> {:ok, :expired}
+      {:error, message} -> {:error, message}
+    end
+  end
+
+  defp resume_expired_notice(resources, task, scope, job) do
+    timer = timer_info(resources, task, job.args, scope)
+
+    if task.outcome == "expired" and not is_nil(Config.task_notifier()) and
+         expired_by_timer?(resources, task, scope) and
+         not Notices.delivered?(resources, task, timer.key, scope) do
+      deliver_expired(resources, task, scope, job)
+    else
+      {:ok, :skipped}
+    end
+  end
+
+  defp expired_by_timer?(resources, task, scope) do
+    resources.process_event
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(task_id == ^task.id and kind == :task_expired)
+    |> Ash.read!(Scope.engine(scope))
+    |> Enum.any?()
   end
 
   defp expire(resources, task, scope) do
@@ -275,16 +353,151 @@ defmodule AshBpmn.Runtime.TimerWorker do
     {:ok, :expired}
   end
 
-  defp invoke_escalation(resolver, task, ctx) do
-    if Code.ensure_loaded?(resolver) and function_exported?(resolver, :escalate, 2) do
-      case resolver.escalate(task, ctx) do
-        :ok -> :ok
-        {:ok, _} -> :ok
-        {:error, reason} -> {:failed, inspect(reason)}
-        other -> {:failed, "escalate/2 returned an undeclared shape: #{inspect(other)}"}
-      end
+  # ── escalation, the engine's half ─────────────────────────────────────────
+
+  defp escalated(resources, task, principals, timer, scope, job, ctx) do
+    fun = fn -> escalate_step(resources, task.id, principals, timer, scope) end
+
+    case task.instance_id do
+      nil -> Step.transaction(resources, fun)
+      id -> Step.transaction(resources, fn _locked -> fun.() end, lock: {id, scope})
+    end
+    |> case do
+      {:ok, {:added, current, added}} ->
+        opts = Keyword.put(notice_opts(job), :instance, ctx.instance)
+
+        case Notices.deliver(resources, current, :escalated, timer, added, scope, job, opts) do
+          :ok -> {:ok, :escalated}
+          {:error, message} -> {:error, message}
+        end
+
+      {:ok, :reached_nobody} ->
+        {:ok, :escalation_reached_nobody}
+
+      {:ok, :over} ->
+        {:ok, :skipped}
+
+      {:error, :instance_gone} ->
+        {:ok, :skipped}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Inside the step. The task is re-read: a completion or cancel that won meanwhile ends the
+  # escalation with nothing written. A retry of the same key finds its `:task_escalated` (or
+  # `:escalation_reached_nobody`) already written and reuses it, so a replayed firing adds one
+  # set of rows, not two.
+  defp escalate_step(resources, task_id, principals, timer, scope) do
+    task =
+      resources.human_task
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(id == ^task_id)
+      |> Ash.read_one!(Scope.engine(scope))
+
+    cond do
+      is_nil(task) or task.status in [:completed, :cancelled] ->
+        :over
+
+      previous = keyed_event(resources, task, :task_escalated, timer.key, scope) ->
+        {:added, task, Enum.map(previous.data["added"] || [], &principal_from_data/1)}
+
+      keyed_event(resources, task, :escalation_reached_nobody, timer.key, scope) ->
+        :reached_nobody
+
+      true ->
+        add_candidates(resources, task, principals, timer, scope)
+    end
+  end
+
+  defp add_candidates(resources, task, principals, timer, scope) do
+    excluded = task.excluded_principal_ids || []
+    requested = Enum.uniq_by(principals, &{&1.type, &1.id})
+    {refused, remaining} = Enum.split_with(requested, &(&1.id in excluded))
+
+    if remaining == [] do
+      record_reached_nobody(resources, task, timer, scope, %{
+        "requested" => length(requested),
+        "refused" => Enum.map(refused, & &1.id)
+      })
+
+      :reached_nobody
     else
-      :no_handler
+      existing = Notices.candidates(resources, task, scope)
+      added = Enum.reject(remaining, &(&1 in existing))
+
+      # In the task's tenant, whatever the job carried: a candidate row in another tenant
+      # would be a person who cannot see the task they were given.
+      tenant_scope = %{scope | tenant: Map.get(task, :organization_id) || scope.tenant}
+
+      Enum.each(added, fn principal ->
+        resources.task_candidate.create!(
+          %{task_id: task.id, principal_type: principal.type, principal_id: principal.id},
+          Scope.engine(tenant_scope)
+        )
+      end)
+
+      record_task_event(resources, task, :task_escalated, scope, %{
+        "key" => timer.key,
+        "repetition" => timer.repetition,
+        "added" => Enum.map(added, &principal_data/1),
+        "already_candidates" => Enum.map(remaining -- added, & &1.id),
+        "refused" => Enum.map(refused, & &1.id)
+      })
+
+      record_task_event(resources, task, :timer_fired, scope, %{
+        "timer_kind" => "escalate",
+        "handler" => "resolver",
+        "key" => timer.key
+      })
+
+      record_fire(resources, task, :escalate, scope)
+
+      {:added, task, added}
+    end
+  end
+
+  defp record_reached_nobody(resources, task, timer, scope, extra) do
+    record_task_event(
+      resources,
+      task,
+      :escalation_reached_nobody,
+      scope,
+      Map.merge(
+        %{
+          "key" => timer.key,
+          "timer_kind" => "escalate",
+          "candidates" => length(Notices.candidates(resources, task, scope)),
+          "excluded" => task.excluded_principal_ids || []
+        },
+        extra
+      )
+    )
+
+    record_fire(resources, task, :escalate, scope)
+  end
+
+  # `{:ok, principals}` when the answer is a list of declared principals; `{:failed, message}`
+  # for anything else, including the old contract's bare `:ok`.
+  defp invoke_escalation(resolver, task, ctx) do
+    case resolver.escalate(task, ctx) do
+      {:ok, principals} when is_list(principals) ->
+        if Enum.all?(principals, &principal?/1) do
+          {:ok, principals}
+        else
+          {:failed,
+           "escalate/2 returned principals of an undeclared shape: " <>
+             inspect(principals, limit: 5)}
+        end
+
+      {:error, reason} ->
+        {:failed, inspect(reason, limit: 5)}
+
+      other ->
+        {:failed,
+         "escalate/2 returned an undeclared shape: #{inspect(other, limit: 5)}; " <>
+           "it answers {:ok, [principal]} or {:error, reason}"}
     end
   rescue
     # Narrow by construction: this wraps the host's callback and nothing else, so what it
@@ -292,23 +505,26 @@ defmodule AshBpmn.Runtime.TimerWorker do
     e -> {:failed, Exception.message(e)}
   end
 
-  defp record_escalation(resources, task, outcome, scope) do
-    {kind, data} =
-      case outcome do
-        :ok ->
-          {:timer_fired, %{"timer_kind" => "escalate", "handler" => "resolver"}}
+  defp principal?(%{type: type, id: id}) when type in [:user, :team] and is_binary(id), do: true
+  defp principal?(_), do: false
 
-        {:signal, name} ->
-          {:timer_fired,
-           %{"timer_kind" => "escalate", "handler" => "signal", "signal_name" => name}}
+  defp principal_data(%{type: type, id: id}), do: %{"type" => to_string(type), "id" => id}
 
-        :no_handler ->
-          {:timer_fired, %{"timer_kind" => "escalate", "handler" => "none"}}
+  defp principal_from_data(%{"type" => "team", "id" => id}), do: %{type: :team, id: id}
+  defp principal_from_data(%{"id" => id}), do: %{type: :user, id: id}
 
-        {:failed, msg} ->
-          {:escalation_failed, %{"timer_kind" => "escalate", "error" => msg}}
-      end
+  defp keyed_event(resources, task, kind, key, scope) do
+    resources.process_event
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(task_id == ^task.id and kind == ^kind)
+    |> Ash.read!(Scope.engine(scope))
+    |> Enum.find(&(&1.data["key"] == key))
+  end
 
+  defp fired?(resources, task, key, scope),
+    do: keyed_event(resources, task, :timer_fired, key, scope) != nil
+
+  defp record_task_event(resources, task, kind, scope, data) do
     resources.process_event.create!(
       %{
         instance_id: task.instance_id,
@@ -322,15 +538,8 @@ defmodule AshBpmn.Runtime.TimerWorker do
     )
   end
 
-  # Terminates the ledger row for a timer that has just fired.
-  #
-  # Looked up by (task, kind, scheduled) rather than carried in the job args, because the
-  # args predate the ledger and a job armed before this shipped still has to be recordable.
-  #
-  # Non-bang, and losing is ordinary: a redelivered worker finds the row already terminal,
-  # and the firing it is re-running has already happened. A retry that cannot re-record its
-  # own firing must still be allowed to complete, or Oban retries it until max_attempts over
-  # a bookkeeping write.
+  defp notice_opts(%Oban.Job{args: args}), do: [late: args["late"] == true]
+
   # Returns the chosen flow as a one-element list, or `[]` when nothing was selected -- the
   # shape the call site already handled.
   #
@@ -353,57 +562,69 @@ defmodule AshBpmn.Runtime.TimerWorker do
 
   # What `escalate/2` is handed (DESIGN.md §11.6): the tenant to resolve in, the instance and
   # its subject (loaded with the node's `ash:load`, as a gateway at that node would see it), the
-  # task's current candidates and its exclusions, and which timer fired. It used to carry
-  # `instance: nil`, `subject: nil` and no tenant, so a host could not resolve anyone in the
-  # task's own tenant.
-  defp escalation_ctx(resources, task, scope, args) do
+  # task's current candidates and its exclusions, and which timer fired.
+  defp escalation_ctx(resources, task, scope, timer) do
     instance = load_instance(resources, task, scope)
     node = instance && node_config(resources, instance, task, scope)
-    index = timer_index(args, node, "escalate")
-    repetition = args["repetition"] || 1
 
     %{
       tenant: scope.tenant || Map.get(task, :organization_id),
       instance: instance,
       subject: AshBpmn.Subject.load(instance || task, scope, (node && node["load"]) || []),
       task: task,
-      candidates: candidates(resources, task, scope),
+      candidates: Notices.candidates(resources, task, scope),
       exclusions: task.excluded_principal_ids || [],
-      timer: %{
-        kind: :escalate,
-        index: index,
-        repetition: repetition,
-        key: "#{task.id}/#{task.node_id}/#{index}/#{repetition}"
-      },
+      timer: timer,
       actor: scope.actor,
       assigns: %{}
     }
   end
+
+  # The firing's identity (DESIGN.md §11.4). "index" is the timer's position in its node's
+  # `ash:timers`, carried in the job args since timers had keys. A job armed before then has
+  # none: it is the first timer of its kind on the node, and an approval's escalation is its
+  # first timer.
+  defp timer_info(resources, task, args, scope) do
+    kind = args["kind"]
+
+    index =
+      case args["index"] do
+        index when is_integer(index) ->
+          index
+
+        _ ->
+          instance = load_instance(resources, task, scope)
+          node = instance && node_config(resources, instance, task, scope)
+          legacy_index(node, kind)
+      end
+
+    repetition = args["repetition"] || 1
+
+    %{
+      kind: timer_kind(kind),
+      index: index,
+      repetition: repetition,
+      # A job that carries its key was armed with it; one armed before keys is given the same
+      # shape, `<task id>/<node id>/<timer index>/<repetition>`.
+      key: args["key"] || "#{task.id}/#{task.node_id}/#{index}/#{repetition}"
+    }
+  end
+
+  defp legacy_index(%{"timers" => timers}, kind) when is_list(timers),
+    do: Enum.find_index(timers, &(&1["kind"] == kind)) || 0
+
+  defp legacy_index(_node, _kind), do: 0
+
+  defp timer_kind("remind"), do: :remind
+  defp timer_kind("escalate"), do: :escalate
+  defp timer_kind("expire"), do: :expire
+  defp timer_kind(_), do: :unknown
 
   defp node_config(resources, instance, task, scope) do
     resources.definition
     |> AshBpmn.DefinitionLoader.load!(instance.definition_id, instance, scope)
     |> Map.get(:graph)
     |> get_in(["nodes", task.node_id])
-  end
-
-  # The position of the timer in its node's `ash:timers`, carried in the job args since timers
-  # had keys. A job armed before then has none: it is the first timer of its kind on the node,
-  # and an approval's escalation is its first timer.
-  defp timer_index(%{"index" => index}, _node, _kind) when is_integer(index), do: index
-
-  defp timer_index(_args, %{"timers" => timers}, kind) when is_list(timers),
-    do: Enum.find_index(timers, &(&1["kind"] == kind)) || 0
-
-  defp timer_index(_args, _node, _kind), do: 0
-
-  defp candidates(resources, task, scope) do
-    resources.task_candidate
-    |> Ash.Query.for_read(:read)
-    |> Ash.Query.filter(task_id == ^task.id)
-    |> Ash.Query.sort(inserted_at: :asc, id: :asc)
-    |> Ash.read!(Scope.engine(scope))
-    |> Enum.map(&%{type: &1.principal_type, id: &1.principal_id})
   end
 
   defp load_instance(_resources, %{instance_id: nil}, _scope), do: nil

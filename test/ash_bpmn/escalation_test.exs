@@ -47,17 +47,19 @@ defmodule AshBpmn.EscalationTest do
   end
 
   describe "a host with no escalation handler" do
-    test "is a configuration fact, recorded as such, and not an error" do
-      # `escalate/2` is an optional callback. A host that declines to implement it has not
-      # failed at anything, and the distinction from a handler that blew up is the whole
-      # reason this is detected with `function_exported?/3` rather than by rescuing.
+    test "reaches nobody, is recorded as such, and is not an error" do
+      # `escalate/2` is an optional callback, and a draft with an escalate timer is refused at
+      # publish without it (DESIGN.md §11.8). A timer armed before then has not failed at
+      # anything, and is not retried; but it told nobody, and the log says so rather than
+      # recording a firing.
       task = open_task!()
 
       assert {:ok, :no_escalation_handler} =
                escalate(task, resolver: AshBpmn.Test.NoEscalateResolver)
 
-      assert [event] = events(task, :timer_fired)
-      assert event.data["handler"] == "none"
+      assert [event] = events(task, :escalation_reached_nobody)
+      assert event.data["reason"] == "no_escalate_callback"
+      assert events(task, :timer_fired) == []
       assert events(task, :escalation_failed) == []
     end
   end
@@ -92,7 +94,7 @@ defmodule AshBpmn.EscalationTest do
     end
 
     test "an undeclared return shape is a failure, not a shrug" do
-      # The callback declares `:ok | {:ok, map} | {:error, term}`. Anything else means the
+      # The callback declares `{:ok, [principal]} | {:error, term}`. Anything else means the
       # host and the engine disagree about the contract, and guessing which way is how a
       # failed escalation becomes a successful one.
       task = open_task!()

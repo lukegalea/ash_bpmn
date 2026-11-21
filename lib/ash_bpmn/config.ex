@@ -118,6 +118,16 @@ defmodule AshBpmn.Config do
     end
   end
 
+  @doc """
+  The configured `AshBpmn.TaskNotifier`, or nil.
+
+  Nil is a legitimate state for a host whose diagrams declare no remind or escalate timers.
+  A draft that declares one is refused at publish while it is nil (DESIGN.md §11.8), and a
+  timer on a definition published before that check writes `:notice_undelivered`.
+  """
+  @spec task_notifier() :: module() | nil
+  def task_notifier, do: Application.get_env(:ash_bpmn, :task_notifier)
+
   @doc "The configured decision resolver, or nil. Use when absence is a legitimate state."
   @spec decision_resolver() :: module() | nil
   def decision_resolver, do: Application.get_env(:ash_bpmn, :decision_resolver)

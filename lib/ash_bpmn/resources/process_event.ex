@@ -138,6 +138,21 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         # instances would otherwise start counting escalations that merely
                         # failed to notify while the process ran on perfectly well.
                         :escalation_failed,
+                        # An escalation the resolver answered (DESIGN.md §11.6): the principals
+                        # it added as candidates, and those refused because the task excludes
+                        # them. Carries the timer's key.
+                        :task_escalated,
+                        # An escalation whose answer, minus the task's exclusions, was nobody
+                        # (or a host with no `escalate/2`). Shaped like `:no_eligible_candidate`,
+                        # so a host can raise a finding from it; not retried.
+                        :escalation_reached_nobody,
+                        # A notice handed to the host's `AshBpmn.TaskNotifier` (§11.7).
+                        :notice_delivered,
+                        # The notifier failed on the timer job's final attempt.
+                        :notice_failed,
+                        # A timer fired with no notifier configured: nobody was told. Possible
+                        # only for a definition published before the publish-time check.
+                        :notice_undelivered,
                         :action_invoked,
                         :action_failed,
                         :instance_completed,

@@ -194,11 +194,50 @@ property of how the engine happened to run.
 Human tasks may declare three timers, each an Oban job with `scheduled_at` and its
 id recorded on the task row:
 
-- **remind** — records a `:timer_fired` event; your notifier reads the log.
-- **escalate** — calls your resolver's optional `escalate/2` callback and records
-  the event; typical use: reassign to the assignee's manager.
+- **remind** — records a `:timer_fired` event and delivers a `:remind` notice
+  through your `AshBpmn.TaskNotifier`.
+- **escalate** — asks your resolver's `escalate/2` whom to add, adds them as
+  candidates minus the task's exclusions, and delivers an `:escalated` notice
+  (see "Escalation" in the assignment guide). With `signal="..."` it throws that
+  signal instead.
 - **expire** — force-completes the task with outcome `:expired` and advances the
-  token so the graph's expiry path (often a rejection route) runs.
+  token so the graph's expiry path (often a rejection route) runs, then delivers
+  an `:expired` notice when a notifier is configured.
+
+### Telling people
+
+The engine decides who is told and when; your notifier decides how
+(DESIGN.md §11.7):
+
+```elixir
+config :ash_bpmn, task_notifier: MyApp.Bpmn.Notices
+
+defmodule MyApp.Bpmn.Notices do
+  @behaviour AshBpmn.TaskNotifier
+
+  @impl true
+  def deliver(%AshBpmn.Notice{key: key, kind: kind, recipients: recipients}, _ctx) do
+    # Send once per key: a retry hands you the same one.
+    :ok
+  end
+end
+```
+
+A notice goes to the assignee when the task is claimed, otherwise to its
+candidates, plus the people an escalation just added, always minus the task's
+exclusions. `deliver/2` runs after the timer's writes commit; `{:error, _}` or a
+raise retries the job with the same `key`, and the log records
+`:notice_delivered` or, on the final attempt, `:notice_failed`. Nothing is
+delivered for a task completed or cancelled before its timer fires.
+
+A draft with a `remind` timer is refused at publish while no notifier is
+configured, and one with an `escalate` timer (without `signal`) while the
+resolver has no `escalate/2` or no notifier is configured. A
+`RequireApproval` with `remind_in` or `escalate_in` is refused, the same way, when
+it is requested. A definition published before that check still runs: its
+timers write `:notice_undelivered` and emit
+`[:ash_bpmn, :notice, :undelivered]` telemetry, so nobody being told is visible
+rather than silent.
 
 When a task completes, the engine cancels its outstanding timer jobs. This
 bookkeeping is not optional in either direction: completing without cancelling
