@@ -18,6 +18,14 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Bug Fixes:
 
+- **Inline-mode timer storage survives concurrent tests.** `TestJobs`
+  created its ETS table in whichever process stored the first timer, so the
+  table died with that process (usually a test) and took every other test's
+  stored timers with it, and two async tests storing their first timers at
+  once raised "table name already exists". A process registered as
+  `:ash_bpmn_test_jobs_owner` now creates and holds the table for the life of
+  the VM, and a caller that loses the race to start it waits for the winner.
+
 - **Only a publish runs a subscription's `:supersede` (behaviour change).**
   `:supersede` is the half of a publish that retires the previous version and
   stamps its `retired_sequence`. It is an update action, so a host policy

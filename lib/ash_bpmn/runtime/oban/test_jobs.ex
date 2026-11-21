@@ -22,14 +22,84 @@ defmodule AshBpmn.Runtime.Oban.TestJobs do
   """
 
   @table :ash_bpmn_test_jobs
+  @owner :ash_bpmn_test_jobs_owner
 
-  @doc "Ensures the ETS table exists. Called from insert_inline."
+  @doc """
+  Ensures the ETS table exists. Called from insert_inline.
+
+  Safe to call from any number of processes at once, and the table outlives the caller.
+
+  An ETS table dies with the process that created it. This used to create the table in
+  whichever process stored the first timer, usually a test process or a LiveView, so the
+  table vanished when that test ended and took every job other tests had stored with it.
+  It also checked for the table and then created it, so two async tests storing their first
+  timers at the same moment raised "table name already exists".
+
+  The table is now created by a small process registered as `#{inspect(@owner)}` that holds
+  it for the life of the VM. Inline mode runs only in tests and has no supervision tree to
+  join, so that process is unsupervised on purpose. A caller that loses the race to start it
+  finds the winner's table and carries on.
+  """
   def ensure_started do
-    if :ets.whereis(@table) == :undefined do
-      :ets.new(@table, [:set, :public, :named_table])
-    end
-
+    if :ets.whereis(@table) == :undefined, do: start_owner()
     :ok
+  end
+
+  defp start_owner do
+    caller = self()
+    ref = make_ref()
+
+    {pid, monitor} =
+      spawn_monitor(fn ->
+        # Registering first makes the name the lock: only one process can hold it, so only
+        # one ever creates the table. A process that cannot register lost the race.
+        try do
+          Process.register(self(), @owner)
+        rescue
+          ArgumentError -> exit(:normal)
+        end
+
+        :ets.new(@table, [:set, :public, :named_table])
+        send(caller, {ref, :ready})
+        hold_table()
+      end)
+
+    receive do
+      {^ref, :ready} ->
+        Process.demonitor(monitor, [:flush])
+
+      {:DOWN, ^monitor, :process, ^pid, _reason} ->
+        await_owner()
+    end
+  end
+
+  # The owner answers only once it has created the table, because it registers before it
+  # creates it and reads its mailbox after.
+  defp hold_table do
+    receive do
+      {:ready?, from, ref} ->
+        send(from, {ref, :ready})
+        hold_table()
+
+      :stop ->
+        :ok
+    end
+  end
+
+  # Lost the race: ask the winner, which answers once its table exists.
+  defp await_owner do
+    monitor = Process.monitor(@owner)
+    send(@owner, {:ready?, self(), monitor})
+
+    receive do
+      {^monitor, :ready} ->
+        Process.demonitor(monitor, [:flush])
+        :ok
+
+      {:DOWN, ^monitor, :process, _, reason} ->
+        raise "the #{inspect(@owner)} process exited before creating #{inspect(@table)}: " <>
+                inspect(reason)
+    end
   end
 
   @doc "Stores a timer job record."
