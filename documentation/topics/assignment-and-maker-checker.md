@@ -274,17 +274,36 @@ checks, so each makes them itself as well:
 
 ## Escalation
 
-`escalate` timers call the resolver's optional `escalate/2` callback — the
-library again refusing to know what an escalation means (reassign to the
-manager? page the on-call? notify the BU head?) while providing the durable
-trigger, the cancellation bookkeeping, and the audit event.
+An `escalate` timer asks the resolver's `escalate/2` whom to add, and the
+engine adds them (DESIGN.md §11.6). The library still refuses to know what an
+escalation means in your organization (the manager? the on-call? the BU head?);
+it owns the durable trigger, the exclusions, the audit event and the notice.
 
-The context `escalate/2` receives carries `:tenant` (resolve only in it),
-`:instance`, `:subject` (loaded with the node's `ash:load`, as a gateway there
-sees it; for a standalone approval, the approval's subject), `:task`,
-`:candidates` (the task's current candidate principals), `:exclusions` (its
-`excluded_principal_ids`), `:timer` (`kind`, `index`, `repetition` and `key`,
-`"<task id>/<node id>/<timer index>/<repetition>"`, which is the same on every
-retry of a firing and is the key to deduplicate a notice on) and `:actor`.
-DESIGN.md §11.6 describes the next change to the callback: it will answer whom
-to add, and the engine will add them, minus the exclusions.
+```elixir
+@impl true
+def escalate(_task, %{tenant: tenant, subject: subject}),
+  do: {:ok, MyApp.Org.managers_of(subject.created_by_id, tenant)}
+```
+
+The context carries `:tenant` (resolve only in it), `:instance`, `:subject`
+(loaded with the node's `ash:load`, as a gateway there sees it; for a
+standalone approval, the approval's subject), `:task`, `:candidates` (the task's
+current candidate principals), `:exclusions` (its `excluded_principal_ids`),
+`:timer` (`kind`, `index`, `repetition` and `key`,
+`"<task id>/<node id>/<timer index>/<repetition>"`, the same on every retry of a
+firing) and `:actor`.
+
+What the engine does with the answer:
+
+- It subtracts the task's exclusions, and records the ids it refused. An
+  escalation can never hand a task to someone maker-checker excluded, and an
+  excluded member of a team it adds still cannot claim.
+- It adds the rest as candidates, in the task's tenant. It never removes a
+  candidate or the assignee: an escalation widens who may act.
+- It records `:task_escalated`, then delivers an `:escalated` notice through
+  the configured `AshBpmn.TaskNotifier`.
+- `{:ok, []}`, or an answer the exclusions empty, records
+  `:escalation_reached_nobody` and is not retried.
+- `{:error, _}`, a raise, or any other answer (including the old bare `:ok`)
+  records `:escalation_failed` and is retried. A retry of the same firing adds
+  no candidate twice.

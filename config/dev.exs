@@ -21,6 +21,7 @@ config :ash_bpmn, AshBpmnDev.Repo,
 
 config :ash_bpmn,
   assignment_resolver: AshBpmnDev.Resolver,
+  task_notifier: AshBpmnDev.Notices,
   action_invoker: AshBpmnDev.Invoker,
   ash_domains: [AshBpmnDev.Bpmn],
   queue: :bpmn,

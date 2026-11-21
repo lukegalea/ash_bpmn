@@ -160,6 +160,16 @@ Nothing has been released yet. Everything below is the initial body of work.
   the latest published definition in the caller's scope; `{:error, reason}`
   fails the start like any child that could not start.
 
+- **`AshBpmn.TaskNotifier`, `AshBpmn.Notice` and `AshBpmn.Config.task_notifier/0`**
+  (DESIGN.md §11.7). A remind timer delivers a `:remind` notice, an escalation
+  an `:escalated` one, and an expiry an `:expired` one, to the assignee or the
+  candidates (plus anyone just added), minus exclusions. Delivery runs after the
+  timer's writes commit, is retried with the same key, and is recorded as
+  `:notice_delivered`, `:notice_failed` or, with no notifier,
+  `:notice_undelivered` plus `[:ash_bpmn, :notice, :undelivered]` telemetry.
+  Nothing is delivered for a completed or cancelled task. No new columns.
+- `RequireApproval` accepts `remind_in`.
+
 - **A user task's due date and follow-up date are data (`ash:schedule`).**
   `<ash:schedule due="..." followUp="..."/>` inside a user task's
   `ash:taskConfig` takes an ISO 8601 duration from the task's creation, or a
@@ -549,6 +559,23 @@ Nothing has been released yet. Everything below is the initial body of work.
   match error.
 
 ### Breaking changes:
+
+- **`escalate/2` answers whom to add, and the engine adds them** (DESIGN.md
+  §11.6). The callback returns `{:ok, [principal]}` or `{:error, reason}`. The
+  engine subtracts the task's exclusions, writes the rest as candidates in the
+  task's tenant, never removes a candidate or the assignee, records
+  `:task_escalated`, and delivers an `:escalated` notice. `{:ok, []}` records
+  `:escalation_reached_nobody` and is not retried; an error, a raise or the old
+  bare `:ok` records `:escalation_failed` and is retried. A host whose
+  `escalate/2` sent its own message must now return the principals instead,
+  and send through a `TaskNotifier`.
+- **Timers that reach people are refused at publish when nobody is wired up**
+  (§11.8). A draft with a `remind` timer needs `config :ash_bpmn,
+  task_notifier: ...`; one with an `escalate` timer without `signal` needs the
+  resolver's `escalate/2` and a notifier. `RequireApproval` with `remind_in` or
+  `escalate_in` is refused, the same way, when the approval is requested.
+  Definitions already published keep running, and their timers record
+  `:notice_undelivered`.
 
 - **Cancelling an instance cancels its call-activity children, in one step.**
   `AshBpmn.cancel_instance/2` now runs under the instance's lock as one

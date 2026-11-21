@@ -20,6 +20,7 @@ config :ash_bpmn, AshBpmn.TestRepo,
 # its own; these live here (test-only) so nothing leaks into consuming apps.
 config :ash_bpmn,
   assignment_resolver: AshBpmn.Test.Resolver,
+  task_notifier: AshBpmn.Test.Notifier,
   action_invoker: AshBpmn.Test.Invoker,
   queue: :bpmn,
   max_attempts: 5

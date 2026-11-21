@@ -79,6 +79,21 @@ defmodule AshBpmn.ApprovalTestSupport do
                 expire_in: [days: 5]}
       end
 
+      # A reminder and an escalation, for the notice tests.
+      create :request_reminded do
+        accept [:name, :created_by_id]
+
+        change {AshBpmn.Changes.RequireApproval,
+                key: "test_reminded_approval",
+                name: "Reminded approval",
+                outcomes: [:approved, :rejected],
+                candidates: [{:manager_of, "subject.created_by_id"}],
+                excluding: ["subject.created_by_id"],
+                remind_in: [hours: 12],
+                escalate_in: [hours: 24],
+                expire_in: [days: 3]}
+      end
+
       create :create_no_approval do
         accept [:name, :created_by_id]
       end
@@ -103,6 +118,7 @@ defmodule AshBpmn.ApprovalTestSupport do
       define :create
       define :create_no_approval
       define :request_followed_up
+      define :request_reminded
       define :request_change
     end
   end

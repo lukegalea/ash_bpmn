@@ -152,22 +152,24 @@ defmodule AshBpmn.TimerCycleTest do
                Enum.filter(ledger_for(instance), &(&1.data["repetition"] == 2))
     end
 
-    test "without its ledger row, a redelivery replaces the next repetition rather than doubling it" do
+    # Without the row id the firing is still known by its key: its `:timer_fired` is written
+    # once per key (DESIGN.md §11.4), so a redelivery finds it and arms nothing.
+    test "without its ledger row, a redelivery arms no second next repetition" do
       defn = publish!(task_xml(~s|<ash:timer kind="remind" cycle="R3/PT1H"/>|))
       instance = start!(defn)
       [rep1] = TestJobs.all()
       args = Map.delete(rep1.args, "timer_job_id")
 
       assert {:ok, :reminded} = TimerWorker.perform(%Oban.Job{args: args})
-      assert {:ok, :reminded} = TimerWorker.perform(%Oban.Job{args: args})
+      assert {:ok, :already_fired} = TimerWorker.perform(%Oban.Job{args: args})
 
       assert [%{args: %{"repetition" => 2}}] =
                Enum.reject(TestJobs.all(), &(&1.id == rep1.id))
 
       rep2_rows = Enum.filter(ledger_for(instance), &(&1.data["repetition"] == 2))
 
-      assert rep2_rows |> Enum.map(& &1.status) |> Enum.sort() == [:cancelled, :scheduled]
-      assert Enum.any?(rep2_rows, &(&1.cancel_reason == :superseded))
+      assert Enum.map(rep2_rows, & &1.status) == [:scheduled]
+      assert length(events_of(instance, :timer_fired)) == 1
     end
 
     test "a firing that ran late skips the repetitions it missed, in one event" do
