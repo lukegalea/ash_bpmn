@@ -1345,7 +1345,10 @@ defmodule AshBpmn.Runtime.Interpreter do
                  instance_id: ctx[:instance].id,
                  node_id: target_node_id,
                  status: :active,
-                 fork_id: fork_id
+                 fork_id: fork_id,
+                 # Each branch carries what the token carried into the fork, as a sequence
+                 # flow does: a value promoted before it is read on every branch after it.
+                 routing: current_routing(ctx)
                }
              ]},
             {:jobs,

@@ -77,6 +77,20 @@ defmodule AshBpmn.RoutingAssignmentTest do
              Resolver.last_candidate_specs()
   end
 
+  test "every branch of a parallel fork carries the routing promoted before it" do
+    requester = Ash.UUID.generate()
+    decide("Approver", requester)
+
+    tasks = start_all!("forked_assignment.bpmn", created_by_id: requester)
+
+    assert Enum.map(tasks, & &1.node_id) |> Enum.sort() == ["Left", "Right"]
+
+    for task <- tasks do
+      assert Resolver.role_member("Approver") in candidate_ids(task)
+      assert requester in task.excluded_principal_ids
+    end
+  end
+
   defp decide(role, requester) do
     DecisionResolver.register("approval.who", fn _inputs ->
       %{outputs: %{"approver_role" => role, "requested_by_id" => requester}}
@@ -84,7 +98,12 @@ defmodule AshBpmn.RoutingAssignmentTest do
   end
 
   defp start!(attrs) do
-    xml = File.read!("test/fixtures/decided_assignment.bpmn")
+    [task] = start_all!("decided_assignment.bpmn", attrs)
+    task
+  end
+
+  defp start_all!(fixture, attrs) do
+    xml = File.read!("test/fixtures/#{fixture}")
 
     defn =
       Definition.create!(%{
@@ -110,12 +129,9 @@ defmodule AshBpmn.RoutingAssignmentTest do
     {:ok, instance} =
       AshBpmn.start_instance(AshBpmn.Test.Domain, definition: defn, subject: subject)
 
-    [task] =
-      HumanTask
-      |> Ash.Query.filter(instance_id == ^instance.id)
-      |> Ash.read!(authorize?: false)
-
-    task
+    HumanTask
+    |> Ash.Query.filter(instance_id == ^instance.id)
+    |> Ash.read!(authorize?: false)
   end
 
   defp candidate_ids(task) do

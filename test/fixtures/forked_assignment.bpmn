@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   id="Definitions_forked_assignment">
+  <bpmn2:process id="Process_forked_assignment" isExecutable="true">
+    <bpmn2:startEvent id="Start">
+      <bpmn2:outgoing>F_start</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <!-- The decision names who decides: a role, and the person who asked. -->
+    <bpmn2:businessRuleTask id="WhoDecides" name="Who decides?">
+      <bpmn2:extensionElements>
+        <ash:decision ref="approval.who" binding="latest"/>
+        <ash:inputs>
+          <ash:input name="amount" from="subject.amount"/>
+        </ash:inputs>
+        <ash:promote>
+          <ash:signal name="approver_role" required="true"/>
+          <ash:signal name="requested_by_id" required="true"/>
+        </ash:promote>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_start</bpmn2:incoming>
+      <bpmn2:outgoing>F_decided</bpmn2:outgoing>
+    </bpmn2:businessRuleTask>
+
+    <!-- Both branches read what the decision promoted before the fork. -->
+    <bpmn2:parallelGateway id="Fork">
+      <bpmn2:incoming>F_decided</bpmn2:incoming>
+      <bpmn2:outgoing>F_to_Left</bpmn2:outgoing>
+      <bpmn2:outgoing>F_to_Right</bpmn2:outgoing>
+    </bpmn2:parallelGateway>
+
+    <bpmn2:userTask id="Left" name="Left">
+      <bpmn2:extensionElements>
+        <ash:taskConfig>
+          <ash:candidates>
+            <ash:candidate kind="role" of="routing.approver_role"/>
+            <ash:candidate kind="user" of="subject.created_by_id"/>
+          </ash:candidates>
+          <ash:exclusions>
+            <ash:exclusion who="routing.requested_by_id"/>
+          </ash:exclusions>
+          <ash:outcomes>
+            <ash:outcome name="approved"/>
+          </ash:outcomes>
+        </ash:taskConfig>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_to_Left</bpmn2:incoming>
+      <bpmn2:outgoing>F_Left_done</bpmn2:outgoing>
+    </bpmn2:userTask>
+
+    <bpmn2:userTask id="Right" name="Right">
+      <bpmn2:extensionElements>
+        <ash:taskConfig>
+          <ash:candidates>
+            <ash:candidate kind="role" of="routing.approver_role"/>
+            <ash:candidate kind="user" of="subject.created_by_id"/>
+          </ash:candidates>
+          <ash:exclusions>
+            <ash:exclusion who="routing.requested_by_id"/>
+          </ash:exclusions>
+          <ash:outcomes>
+            <ash:outcome name="approved"/>
+          </ash:outcomes>
+        </ash:taskConfig>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_to_Right</bpmn2:incoming>
+      <bpmn2:outgoing>F_Right_done</bpmn2:outgoing>
+    </bpmn2:userTask>
+
+    <bpmn2:endEvent id="EndLeft"><bpmn2:incoming>F_Left_done</bpmn2:incoming></bpmn2:endEvent>
+    <bpmn2:endEvent id="EndRight"><bpmn2:incoming>F_Right_done</bpmn2:incoming></bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F_start" sourceRef="Start" targetRef="WhoDecides"/>
+    <bpmn2:sequenceFlow id="F_decided" sourceRef="WhoDecides" targetRef="Fork"/>
+    <bpmn2:sequenceFlow id="F_to_Left" sourceRef="Fork" targetRef="Left"/>
+    <bpmn2:sequenceFlow id="F_to_Right" sourceRef="Fork" targetRef="Right"/>
+    <bpmn2:sequenceFlow id="F_Left_done" sourceRef="Left" targetRef="EndLeft"/>
+    <bpmn2:sequenceFlow id="F_Right_done" sourceRef="Right" targetRef="EndRight"/>
+  </bpmn2:process>
+</bpmn2:definitions>

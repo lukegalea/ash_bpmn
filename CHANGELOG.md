@@ -159,6 +159,12 @@ Nothing has been released yet. Everything below is the initial body of work.
   reaches the definition that tenant runs. `:default`, or no callback, keeps
   the latest published definition in the caller's scope; `{:error, reason}`
   fails the start like any child that could not start.
+- **Every branch of a parallel fork carries the token's routing.** A value
+  promoted before a fork used to be lost on its branches, so a branch that
+  read it (a user task's candidates, a message catch's correlate) saw
+  nothing. A fork now copies the routing onto each branch, as a sequence
+  flow does.
+
 - **A user task's clauses can read the token's routing.** The assignment
   resolver's context now carries `:routing` for a diagram's user task: the
   scalars earlier nodes promoted. A business rule task can name the role that
