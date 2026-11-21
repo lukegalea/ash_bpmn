@@ -113,6 +113,47 @@ Nothing has been released yet. Everything below is the initial body of work.
   the latest published definition in the caller's scope; `{:error, reason}`
   fails the start like any child that could not start.
 
+- **A user task's due date and follow-up date are data (`ash:schedule`).**
+  `<ash:schedule due="..." followUp="..."/>` inside a user task's
+  `ash:taskConfig` takes an ISO 8601 duration from the task's creation, or a
+  FEEL expression (after a leading `=`) that returns a date-time with an
+  offset. Both are compiled at publish and evaluated once, when the task is
+  created, into `HumanTask.due_at` and a new `HumanTask.follow_up_at`. They
+  trigger nothing by themselves. Without `due`, a task's expire timer instant
+  is its `due_at`. An expression that answers null or something that is not an
+  instant fails the instance at the task with a `:timer_unresolved` event and
+  is not retried; the task is not created. A literal date, months or years in
+  a duration literal, a zero duration, an unknown attribute and a second
+  `ash:schedule` are compile errors naming the node. See DESIGN.md §11.5 and
+  "Due and follow-up dates" in the running-processes guide. The designer keeps
+  an `ash:schedule` through Apply; its panel has no fields for it yet.
+
+- **`HumanTask` gains `follow_up_at`, `overdue?`, `:overdue` and
+  `:follow_up_due` (new column: run `mix ash.codegen`).** `:overdue` reads open
+  and claimed tasks whose `due_at` has passed, longest overdue first;
+  `:follow_up_due` those whose `follow_up_at` has come. A task with no due date
+  is in neither. The macro adds the `follow_up_at` column and a partial index
+  on `due_at` over open and claimed tasks, so a host takes this release with
+  `mix ash.codegen` and a migration. `RequireApproval` accepts
+  `follow_up_in`, and an approval with `expire_in` but no `due_in` now takes
+  the expiry instant as its `due_at` (it was nil).
+
+- **The escalate context carries the tenant, the instance and the people.**
+  `escalate/2` used to receive `instance: nil`, `subject: nil` and no tenant.
+  It now receives `:tenant`, `:instance`, `:subject` (loaded with the node's
+  `ash:load`), `:task`, `:candidates`, `:exclusions` and `:timer` (`kind`,
+  `index`, `repetition` and a `key`, `"<task id>/<node id>/<timer
+  index>/<repetition>"`, stable across retries of one firing). The callback's
+  contract is unchanged. Timer jobs carry their `"index"` in their args; a job
+  armed before this release is read as the first timer of its kind.
+
+- **The resolver context carries `:tenant` and `:decisions`.** `:decisions`
+  maps the node id of each task already completed in the instance to its
+  `decided_by_id`, `outcome` and `task_id`, read once when a user task is
+  created. A resolver can answer `<ash:exclusion who="decided_by:Review_1"/>`
+  from it, so a second review leaves out whoever made the first. See "A second
+  review that leaves out the first reviewer" in the assignment guide.
+
 - **`AshBpmn.Diff` compares two process definition versions by meaning.**
   `diff(old, new)` reads the compiled graph, never the XML, and returns plain
   maps (`aspect`, `kind`, `subject`, `option`, `from`, `to`) for each step

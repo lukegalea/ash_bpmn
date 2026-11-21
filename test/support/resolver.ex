@@ -36,12 +36,25 @@ defmodule AshBpmn.Test.Resolver do
   """
   def exclusions(specs, ctx) do
     record(:exclusions, specs)
+    Process.put({__MODULE__, :exclusions_ctx}, ctx)
     subject = Map.get(ctx, :subject)
 
     ids =
       Enum.flat_map(specs, fn
-        %{"who" => path} -> List.wrap(subject_field(subject, path))
-        _ -> []
+        # Whoever decided an earlier task in this instance, read from the `:decisions` the
+        # engine hands the resolver: how a second review leaves out the first reviewer.
+        %{"who" => "decided_by:" <> node_id} ->
+          ctx
+          |> Map.get(:decisions, %{})
+          |> Map.get(node_id, %{})
+          |> Map.get(:decided_by_id)
+          |> List.wrap()
+
+        %{"who" => path} ->
+          List.wrap(subject_field(subject, path))
+
+        _ ->
+          []
       end)
 
     {:ok, ids}
@@ -61,8 +74,9 @@ defmodule AshBpmn.Test.Resolver do
 
   Callback: `escalate(task :: map(), ctx :: map()) :: :ok | {:ok, map()} | {:error, term()}`
   """
-  def escalate(task, _ctx) do
+  def escalate(task, ctx) do
     Process.put({__MODULE__, :escalations}, escalations() ++ [task.id])
+    Process.put({__MODULE__, :escalation_ctxs}, escalation_ctxs() ++ [ctx])
 
     case Process.get({__MODULE__, :escalate_result}, :ok) do
       {:__raise__, message} -> raise message
@@ -77,15 +91,24 @@ defmodule AshBpmn.Test.Resolver do
   @spec escalations() :: [Ash.UUID.t()]
   def escalations, do: Process.get({__MODULE__, :escalations}, [])
 
+  @doc "The contexts `escalate/2` has been called with, in order."
+  @spec escalation_ctxs() :: [map()]
+  def escalation_ctxs, do: Process.get({__MODULE__, :escalation_ctxs}, [])
+
   @doc "Forgets staged results and recorded escalations."
   def clear_escalations do
     Process.delete({__MODULE__, :escalations})
+    Process.delete({__MODULE__, :escalation_ctxs})
     Process.delete({__MODULE__, :escalate_result})
   end
 
   @doc "The specs the last `candidates/2` call received."
   @spec last_candidate_specs() :: [map()]
   def last_candidate_specs, do: Process.get({__MODULE__, :candidates}, [])
+
+  @doc "The context the last `exclusions/2` call received."
+  @spec last_exclusion_ctx() :: map() | nil
+  def last_exclusion_ctx, do: Process.get({__MODULE__, :exclusions_ctx})
 
   @doc "The specs the last `exclusions/2` call received."
   @spec last_exclusion_specs() :: [map()]

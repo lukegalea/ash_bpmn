@@ -27,7 +27,7 @@ import './ash_bpmn.css';
 //
 // Vocabulary (DESIGN.md §3):
 //   TaskConfig   attrs: action?, outcome?
-//                children: candidates, exclusions, outcomes, timers
+//                children: candidates, exclusions, outcomes, timers, schedule
 //   Decision     attrs: ref, binding, version?, name?
 //   Call         attrs: ref  (the serviceTask/sendTask ash:call binding)
 //   Inputs       child: input
@@ -42,6 +42,7 @@ import './ash_bpmn.css';
 //   Outcome      attrs: name
 //   Timers       child: timer
 //   Timer        attrs: kind, minutes?, hours?, days?
+//   Schedule     attrs: due?, followUp?  (a duration, or "=" and a FEEL expression)
 //
 // The package declares `xml: { tagAlias: 'lowerCase' }`, the same way
 // camunda-bpmn-moddle does. Without it moddle looks for <ash:TaskConfig> and
@@ -65,7 +66,8 @@ export const ashBpmnModdle = {
         { name: 'candidates', type: 'Candidates' },
         { name: 'exclusions', type: 'Exclusions' },
         { name: 'outcomes', type: 'Outcomes' },
-        { name: 'timers', type: 'Timers' }
+        { name: 'timers', type: 'Timers' },
+        { name: 'schedule', type: 'Schedule' }
       ]
     },
     // --- businessRuleTask -------------------------------------------------
@@ -193,6 +195,16 @@ export const ashBpmnModdle = {
         { name: 'minutes', type: 'Integer', isAttr: true },
         { name: 'hours', type: 'Integer', isAttr: true },
         { name: 'days', type: 'Integer', isAttr: true }
+      ]
+    },
+    // A user task's due and follow-up dates (DESIGN.md §11.5). Registered so bpmn-js keeps
+    // the element on save; the panel has no fields for it yet, and carries it through.
+    {
+      name: 'Schedule',
+      superClass: ['Element'],
+      properties: [
+        { name: 'due', type: 'String', isAttr: true },
+        { name: 'followUp', type: 'String', isAttr: true }
       ]
     }
   ]
@@ -355,7 +367,10 @@ function readConfig(element) {
         hours: t.hours != null ? t.hours : null,
         days: t.days != null ? t.days : null
       };
-    })
+    }),
+    schedule: cfg.schedule
+      ? { due: cfg.schedule.due || '', followUp: cfg.schedule.followUp || '' }
+      : null
   };
 }
 
@@ -370,6 +385,7 @@ function readConfig(element) {
  *   exclusions?: [{ who }]
  *   outcomes?:   string[] | [{ name }]
  *   timers?:     [{ kind, minutes?, hours?, days? }]
+ *   schedule?:   { due?, followUp? }  (carried through; the panel does not edit it)
  *
  * Blank optional attributes are omitted rather than written as empty strings —
  * the compiler treats an empty action on a userTask's taskConfig as an unknown
@@ -426,6 +442,15 @@ function buildTaskConfig(moddle, config) {
         });
       })
     });
+  }
+
+  // Carried through as read: the panel does not edit it, and dropping it on Apply would
+  // erase a deadline the modeller wrote by hand.
+  if (config.schedule && (nonBlank(config.schedule.due) || nonBlank(config.schedule.followUp))) {
+    var schedule = {};
+    if (nonBlank(config.schedule.due)) schedule.due = String(config.schedule.due);
+    if (nonBlank(config.schedule.followUp)) schedule.followUp = String(config.schedule.followUp);
+    props.schedule = moddle.create('ash:Schedule', schedule);
   }
 
   return moddle.create('ash:TaskConfig', props);

@@ -64,6 +64,21 @@ defmodule AshBpmn.ApprovalTestSupport do
                 expire_in: [days: 7]}
       end
 
+      # No `due_in`: the expiry is the completion deadline, so it is the due date. And a
+      # follow-up date, which is data only.
+      create :request_followed_up do
+        accept [:name, :created_by_id]
+
+        change {AshBpmn.Changes.RequireApproval,
+                key: "test_followed_up_approval",
+                name: "Followed-up approval",
+                outcomes: [:approved, :rejected],
+                candidates: [{:manager_of, "subject.created_by_id"}],
+                excluding: ["subject.created_by_id"],
+                follow_up_in: [days: 2],
+                expire_in: [days: 5]}
+      end
+
       create :create_no_approval do
         accept [:name, :created_by_id]
       end
@@ -87,6 +102,7 @@ defmodule AshBpmn.ApprovalTestSupport do
     code_interface do
       define :create
       define :create_no_approval
+      define :request_followed_up
       define :request_change
     end
   end

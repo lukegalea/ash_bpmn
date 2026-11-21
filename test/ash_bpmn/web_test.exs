@@ -171,6 +171,35 @@ defmodule AshBpmn.WebTest do
       assert config["timers"] == [%{"kind" => "expire", "days" => 7}]
     end
 
+    test "applying a user task's config keeps the ash:schedule the panel has no fields for" do
+      # Apply rewrites the task's extensionElements from the config it pushes. A schedule the
+      # panel did not carry would be erased from the diagram by an unrelated edit.
+      conn = build_test_conn()
+      {:ok, view, _html} = live(conn, "/designer")
+      schedule = %{"due" => "P30D", "followUp" => "= task.due_at - duration(\"P2D\")"}
+
+      render_hook(view, "selection_changed", %{
+        "id" => "ManagerApproval",
+        "type" => "bpmn:UserTask",
+        "name" => "Manager approval",
+        "config" => %{"schedule" => schedule}
+      })
+
+      view
+      |> element("#ash-bpmn-panel form")
+      |> render_submit(%{
+        "element_id" => "ManagerApproval",
+        "type" => "bpmn:UserTask",
+        "name" => "Manager approval",
+        "candidates_kind" => ["manager_of"],
+        "candidates_of" => ["subject.created_by_id"],
+        "outcomes_name" => ["approved"]
+      })
+
+      assert_push_event(view, "apply_config", %{config: config})
+      assert config["schedule"] == schedule
+    end
+
     test "save_xml form with invalid xml populates errors panel" do
       conn = build_test_conn()
 

@@ -665,7 +665,11 @@ defmodule AshBpmn.Runtime.Interpreter do
     candidate_specs = node["candidates"] || []
     exclusion_specs = node["exclusions"] || []
 
-    candidate_ctx = Map.take(ctx, [:subject, :actor, :instance, :task, :assigns])
+    # `:decisions` (who decided each completed task in this instance, read once by the advance
+    # worker) lets a resolver answer an exclusion such as `who="decided_by:Review_1"`, so a
+    # second review can leave out whoever made the first. `:tenant` is the tenant to resolve in.
+    candidate_ctx =
+      Map.take(ctx, [:subject, :actor, :instance, :task, :assigns, :tenant, :decisions])
 
     {:ok, candidates} = resolver.candidates(candidate_specs, candidate_ctx)
     {:ok, exclusions} = resolver.exclusions(exclusion_specs, candidate_ctx)
@@ -686,6 +690,32 @@ defmodule AshBpmn.Runtime.Interpreter do
         candidate_ctx
       )
 
+    timers = timer_jobs(node["timers"] || [])
+
+    with {:ok, dates} <- schedule(node_id, node["schedule"], timers, ctx) do
+      user_task_effects(graph, node_id, node, ctx, %{
+        instance: instance,
+        token: token,
+        exclusions: exclusions,
+        candidates: filtered_candidates,
+        unassignable: unassignable,
+        timers: timers,
+        dates: dates
+      })
+    end
+  end
+
+  defp user_task_effects(graph, node_id, node, ctx, spec) do
+    %{
+      instance: instance,
+      token: token,
+      exclusions: exclusions,
+      candidates: filtered_candidates,
+      unassignable: unassignable,
+      timers: timers,
+      dates: dates
+    } = spec
+
     # A placeholder key, not a real id: the interpreter is pure, so it cannot
     # know the id the data layer will assign. It labels the task here and the
     # worker swaps in the real id when creating candidates and timers.
@@ -697,6 +727,8 @@ defmodule AshBpmn.Runtime.Interpreter do
       node_id: node_id,
       name: node["name"] || node_id,
       status: :open,
+      due_at: dates.due_at,
+      follow_up_at: dates.follow_up_at,
       # The subtraction above removed their rows; kept with the task as well so an excluded
       # person cannot act through a candidate team they belong to. See `AshBpmn.Candidacy`.
       excluded_principal_ids: exclusions |> Enum.reject(&is_nil/1) |> Enum.uniq()
@@ -714,15 +746,95 @@ defmodule AshBpmn.Runtime.Interpreter do
       # rather than something that needs excluding from it.
       park_token: %{},
       events:
-        [event_attrs(ctx, node_id, :task_created)] ++
+        [event_attrs(ctx, node_id, :task_created, schedule_event_data(dates))] ++
           unassignable_event(ctx, node_id, task_ref, unassignable),
       tasks: [{task_ref, task_attrs}],
       candidates: {task_ref, candidate_attrs},
-      timers: {task_ref, timer_jobs(node["timers"] || [])},
+      timers: {task_ref, timers},
       jobs: boundary_timer_jobs(graph, node_id, ctx)
     ]
 
     {:ok, effects}
+  end
+
+  # ── ash:schedule ─────────────────────────────────────────────────────────
+
+  # The task's due and follow-up dates (DESIGN.md §11.5), resolved once, now, and recorded on
+  # the row. `due` first, so `followUp` can be written relative to it (`= task.due_at -
+  # duration("P2D")`). With no `due`, the task's completion deadline is its expire timer, so
+  # that instant is its due date. Neither date triggers anything by itself.
+  #
+  # A moment that cannot be resolved is an incident, not a guess: the instance fails at this
+  # node with a `:timer_unresolved` event, and nothing retries it, because the same data gives
+  # the same answer. A modeller who wants a fallback writes it in the expression.
+  defp schedule(node_id, schedule, timers, ctx) do
+    schedule = schedule || %{}
+    now = DateTime.utc_now()
+    expr_ctx = build_expr_ctx(ctx)
+
+    with {:ok, due_at} <-
+           resolve_moment(node_id, "due", schedule["due"], now, expr_ctx, %{
+             "inserted_at" => now
+           }),
+         due_at = due_at || expire_instant(timers),
+         {:ok, follow_up_at} <-
+           resolve_moment(node_id, "followUp", schedule["follow_up"], now, expr_ctx, %{
+             "inserted_at" => now,
+             "due_at" => due_at
+           }) do
+      {:ok, %{due_at: due_at, follow_up_at: follow_up_at, now: now}}
+    end
+  end
+
+  defp resolve_moment(_node_id, _attr, nil, _now, _expr_ctx, _task), do: {:ok, nil}
+
+  defp resolve_moment(node_id, attr, moment, now, expr_ctx, task) do
+    # `task` is the task being created, and only that: in the step that leaves a completed task
+    # the expression context's `task` is the previous task's outcome, which a due date must not
+    # read by accident.
+    context = Map.put(expr_ctx, "task", Map.reject(task, fn {_k, v} -> is_nil(v) end))
+
+    case AshBpmn.Moment.resolve(moment, now, context) do
+      {:ok, instant} ->
+        {:ok, instant}
+
+      {:error, reason} ->
+        {:error,
+         {:incident, :timer_unresolved,
+          "ash:schedule #{attr} on #{node_id} #{reason} (#{moment["source"]})",
+          %{
+            "timer" => "schedule.#{attr}",
+            "expression" => moment["source"],
+            "reason" => reason
+          }}}
+    end
+  end
+
+  defp expire_instant(timers) do
+    Enum.find_value(timers, fn {_worker, args, opts} ->
+      args["kind"] == "expire" && Keyword.get(opts, :scheduled_at)
+    end)
+  end
+
+  defp schedule_event_data(%{due_at: nil, follow_up_at: nil}), do: %{}
+
+  defp schedule_event_data(%{due_at: due_at, follow_up_at: follow_up_at, now: now}) do
+    %{}
+    |> then(&if(due_at, do: Map.put(&1, "due_at", DateTime.to_iso8601(due_at)), else: &1))
+    |> then(
+      &if(follow_up_at,
+        do: Map.put(&1, "follow_up_at", DateTime.to_iso8601(follow_up_at)),
+        else: &1
+      )
+    )
+    # A due date already past when the task is created is recorded as it is, and said so: the
+    # task starts overdue, which is the truth, and "why was it overdue at once?" has an answer.
+    |> then(
+      &if(due_at && DateTime.before?(due_at, now),
+        do: Map.put(&1, "overdue_on_creation", true),
+        else: &1
+      )
+    )
   end
 
   # Carries the task's placeholder key, which the worker swaps for the task id it creates in the
@@ -1298,13 +1410,18 @@ defmodule AshBpmn.Runtime.Interpreter do
   end
 
   # The worker fills in "task_id" once the task row exists.
+  #
+  # "index" is the timer's position in the node's `ash:timers`, which with the task id, the node
+  # id and the repetition makes the timer's key (DESIGN.md §11.4).
   defp timer_jobs(timers) do
-    Enum.map(timers, fn timer ->
+    timers
+    |> Enum.with_index()
+    |> Enum.map(fn {timer, index} ->
       minutes = timer["minutes"] || 0
       scheduled_at = DateTime.add(DateTime.utc_now(), minutes, :minute)
 
       args =
-        %{"kind" => timer["kind"]}
+        %{"kind" => timer["kind"], "index" => index}
         |> then(&if(timer["signal"], do: Map.put(&1, "signal", timer["signal"]), else: &1))
 
       {AshBpmn.Runtime.TimerWorker, args, [scheduled_at: scheduled_at]}

@@ -57,6 +57,17 @@ defmodule AshBpmn.Resources.HumanTask do
       from the candidate set when the task was created. See
       `AshBpmn.Candidacy` for why the task keeps them.
 
+    * **`read :overdue`**, **`read :follow_up_due`** and **`calculate :overdue?`** --
+      deadlines as data (DESIGN.md §11.5). `:overdue` is the open and claimed tasks whose
+      `due_at` has passed, the longest overdue first; `:follow_up_due` the open and claimed
+      tasks whose `follow_up_at` has come, the earliest first. A task with no due date (or no
+      follow-up date) is in neither: nil means "no deadline", not "on time", so a host that
+      wants an age rule for tasks with no deadline keeps one for exactly those tasks. Both
+      reads paginate (offset or keyset, optional) and are tenant-scoped like every other read
+      of the resource. The dates are written when the task is created, from the diagram's
+      `<ash:schedule due followUp/>` or a `RequireApproval` change's `due_in` and
+      `follow_up_in`; they trigger nothing by themselves.
+
   ## Engine-only actions
 
   `:claim`, `:complete` and `:delegate` refuse any caller but the engine (see
@@ -97,6 +108,9 @@ defmodule AshBpmn.Resources.HumanTask do
           index [:subject_type, :subject_id, :node_id],
             unique: true,
             where: "status IN ('open','claimed')"
+
+          # The `:overdue` read: live tasks by due date.
+          index [:due_at], where: "status IN ('open','claimed')"
         end
       end
 
@@ -155,7 +169,16 @@ defmodule AshBpmn.Resources.HumanTask do
           public? true
         end
 
+        # The task's completion deadline: an `ash:schedule due` (or, without one, its expire
+        # timer's instant), or a `RequireApproval` change's `due_in`/`expire_in`. Recorded when
+        # the task is created and triggers nothing by itself. See DESIGN.md §11.5.
         attribute :due_at, :utc_datetime_usec do
+          public? true
+        end
+
+        # When someone should look at the task again: an `ash:schedule followUp`, or a
+        # `RequireApproval` change's `follow_up_in`. Data, like `due_at`; it triggers nothing.
+        attribute :follow_up_at, :utc_datetime_usec do
           public? true
         end
 
@@ -252,6 +275,14 @@ defmodule AshBpmn.Resources.HumanTask do
           description "The outcomes the task's BPMN step declares; nil for a standalone approval."
         end
 
+        # Past its due date and still live. A task with no due date is never overdue: nil is
+        # "no deadline", not "on time", and the `:overdue` read leaves it out the same way.
+        calculate :overdue?, :boolean, AshBpmn.Resources.HumanTask.Overdue do
+          public? true
+
+          description "Open or claimed, with a due date in the past. False when there is no due date."
+        end
+
         # The candidacy test the `:awaiting_actor` read filters on. A calculation so Ash builds
         # it for the actor the query runs as, and an expression so counts and aggregates over
         # the read apply it too. See `AshBpmn.Resources.HumanTask.AwaitsActor`.
@@ -276,6 +307,18 @@ defmodule AshBpmn.Resources.HumanTask do
           pagination offset?: true, keyset?: true, countable: true, required?: false
         end
 
+        read :overdue do
+          description "Open or claimed tasks past their due date, the longest overdue first."
+          prepare {AshBpmn.Resources.HumanTask.DateDue, field: :due_at}
+          pagination offset?: true, keyset?: true, countable: true, required?: false
+        end
+
+        read :follow_up_due do
+          description "Open or claimed tasks whose follow-up date has come, the earliest first."
+          prepare {AshBpmn.Resources.HumanTask.DateDue, field: :follow_up_at}
+          pagination offset?: true, keyset?: true, countable: true, required?: false
+        end
+
         create :create do
           accept [
             :instance_id,
@@ -286,6 +329,7 @@ defmodule AshBpmn.Resources.HumanTask do
             :assignee_type,
             :assignee_id,
             :due_at,
+            :follow_up_at,
             :on_complete,
             :subject_type,
             :subject_id,
@@ -363,6 +407,60 @@ defmodule AshBpmn.Resources.HumanTask do
         define :attach_timers, action: :attach_timers, args: [:timer_job_ids]
       end
     end
+  end
+end
+
+defmodule AshBpmn.Resources.HumanTask.Overdue do
+  @moduledoc """
+  The `overdue?` calculation on a `HumanTask`: open or claimed, with a due date in the past.
+
+  An expression, so it runs in the data layer and can be filtered and sorted on. A task with no
+  due date is not overdue: nil means "no deadline", not "late".
+  """
+  use Ash.Resource.Calculation
+
+  require Ash.Expr
+
+  @impl true
+  def expression(_opts, _context),
+    do: Ash.Expr.expr(not is_nil(due_at) and due_at < now() and status in [:open, :claimed])
+end
+
+defmodule AshBpmn.Resources.HumanTask.DateDue do
+  @moduledoc """
+  The preparation behind the `HumanTask` reads `:overdue` (`field: :due_at`) and
+  `:follow_up_due` (`field: :follow_up_at`).
+
+  Keeps open and claimed tasks whose date is set and has come (`due_at` strictly in the past,
+  `follow_up_at` at or before now), sorted by that date and then by id, so a page boundary is
+  stable when two tasks share a date. A task with no date is left out.
+  """
+  use Ash.Resource.Preparation
+
+  require Ash.Expr
+  require Ash.Query
+
+  @impl true
+  def init(opts) do
+    if opts[:field] in [:due_at, :follow_up_at],
+      do: {:ok, opts},
+      else: {:error, "field must be :due_at or :follow_up_at"}
+  end
+
+  @impl true
+  def prepare(query, opts, _context) do
+    query
+    |> Ash.Query.filter(^filter(opts[:field]))
+    |> Ash.Query.sort([{opts[:field], :asc}, id: :asc])
+  end
+
+  defp filter(:due_at),
+    do: Ash.Expr.expr(not is_nil(due_at) and due_at < now() and status in [:open, :claimed])
+
+  defp filter(:follow_up_at) do
+    Ash.Expr.expr(
+      not is_nil(follow_up_at) and follow_up_at <= now() and status in [:open, :claimed]
+    )
   end
 end
 

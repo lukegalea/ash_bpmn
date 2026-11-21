@@ -1728,7 +1728,7 @@ defmodule AshBpmn.Compiler.Graph do
     id = Xml.element_attr(node, "id")
 
     # Check for unknown ash child elements
-    known_children = MapSet.new(["candidates", "exclusions", "outcomes", "timers"])
+    known_children = MapSet.new(["candidates", "exclusions", "outcomes", "timers", "schedule"])
 
     children = Xml.get_element_children(config)
 
@@ -1792,18 +1792,79 @@ defmodule AshBpmn.Compiler.Graph do
           {:error, Errors.error(id, "userTask '#{id}' must have at least one outcome")}
 
         true ->
-          config_map =
-            %{
-              "candidates" => candidates,
-              "exclusions" => exclusions,
-              "outcomes" => outcomes,
-              "timers" => timers
-            }
-            |> Map.filter(fn {_, v} -> v != [] end)
+          with {:ok, schedule} <- build_schedule(config, id) do
+            config_map =
+              %{
+                "candidates" => candidates,
+                "exclusions" => exclusions,
+                "outcomes" => outcomes,
+                "timers" => timers,
+                "schedule" => schedule
+              }
+              |> Map.filter(fn {_, v} -> v not in [[], nil] end)
 
-          {:ok, config_map}
+            {:ok, config_map}
+          end
       end
     end
+  end
+
+  # `<ash:schedule due="..." followUp="..."/>` (DESIGN.md §11.5): the task's due date and
+  # follow-up date, each a duration from the task's creation or a FEEL expression returning a
+  # date-time. Compiled here so a malformed one is an error naming the node; evaluated once, when
+  # the task is created. Neither triggers anything by itself.
+  @schedule_attrs %{"due" => "due", "followUp" => "follow_up"}
+
+  defp build_schedule(config, id) do
+    case Xml.find_children(config, "schedule") do
+      [] ->
+        {:ok, nil}
+
+      [schedule] ->
+        attrs = Xml.element_attrs(schedule)
+
+        cond do
+          unknown = Enum.find(attrs, fn {k, _} -> not Map.has_key?(@schedule_attrs, k) end) ->
+            {k, _} = unknown
+
+            {:error,
+             Errors.error(
+               id,
+               "Unknown attribute '#{k}' on ash:schedule for userTask '#{id}'; " <>
+                 "supported: due, followUp"
+             )}
+
+          Xml.get_element_children(schedule) != [] ->
+            {:error,
+             Errors.error(id, "ash:schedule for userTask '#{id}' must not have child elements")}
+
+          attrs == [] ->
+            {:error,
+             Errors.error(
+               id,
+               "ash:schedule for userTask '#{id}' declares neither due nor followUp"
+             )}
+
+          true ->
+            compile_schedule(attrs, id)
+        end
+
+      [_ | _] ->
+        {:error, Errors.error(id, "userTask '#{id}' has more than one ash:schedule; write one")}
+    end
+  end
+
+  defp compile_schedule(attrs, id) do
+    Enum.reduce_while(attrs, {:ok, %{}}, fn {attr, source}, {:ok, acc} ->
+      case AshBpmn.Moment.compile(source) do
+        {:ok, moment} ->
+          {:cont, {:ok, Map.put(acc, Map.fetch!(@schedule_attrs, attr), moment)}}
+
+        {:error, reason} ->
+          {:halt,
+           {:error, Errors.error(id, "ash:schedule #{attr} for userTask '#{id}' #{reason}")}}
+      end
+    end)
   end
 
   defp parse_timer(timer_el) do

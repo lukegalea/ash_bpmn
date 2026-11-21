@@ -99,6 +99,8 @@ defmodule AshBpmn.Checks.AshBpmnInteraction do
     human_task: [
       :read,
       :awaiting_actor,
+      :overdue,
+      :follow_up_due,
       :create,
       :claim,
       :complete,

@@ -13,7 +13,11 @@ defmodule AshBpmn.Changes.RequireApproval do
     * `:candidates` — list of candidate specs for the resolver (required)
     * `:excluding` — list of exclusion specs (optional, default `[]`)
     * `:on_complete` — map of outcome => action ref string (optional)
-    * `:due_in` — duration keyword list e.g. `[hours: 48]` (optional)
+    * `:due_in` — duration keyword list e.g. `[hours: 48]` (optional). Without it, a task
+      with `:expire_in` takes the expiry instant as its `due_at`: that is its completion
+      deadline.
+    * `:follow_up_in` — duration keyword list (optional), written to `follow_up_at`. Like
+      `due_at`, it is data for a host's board and triggers nothing.
     * `:escalate_in` — duration keyword list (optional)
     * `:expire_in` — duration keyword list (optional)
 
@@ -65,6 +69,7 @@ defmodule AshBpmn.Changes.RequireApproval do
     exclusion_specs = Keyword.get(opts, :excluding, [])
     on_complete = Keyword.get(opts, :on_complete, %{})
     due_in = Keyword.get(opts, :due_in)
+    follow_up_in = Keyword.get(opts, :follow_up_in)
     escalate_in = Keyword.get(opts, :escalate_in)
     expire_in = Keyword.get(opts, :expire_in)
 
@@ -83,13 +88,17 @@ defmodule AshBpmn.Changes.RequireApproval do
       | domain: Ash.Resource.Info.domain(resources.human_task)
     }
 
-    # Build resolver context
+    # Build resolver context. The same keys a diagram's user task hands the resolver:
+    # `:tenant` to resolve in, and `:decisions`, empty here because a standalone approval has
+    # no instance whose earlier tasks anyone decided.
     resolver_ctx = %{
       subject: subject,
       actor: actor,
       instance: nil,
       task: nil,
-      assigns: %{}
+      assigns: %{},
+      tenant: scope.tenant,
+      decisions: %{}
     }
 
     # Normalized first: a resolver sees the same string-keyed maps here as it
@@ -127,14 +136,19 @@ defmodule AshBpmn.Changes.RequireApproval do
     subject_type = subject.__struct__ |> to_string()
     subject_id = subject.id
 
-    # Calculate due_at
+    # One instant for every date the approval is created with, so `due_in` and `expire_in`
+    # of the same length name the same moment.
+    now = DateTime.utc_now()
+    expires_at = expire_in && DateTime.add(now, duration_to_minutes(expire_in), :minute)
+
+    # Without `due_in`, the expiry is the completion deadline, so it is the due date
+    # (DESIGN.md §11.5), as it is for a diagram's user task with an expire timer.
     due_at =
-      if due_in do
-        minutes = duration_to_minutes(due_in)
-        DateTime.add(DateTime.utc_now(), minutes, :minute)
-      else
-        nil
-      end
+      if due_in,
+        do: DateTime.add(now, duration_to_minutes(due_in), :minute),
+        else: expires_at
+
+    follow_up_at = follow_up_in && DateTime.add(now, duration_to_minutes(follow_up_in), :minute)
 
     # Check for a live approval before inserting. The partial unique index on
     # (subject_type, subject_id, node_id) where status in (open, claimed) is
@@ -155,8 +169,10 @@ defmodule AshBpmn.Changes.RequireApproval do
         subject_type: subject_type,
         subject_id: subject_id,
         due_at: due_at,
+        follow_up_at: follow_up_at,
+        now: now,
         escalate_in: escalate_in,
-        expire_in: expire_in,
+        expires_at: expires_at,
         candidates: filtered_candidates,
         exclusions: exclusions,
         unassignable: unassignable,
@@ -184,8 +200,10 @@ defmodule AshBpmn.Changes.RequireApproval do
       subject_type: subject_type,
       subject_id: subject_id,
       due_at: due_at,
+      follow_up_at: follow_up_at,
+      now: now,
       escalate_in: escalate_in,
-      expire_in: expire_in,
+      expires_at: expires_at,
       candidates: filtered_candidates,
       exclusions: exclusions,
       unassignable: unassignable,
@@ -204,6 +222,7 @@ defmodule AshBpmn.Changes.RequireApproval do
             subject_type: subject_type,
             subject_id: subject_id,
             due_at: due_at,
+            follow_up_at: follow_up_at,
             # Kept with the task so an excluded person cannot act through a candidate team.
             excluded_principal_ids: exclusions |> Enum.reject(&is_nil/1) |> Enum.uniq()
           },
@@ -223,7 +242,7 @@ defmodule AshBpmn.Changes.RequireApproval do
       end)
 
       # Schedule timers
-      timer_job_ids = schedule_approval_timers(task.id, escalate_in, expire_in, scope)
+      timer_job_ids = schedule_approval_timers(task.id, now, escalate_in, expires_at, scope)
 
       if timer_job_ids != [] do
         resources.human_task.attach_timers!(task, timer_job_ids, AshBpmn.Scope.engine(scope))
@@ -287,47 +306,31 @@ defmodule AshBpmn.Changes.RequireApproval do
 
   defp friendly_constraint_error(_error, _key), do: nil
 
-  defp schedule_approval_timers(task_id, escalate_in, expire_in, scope) do
-    ids = []
-
-    ids =
-      if escalate_in do
-        minutes = duration_to_minutes(escalate_in)
-        scheduled_at = DateTime.add(DateTime.utc_now(), minutes, :minute)
-
-        {:ok, job} =
-          AshBpmn.Runtime.Oban.insert(
-            AshBpmn.Runtime.TimerWorker,
-            AshBpmn.Scope.to_job_args(scope, %{
-              "task_id" => task_id,
-              "kind" => "escalate"
-            }),
-            scheduled_at: scheduled_at
-          )
-
-        [job.id | ids]
-      else
-        ids
-      end
-
-    if expire_in do
-      minutes = duration_to_minutes(expire_in)
-      scheduled_at = DateTime.add(DateTime.utc_now(), minutes, :minute)
-
+  # "index" is the timer's position among an approval's timers -- 0 for the escalation, 1 for
+  # the expiry -- which with the task id, its key and the repetition makes the timer's key
+  # (DESIGN.md §11.4), as a diagram timer's position in its `ash:timers` does.
+  defp schedule_approval_timers(task_id, now, escalate_in, expires_at, scope) do
+    [
+      escalate_in &&
+        {"escalate", 0, DateTime.add(now, duration_to_minutes(escalate_in), :minute)},
+      expires_at && {"expire", 1, expires_at}
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(fn {kind, index, scheduled_at} ->
       {:ok, job} =
         AshBpmn.Runtime.Oban.insert(
           AshBpmn.Runtime.TimerWorker,
           AshBpmn.Scope.to_job_args(scope, %{
             "task_id" => task_id,
-            "kind" => "expire"
+            "kind" => kind,
+            "index" => index
           }),
           scheduled_at: scheduled_at
         )
 
-      [job.id | ids]
-    else
-      ids
-    end
+      job.id
+    end)
+    |> Enum.reverse()
   end
 
   defp duration_to_minutes(opts) do
