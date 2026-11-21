@@ -421,6 +421,9 @@ defmodule AshBpmn.Web.DesignerLive do
             socket.assigns[:callables] || []
           )
 
+        config =
+          AshBpmn.Web.DesignerLive.carry_unedited(config, params, socket.assigns[:selected])
+
         payload = %{id: id, name: name, config: config}
 
         # A gateway condition and a gateway's default flow are not ash: config:
@@ -2415,6 +2418,23 @@ defmodule AshBpmn.Web.DesignerLive do
     |> Map.put("decision", normalize_decision(Map.get(config, "decision")))
     |> Map.put("call", normalize_call(Map.get(config, "call")))
   end
+
+  @doc false
+  # The parts of a user task's ash:taskConfig the panel shows no fields for, carried from the
+  # element as it was read into the config Apply writes back, so Apply never erases them. Today
+  # that is `ash:schedule` (DESIGN.md §11.5). Only for the element the panel has selected.
+  @spec carry_unedited(map(), map(), map() | nil) :: map()
+  def carry_unedited(config, %{"type" => "bpmn:UserTask"} = params, %{id: id} = selected)
+      when is_map(config) do
+    if (params["element_id"] || params["id"]) == id and is_map(selected.config) and
+         is_map(selected.config["schedule"]) do
+      Map.put(config, "schedule", selected.config["schedule"])
+    else
+      config
+    end
+  end
+
+  def carry_unedited(config, _params, _selected), do: config
 
   @doc false
   # The decision binding of a businessRuleTask, with every key the panel reads.

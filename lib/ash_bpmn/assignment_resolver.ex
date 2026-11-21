@@ -8,7 +8,15 @@ defmodule AshBpmn.AssignmentResolver do
   The host application implements this to translate opaque candidate specs —
   from a diagram's `ash:taskConfig` or from a `RequireApproval` change — into
   concrete principal ids. The engine passes a context map with `:subject`,
-  `:actor`, `:instance`, `:task`, and `:assigns`.
+  `:actor`, `:instance`, `:task`, `:assigns`, `:tenant` (the tenant to resolve
+  in) and `:decisions`.
+
+  `:decisions` maps the node id of each task already completed in the instance
+  to `%{decided_by_id: id, outcome: outcome, task_id: id}` (the latest, for a
+  node decided more than once), read once when the task is created. It lets an
+  exclusion name an earlier decider (`<ash:exclusion who="decided_by:Review_1"/>`,
+  a spelling the resolver chooses), so a second review can leave out whoever
+  made the first. A standalone approval passes `%{}`.
 
   ## One spec shape
 
@@ -39,7 +47,12 @@ defmodule AshBpmn.AssignmentResolver do
 
     * `candidates/2` — resolve specs into principal records.
     * `exclusions/2` — resolve exclusion specs into principal ids to remove.
-    * `escalate/2` — (optional) handle escalation for a task.
+    * `escalate/2` — (optional) handle escalation for a task. Its context
+      carries `:tenant`, `:instance`, `:subject` (loaded with the node's
+      `ash:load`), `:task`, `:candidates` (the task's current candidate
+      principals), `:exclusions` (`task.excluded_principal_ids`), `:timer`
+      (`kind`, `index`, `repetition` and `key`, stable across retries of one
+      firing) and `:actor`.
     * `team_ids/2` — (optional) the teams a person acts for, so a `:team`
       candidate row is matched. See "Team candidates" below.
     * `no_eligible_candidate/2` — (optional) who gets a task when its

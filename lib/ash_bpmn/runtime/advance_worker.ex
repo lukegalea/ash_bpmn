@@ -149,7 +149,9 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
       true ->
         ctx =
-          build_context(instance, token, scope, job.args["task_outcome"], node["load"])
+          instance
+          |> build_context(token, scope, job.args["task_outcome"], node["load"])
+          |> with_decisions(resources, node, scope)
 
         case dispatch(graph, node_id, node, ctx) do
           {:ok, effects} ->
@@ -247,6 +249,22 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     cond do
       is_nil(current) or current.status != :executing or current.attempts != token.attempts ->
         pass_on(failure)
+
+      # An incident (an `ash:schedule` moment that cannot be resolved, say): the same data gives
+      # the same answer, so it is not retried. The instance fails at the node, with an event of
+      # the incident's own kind naming what could not be done and why.
+      match?({:error, {:incident, _, _, _}}, failure) ->
+        {:error, {:incident, kind, message, data}} = failure
+
+        mark_instance_failed(
+          resources,
+          instance,
+          current,
+          current.node_id,
+          message,
+          scope,
+          %{"reason" => to_string(kind), :also => {kind, data}}
+        )
 
       match?({:error, {:bpmn_error, _, _}}, failure) ->
         {:error, {:bpmn_error, code, _details}} = failure
@@ -659,6 +677,28 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   defp load_subject(instance, scope, load),
     do: AshBpmn.Subject.load(instance, scope, load || [])
 
+  # Who decided each completed task in this instance, keyed by node id, for the resolver a user
+  # task's candidates and exclusions are resolved by: `<ash:exclusion who="decided_by:Review_1"/>`
+  # is answered from it, so a second review can leave out whoever made the first. Read here, once,
+  # when the task is created -- never in a policy -- and only for a user task, the one node that
+  # asks. A node decided more than once (a loop) answers with its latest decision.
+  defp with_decisions(ctx, resources, %{"type" => "userTask"}, scope) do
+    decisions =
+      resources.human_task
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(instance_id == ^ctx.instance.id and status == :completed)
+      |> Ash.Query.sort(updated_at: :asc, id: :asc)
+      |> Ash.read!(Scope.engine(scope))
+      |> Map.new(fn task ->
+        {task.node_id,
+         %{task_id: task.id, decided_by_id: task.decided_by_id, outcome: task.outcome}}
+      end)
+
+    Map.put(ctx, :decisions, decisions)
+  end
+
+  defp with_decisions(ctx, _resources, _node, _scope), do: Map.put(ctx, :decisions, %{})
+
   # ── Effect application ───────────────────────────────────────────────────
 
   defp apply_effects(resources, effects, ctx, graph) do
@@ -1016,6 +1056,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   # `why` overrides the default reason, `"max_attempts_exceeded"`, for a give-up that is not
   # about attempts: an unhandled business error says so, and names its code.
   defp give_up(resources, instance, token, node_id, error, scope, why) do
+    {also, why} = Map.pop(why, :also)
     killed = resources.token.kill!(token, Scope.engine(scope))
     FlightView.token_moved(instance, killed)
 
@@ -1043,6 +1084,19 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
       },
       Scope.engine(scope)
     )
+
+    with {kind, data} <- also do
+      resources.process_event.create!(
+        %{
+          instance_id: instance.id,
+          token_id: token.id,
+          kind: kind,
+          node_id: node_id,
+          data: data
+        },
+        Scope.engine(scope)
+      )
+    end
   end
 
   # A child that has finished wakes the token its parent left waiting.

@@ -206,6 +206,53 @@ produces escalation emails for decided work, and expiring without advancing
 produces a zombie token. If you add a completion path in a host extension,
 cancel the timers.
 
+## Due and follow-up dates
+
+A user task may declare when it is due and when someone should look at it
+again (DESIGN.md §11.5):
+
+```xml
+<ash:taskConfig>
+  <ash:schedule due="= subject.received_at + duration(&quot;P30D&quot;)" followUp="P21D"/>
+  ...
+</ash:taskConfig>
+```
+
+Each is an ISO 8601 duration counted from the task's creation (`P21D`, `PT4H`),
+or, after a leading `=`, a FEEL expression that returns a date-time with an
+offset. An expression reads `subject` (the paths the node declares in
+`ash:load`), `routing`, and `task.inserted_at`; `followUp` can also read
+`task.due_at`, so `followUp="= task.due_at - duration(&quot;P2D&quot;)"` works.
+A duration literal refuses months and years, whose length is not fixed;
+inside an expression they are FEEL's calendar arithmetic. A literal date is
+refused, because a date typed into a diagram may be gone before the task
+exists.
+
+Both are evaluated once, when the task is created, and written to
+`HumanTask.due_at` and `HumanTask.follow_up_at`. They trigger nothing by
+themselves; timers do. A task with no `due` but an `expire` timer takes the
+expire instant as its `due_at`, since that is its completion deadline. A due
+date already in the past is recorded as it is: the task starts overdue, and
+its `:task_created` event says `"overdue_on_creation" => true`.
+
+A moment that cannot be resolved is an incident, never a guess. An
+expression that returns `null`, a `date` with no time, a date-time with no
+offset, a duration, or anything else that is not an instant fails the
+instance at the task with a `:timer_unresolved` event naming the moment, the
+expression and the reason, beside the usual `:action_failed`. It is not
+retried, because the same data gives the same answer, and the task is not
+created: nothing parks without its deadline. A modeller who wants a fallback
+writes it in the expression:
+`due="= if subject.notice_at != null then subject.notice_at else now() + duration(&quot;P30D&quot;)"`.
+
+The `HumanTask` resource gives a board the reads it would otherwise write
+twice: `:overdue` (open or claimed, `due_at` in the past, longest overdue
+first), `:follow_up_due` (open or claimed, `follow_up_at` come, earliest
+first), and the `overdue?` calculation. A task with no due date is in
+neither read: nil means "no deadline", not "on time". A
+`RequireApproval` change sets the same columns from `due_in` and
+`follow_up_in`, and without `due_in` its `expire_in` instant is its due date.
+
 ## Timer catch events
 
 An `intermediateCatchEvent` carrying a `timerEventDefinition` is a node whose

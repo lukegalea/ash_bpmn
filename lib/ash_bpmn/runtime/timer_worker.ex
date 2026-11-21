@@ -114,16 +114,9 @@ defmodule AshBpmn.Runtime.TimerWorker do
     end
   end
 
-  defp fire_timer(resources, task, "escalate", scope, _args) do
+  defp fire_timer(resources, task, "escalate", scope, args) do
     resolver = Config.assignment_resolver!()
-
-    ctx = %{
-      task: task,
-      instance: nil,
-      subject: nil,
-      actor: scope.actor,
-      assigns: %{}
-    }
+    ctx = escalation_ctx(resources, task, scope, args)
 
     outcome = invoke_escalation(resolver, task, ctx)
 
@@ -356,6 +349,61 @@ defmodule AshBpmn.Runtime.TimerWorker do
       {:ok, %{flow: flow}} ->
         [flow]
     end
+  end
+
+  # What `escalate/2` is handed (DESIGN.md §11.6): the tenant to resolve in, the instance and
+  # its subject (loaded with the node's `ash:load`, as a gateway at that node would see it), the
+  # task's current candidates and its exclusions, and which timer fired. It used to carry
+  # `instance: nil`, `subject: nil` and no tenant, so a host could not resolve anyone in the
+  # task's own tenant.
+  defp escalation_ctx(resources, task, scope, args) do
+    instance = load_instance(resources, task, scope)
+    node = instance && node_config(resources, instance, task, scope)
+    index = timer_index(args, node, "escalate")
+    repetition = args["repetition"] || 1
+
+    %{
+      tenant: scope.tenant || Map.get(task, :organization_id),
+      instance: instance,
+      subject: AshBpmn.Subject.load(instance || task, scope, (node && node["load"]) || []),
+      task: task,
+      candidates: candidates(resources, task, scope),
+      exclusions: task.excluded_principal_ids || [],
+      timer: %{
+        kind: :escalate,
+        index: index,
+        repetition: repetition,
+        key: "#{task.id}/#{task.node_id}/#{index}/#{repetition}"
+      },
+      actor: scope.actor,
+      assigns: %{}
+    }
+  end
+
+  defp node_config(resources, instance, task, scope) do
+    resources.definition
+    |> AshBpmn.DefinitionLoader.load!(instance.definition_id, instance, scope)
+    |> Map.get(:graph)
+    |> get_in(["nodes", task.node_id])
+  end
+
+  # The position of the timer in its node's `ash:timers`, carried in the job args since timers
+  # had keys. A job armed before then has none: it is the first timer of its kind on the node,
+  # and an approval's escalation is its first timer.
+  defp timer_index(%{"index" => index}, _node, _kind) when is_integer(index), do: index
+
+  defp timer_index(_args, %{"timers" => timers}, kind) when is_list(timers),
+    do: Enum.find_index(timers, &(&1["kind"] == kind)) || 0
+
+  defp timer_index(_args, _node, _kind), do: 0
+
+  defp candidates(resources, task, scope) do
+    resources.task_candidate
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(task_id == ^task.id)
+    |> Ash.Query.sort(inserted_at: :asc, id: :asc)
+    |> Ash.read!(Scope.engine(scope))
+    |> Enum.map(&%{type: &1.principal_type, id: &1.principal_id})
   end
 
   defp load_instance(_resources, %{instance_id: nil}, _scope), do: nil

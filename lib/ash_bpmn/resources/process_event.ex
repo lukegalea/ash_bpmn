@@ -126,6 +126,12 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         :signal_not_delivered,
                         :timer_fired,
                         :timer_cancelled,
+                        # A moment (a timer's, or a task's `ash:schedule` due or follow-up date)
+                        # could not be resolved from the data: the expression answered null or
+                        # something that is not an instant. The instance fails at the node beside
+                        # this event, and nothing retries it. Names the moment, the expression
+                        # and the reason. See DESIGN.md §11.3.
+                        :timer_unresolved,
                         # An escalation timer fired and its handler failed. Deliberately not
                         # `:action_failed`, which is what a failed service task passes to
                         # `mark_instance_failed/5` -- anything grepping the log for failed

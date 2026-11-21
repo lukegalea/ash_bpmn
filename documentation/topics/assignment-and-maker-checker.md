@@ -114,6 +114,39 @@ it produces are an **index**, not the authority:
   between rows and the resolver's rule is exactly the kind of thing a re-check
   should surface rather than smooth over.
 
+## A second review that leaves out the first reviewer
+
+The resolver's context carries `:decisions`: for each task already completed in
+this instance, keyed by node id, its `decided_by_id`, `outcome` and `task_id`
+(the latest, if a node was decided more than once). The engine reads it once,
+when the task is created, never in a policy. A resolver can then answer an
+exclusion that names an earlier decider:
+
+```xml
+<ash:exclusion who="decided_by:Review_1"/>
+```
+
+```elixir
+@impl true
+def exclusions(specs, ctx) do
+  {:ok,
+   Enum.flat_map(specs, fn
+     %{"who" => "decided_by:" <> node_id} ->
+       ctx.decisions |> Map.get(node_id, %{}) |> Map.get(:decided_by_id) |> List.wrap()
+
+     spec ->
+       resolve_exclusion(spec, ctx)
+   end)}
+end
+```
+
+So "an unsure reviewer's case goes to a senior reviewer" is a second user task
+whose exclusions name the first, and the first reviewer can never claim it,
+through a team either. The `who` value stays opaque to the engine; `decided_by:`
+is a spelling your resolver chooses. The context also carries `:tenant`, the
+tenant to resolve in. A `RequireApproval` change hands the resolver the same
+keys, with `decisions: %{}`.
+
 ## Delegation with accountability
 
 Delegation (`AshBpmn.delegate_task!/2`) reassigns a claimed task to the
@@ -245,3 +278,13 @@ checks, so each makes them itself as well:
 library again refusing to know what an escalation means (reassign to the
 manager? page the on-call? notify the BU head?) while providing the durable
 trigger, the cancellation bookkeeping, and the audit event.
+
+The context `escalate/2` receives carries `:tenant` (resolve only in it),
+`:instance`, `:subject` (loaded with the node's `ash:load`, as a gateway there
+sees it; for a standalone approval, the approval's subject), `:task`,
+`:candidates` (the task's current candidate principals), `:exclusions` (its
+`excluded_principal_ids`), `:timer` (`kind`, `index`, `repetition` and `key`,
+`"<task id>/<node id>/<timer index>/<repetition>"`, which is the same on every
+retry of a firing and is the key to deduplicate a notice on) and `:actor`.
+DESIGN.md §11.6 describes the next change to the callback: it will answer whom
+to add, and the engine will add them, minus the exclusions.
