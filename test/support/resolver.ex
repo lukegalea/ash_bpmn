@@ -22,7 +22,7 @@ defmodule AshBpmn.Test.Resolver do
 
     result =
       Enum.flat_map(specs, fn spec ->
-        resolve_spec(spec, subject)
+        spec |> from_routing("of", ctx) |> resolve_spec(subject)
       end)
 
     {:ok, result}
@@ -49,6 +49,9 @@ defmodule AshBpmn.Test.Resolver do
           |> Map.get(node_id, %{})
           |> Map.get(:decided_by_id)
           |> List.wrap()
+
+        %{"who" => "routing." <> name} ->
+          List.wrap(routing_value(ctx, name))
 
         %{"who" => path} ->
           List.wrap(subject_field(subject, path))
@@ -163,6 +166,20 @@ defmodule AshBpmn.Test.Resolver do
   @doc "Stages the teams `team_ids/2` reports for `principal_id` in this process."
   def put_team_ids(principal_id, team_ids),
     do: Process.put({__MODULE__, :team_ids, principal_id}, team_ids)
+
+  # `of="routing.<name>"`: the clause's value is what the token carries under that name, so a
+  # decision can name the role (or the person) a task goes to.
+  defp from_routing(%{"of" => "routing." <> name} = spec, "of", ctx),
+    do: Map.put(spec, "of", routing_value(ctx, name))
+
+  defp from_routing(spec, _key, _ctx), do: spec
+
+  defp routing_value(ctx, name) do
+    case Map.get(ctx, :routing) do
+      %{} = routing -> Map.get(routing, name)
+      _ -> nil
+    end
+  end
 
   # Both callers normalize to this one shape before reaching a resolver.
   defp resolve_spec(%{"kind" => "manager_of", "of" => path}, subject) do

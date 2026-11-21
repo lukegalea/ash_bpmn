@@ -159,6 +159,12 @@ Nothing has been released yet. Everything below is the initial body of work.
   reaches the definition that tenant runs. `:default`, or no callback, keeps
   the latest published definition in the caller's scope; `{:error, reason}`
   fails the start like any child that could not start.
+- **A user task's clauses can read the token's routing.** The assignment
+  resolver's context now carries `:routing` for a diagram's user task: the
+  scalars earlier nodes promoted. A business rule task can name the role that
+  approves and the person who asked, and the task's candidates and exclusions
+  read them (`of="routing.approver_role"`, `who="routing.requested_by_id"`), so
+  the rule stays in the decision.
 
 - **A user task's due date and follow-up date are data (`ash:schedule`).**
   `<ash:schedule due="..." followUp="..."/>` inside a user task's
