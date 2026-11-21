@@ -159,6 +159,10 @@ Nothing has been released yet. Everything below is the initial body of work.
   reaches the definition that tenant runs. `:default`, or no callback, keeps
   the latest published definition in the caller's scope; `{:error, reason}`
   fails the start like any child that could not start.
+- **A called child that ends at a terminate end releases its parent.** A
+  terminate end marked the child completed without waking the call activity
+  waiting on it, so the parent waited forever.
+
 - **A message catch can match on a payload nested deep in the event.** The
   correlator read an event context at the record depth, so
   `data.record.request.subject_id` was null and the catch never fired. Event
