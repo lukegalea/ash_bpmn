@@ -113,6 +113,8 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
   defp spawn_branch(resources, token, args, scope) do
     boundary_id = args["boundary_id"]
 
+    record_fired(resources, token, args, scope)
+
     resources.process_event.create!(
       record(resources, token, boundary_id, :activity_interrupted, %{
         "timer_kind" => "boundary",
@@ -218,6 +220,8 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
       |> then(&resources.process_event.create!(&1, Scope.engine(scope)))
     end
 
+    record_fired(resources, token, args, scope)
+
     resources.process_event.create!(
       record(resources, token, boundary_id, :activity_interrupted, %{
         "timer_kind" => "boundary",
@@ -263,6 +267,24 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
     |> Ash.Query.for_read(:read)
     |> Ash.Query.filter(id == ^instance_id)
     |> Ash.read_one!(Scope.engine(scope))
+  end
+
+  # The firing, as every timer records one (DESIGN.md §11.4), with the key a host deduplicates
+  # on. Written only on the path that won, so a boundary that lost to a completion fired nothing.
+  defp record_fired(resources, token, args, scope) do
+    resources.process_event.create!(
+      record(
+        resources,
+        token,
+        args["boundary_id"],
+        :timer_fired,
+        Map.merge(AshBpmn.Runtime.TimerWorker.firing_data(args), %{
+          "timer_kind" => "boundary",
+          "attached_to" => args["attached_to"]
+        })
+      ),
+      Scope.engine(scope)
+    )
   end
 
   defp record(_resources, token, node_id, kind, data) do

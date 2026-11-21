@@ -31,4 +31,10 @@ end
 # Sandbox mode for test isolation.
 Ecto.Adapters.SQL.Sandbox.mode(AshBpmn.TestRepo, :manual)
 
-ExUnit.start()
+# The designer's bpmn-moddle round trip needs node and `dev/assets`'s node modules
+# (`cd dev/assets && npm install`). Without them it is excluded, and ExUnit reports it as
+# excluded rather than passed.
+node_ready? =
+  System.find_executable("node") != nil and File.dir?("dev/assets/node_modules/bpmn-moddle")
+
+ExUnit.start(exclude: if(node_ready?, do: [], else: [node: true]))

@@ -218,7 +218,7 @@ way vendors from Camunda to Flowable attach execution bindings to a diagram.
 | `ash:outcome name` | userTask config | one allowed decision value |
 | `ash:candidate kind="..." of="..."` | userTask config | a resolver clause (opaque to the library) |
 | `ash:exclusion who="..."` | userTask config | a maker-checker subtraction |
-| `ash:timer kind hours/days/minutes` | userTask config | remind / escalate / expire |
+| `ash:timer kind hours/days/minutes/duration/date ifPast until signal` | userTask config | remind / escalate / expire, at a delay or a moment computed from the case |
 
 Not everything executable needs an `ash:` binding. A timer catch event carries
 its whole configuration in plain BPMN — a `bpmn:timerEventDefinition` holding a

@@ -948,8 +948,19 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   defp attach_timers(_resources, _task_id, [], _ctx, _scope), do: :ok
 
   defp attach_timers(resources, task_id, timer_specs, ctx, scope) do
+    node_id = ctx[:token] && ctx[:token].node_id
+
     job_ids =
-      Enum.map(timer_specs, fn {worker, args, opts} ->
+      Enum.flat_map(timer_specs, fn spec ->
+        {args, due_at} = spec_args(spec)
+        index = args["index"]
+        key = AshBpmn.Runtime.TimerMoment.key(task_id, node_id, index, args["repetition"] || 1)
+
+        args =
+          args
+          |> Map.put("task_id", task_id)
+          |> then(&if(index != nil, do: Map.put(&1, "key", key), else: &1))
+
         # The ledger row is written BEFORE the Oban insert, and the job id attached after.
         # A crash between the two then leaves a row saying a timer was meant to exist, which
         # is evidence; the other order leaves a scheduled job nothing knows about, which is a
@@ -959,21 +970,13 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
             instance_id: ctx[:instance] && ctx[:instance].id,
             token_id: ctx[:token] && ctx[:token].id,
             task_id: task_id,
-            node_id: ctx[:token] && ctx[:token].node_id,
+            node_id: node_id,
             kind: timer_kind(args["kind"]),
-            due_at: Keyword.get(opts, :scheduled_at)
+            due_at: due_at,
+            data: ledger_data(args)
           })
 
-        {:ok, job} =
-          AshBpmn.Runtime.Oban.insert(
-            worker,
-            Scope.to_job_args(scope, Map.put(args, "task_id", task_id)),
-            opts
-          )
-
-        row && resources.timer_job.attach_job!(row, job.id, Scope.engine(scope))
-
-        job.id
+        arm_task_timer(resources, spec, args, row, ctx, scope)
       end)
 
     task =
@@ -987,6 +990,64 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     :ok
   end
 
+  defp spec_args({:skip, args, due_at}), do: {args, due_at}
+  defp spec_args({_worker, args, opts}), do: {args, Keyword.get(opts, :scheduled_at)}
+
+  # `ifPast="skip"` on a moment already past (DESIGN.md §11.3): nothing is armed, and the skip
+  # is written down twice -- a ledger row cancelled with reason `:past`, and a `:timer_skipped`
+  # event -- so "why was nobody reminded?" has an answer either way the question is asked.
+  defp arm_task_timer(resources, {:skip, _args, due_at}, args, row, ctx, scope) do
+    row && resources.timer_job.record_cancelled(row, :past, Scope.engine(scope))
+
+    resources.process_event.create!(
+      %{
+        instance_id: ctx[:instance] && ctx[:instance].id,
+        token_id: ctx[:token] && ctx[:token].id,
+        node_id: ctx[:token] && ctx[:token].node_id,
+        task_id: args["task_id"],
+        kind: :timer_skipped,
+        data: %{
+          "timer_kind" => args["kind"],
+          "key" => args["key"],
+          "due_at" => DateTime.to_iso8601(due_at),
+          "reason" => "past",
+          "count" => 1
+        }
+      },
+      Scope.engine(scope)
+    )
+
+    []
+  end
+
+  defp arm_task_timer(resources, {worker, _args, opts}, args, row, _ctx, scope) do
+    args = if row, do: Map.put(args, "timer_job_id", row.id), else: args
+
+    # Every task timer carries its owner in `meta`, so a claim can cancel exactly the ones that
+    # end at a claim (`until="claimed"`) and nothing else.
+    meta =
+      AshBpmn.Runtime.Oban.timer_meta(
+        %{task_id: args["task_id"], kind: "task"}
+        |> then(&if(args["until"], do: Map.put(&1, :until, args["until"]), else: &1))
+      )
+
+    {:ok, job} =
+      AshBpmn.Runtime.Oban.insert(
+        worker,
+        Scope.to_job_args(scope, args),
+        Keyword.put(opts, :meta, meta)
+      )
+
+    row && resources.timer_job.attach_job!(row, job.id, Scope.engine(scope))
+
+    [job.id]
+  end
+
+  defp ledger_data(args) do
+    args
+    |> Map.take(["key", "repetition", "until", "late"])
+  end
+
   # A catch timer earns a ledger row; an ordinary advance job does not. This clause is
   # generic over every job the interpreter emits, so the gate is the worker module rather
   # than a flag threaded through the effect.
@@ -997,8 +1058,11 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         token_id: args["token_id"],
         node_id: args["node_id"],
         kind: :catch,
-        due_at: Keyword.get(opts, :scheduled_at)
+        due_at: Keyword.get(opts, :scheduled_at),
+        data: ledger_data(args)
       })
+
+    args = if row, do: Map.put(args, "timer_job_id", row.id), else: args
 
     {:ok, job} = AshBpmn.Runtime.Oban.insert(worker, Scope.to_job_args(scope, args), opts)
     row && resources.timer_job.attach_job!(row, job.id, Scope.engine(scope))
@@ -1038,7 +1102,15 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   # commit together, under the instance's lock, and only while this job's claim still holds.
   # The instance is the locked re-read because the node may have run for a long time: a cancel
   # that landed meanwhile has already ended it, and `mark_failed` would refuse a non-running one.
-  defp mark_instance_failed(resources, _instance, token, node_id, error, scope, why \\ %{}) do
+  defp mark_instance_failed(
+         resources,
+         _instance,
+         token,
+         node_id,
+         error,
+         scope,
+         why \\ %{}
+       ) do
     resources
     |> step(token, scope, fn locked ->
       give_up(resources, locked, token, node_id, error, scope, why)

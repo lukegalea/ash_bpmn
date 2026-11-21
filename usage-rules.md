@@ -282,6 +282,15 @@ gateway conditions, never in resolver specs, never in the invoker.
     from the moment the event happened. Implement `AshBpmn.EventSource.event/2`
     with one indexed read. Prefer this to calling
     `Correlator.dispatch_event/4` with `redrive: true` yourself.
+34. **Compute a deadline from the case, in the diagram.** A timer's moment may be
+    an expression (`date="= subject.notice_at"`, `duration="= ..."`, a `timeDate`
+    or `timeDuration` beginning `=`). It is evaluated once, when the timer is
+    armed, and recorded as an instant; declare every subject path it reads in the
+    node's `ash:load`. Missing data is a timer incident (`:timer_unresolved`, the
+    instance failed at the node), never a default: write the fallback into the
+    expression. A literal date is refused. Deduplicate notices on the firing's
+    `key`, never on the event id: delivery is at least once. `until="claimed"`
+    for "nobody picked it up", the default for "nobody finished it".
 
 ## Testing
 

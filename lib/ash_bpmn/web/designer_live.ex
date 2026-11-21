@@ -2284,9 +2284,23 @@ defmodule AshBpmn.Web.DesignerLive do
       values = pad(List.wrap(params["timers_value"] || []), length(kinds))
       units = pad(List.wrap(params["timers_unit"] || []), length(kinds))
 
+      existing = Map.get(config, "timers") || []
+
       [kinds, values, units]
       |> Enum.zip_with(fn [kind, value, unit] ->
         %{"kind" => kind || "", (unit || "hours") => parse_integer(value)}
+      end)
+      |> Enum.with_index()
+      |> Enum.map(fn {row, index} ->
+        # The panel edits kind and a whole-unit delay. What it does not show -- a date or a
+        # duration expression, ifPast, until, a signal -- is carried over from the timer at the
+        # same position, so editing a row never silently drops what the diagram said.
+        kept =
+          existing
+          |> Enum.at(index, %{})
+          |> Map.take(~w(duration date cycle signal ifPast until))
+
+        Map.merge(kept, row)
       end)
     else
       Map.get(config, "timers") || []

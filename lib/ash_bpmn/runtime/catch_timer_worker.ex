@@ -50,7 +50,7 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
       # cancelling stops Oban retrying something that cannot become true.
       {:cancel, :token_gone}
     else
-      wake(resources, token, args["node_id"], scope)
+      wake(resources, token, args, scope)
     end
   end
 
@@ -58,7 +58,7 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
   # out of `:waiting` is inside it, so a wake that dies halfway rolls the claim back too and
   # Oban's retry finds the token parked exactly as it was -- rather than `:executing` at a
   # catch event, which re-entering would arm for a second full wait.
-  defp wake(resources, token, node_id, scope) do
+  defp wake(resources, token, args, scope) do
     resources
     |> Step.transaction(
       fn _locked ->
@@ -72,7 +72,7 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
             {:ok, :not_waiting}
 
           {:ok, token} ->
-            advance(resources, token, node_id, scope)
+            advance(resources, token, args, scope)
         end
       end,
       lock: {token.instance_id, scope}
@@ -84,7 +84,9 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
     end
   end
 
-  defp advance(resources, token, node_id, scope) do
+  defp advance(resources, token, args, scope) do
+    node_id = args["node_id"]
+
     instance =
       resources.instance
       |> Ash.Query.for_read(:read)
@@ -109,7 +111,7 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
         token_id: token.id,
         node_id: node_id,
         kind: :timer_fired,
-        data: %{"timer_kind" => "catch"}
+        data: Map.merge(AshBpmn.Runtime.TimerWorker.firing_data(args), %{"timer_kind" => "catch"})
       },
       Scope.engine(scope)
     )
@@ -122,10 +124,19 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
     # failed bookkeeping write must not fail the job and send it round again.
     if resources.timer_job do
       row =
-        resources.timer_job
-        |> Ash.Query.for_read(:read)
-        |> Ash.Query.filter(token_id == ^token.id and kind == :catch and status == :scheduled)
-        |> Ash.read_one!(Scope.engine(scope))
+        case args["timer_job_id"] do
+          nil ->
+            resources.timer_job
+            |> Ash.Query.for_read(:read)
+            |> Ash.Query.filter(token_id == ^token.id and kind == :catch and status == :scheduled)
+            |> Ash.read_one!(Scope.engine(scope))
+
+          id ->
+            resources.timer_job
+            |> Ash.Query.for_read(:read)
+            |> Ash.Query.filter(id == ^id and status == :scheduled)
+            |> Ash.read_one!(Scope.engine(scope))
+        end
 
       row && resources.timer_job.record_fired(row, Scope.engine(scope))
     end

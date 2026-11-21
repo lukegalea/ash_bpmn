@@ -40,15 +40,31 @@ defmodule AshBpmn.Runtime.TimerWorker do
       |> Ash.Query.filter(id == ^task_id)
       |> Ash.read_one!(Scope.engine(scope))
 
-    # Skip if already completed or cancelled
-    if task.status in [:completed, :cancelled] do
-      {:ok, :skipped}
-    else
-      fire_timer(resources, task, kind, scope, args)
+    cond do
+      # Work that is over fires nothing (DESIGN.md §11.4).
+      is_nil(task) or task.status in [:completed, :cancelled] ->
+        {:ok, :skipped}
+
+      # A start deadline that escaped the claim's cancel (it was already running). The claim
+      # recorded the ledger row's end; this firing is the one that must not happen.
+      args["until"] == "claimed" and task.status != :open ->
+        {:ok, :skipped}
+
+      true ->
+        fire_timer(resources, task, kind, scope, args)
     end
   end
 
-  defp fire_timer(resources, task, "remind", scope, _args) do
+  # What every firing's event carries beside its kind: the stable key a host deduplicates on
+  # (DESIGN.md §11.4), the repetition, the instant it was due and whether it was already past
+  # when armed. Absent from jobs armed before §11, which carry none of it.
+  @doc false
+  def firing_data(args) do
+    args
+    |> Map.take(["key", "repetition", "due_at", "late", "timer_job_id"])
+  end
+
+  defp fire_timer(resources, task, "remind", scope, args) do
     resources.process_event.create!(
       %{
         instance_id: task.instance_id,
@@ -56,12 +72,12 @@ defmodule AshBpmn.Runtime.TimerWorker do
         node_id: task.node_id,
         task_id: task.id,
         kind: :timer_fired,
-        data: %{"timer_kind" => "remind"}
+        data: Map.merge(firing_data(args), %{"timer_kind" => "remind"})
       },
       Scope.engine(scope)
     )
 
-    record_fire(resources, task, :remind, scope)
+    record_fire(resources, task, :remind, scope, args)
 
     {:ok, :reminded}
   end
@@ -91,7 +107,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
   # `escalate/2` reaches a person through whatever the host wired up, and a signal reaches
   # every process listening for that name. A modeller who wants the second should not have to
   # ask an Elixir developer for it.
-  defp fire_timer(resources, task, "escalate", scope, %{"signal" => name})
+  defp fire_timer(resources, task, "escalate", scope, %{"signal" => name} = args)
        when is_binary(name) and name != "" do
     instance = load_instance(resources, task, scope)
 
@@ -103,13 +119,13 @@ defmodule AshBpmn.Runtime.TimerWorker do
            tenant: Map.get(scope, :tenant)
          ) do
       {:ok, _signal} ->
-        record_escalation(resources, task, {:signal, name}, scope)
-        record_fire(resources, task, :escalate, scope)
+        record_escalation(resources, task, {:signal, name}, scope, args)
+        record_fire(resources, task, :escalate, scope, args)
         {:ok, :escalated}
 
       {:error, reason} ->
-        record_escalation(resources, task, {:failed, inspect(reason)}, scope)
-        record_fire(resources, task, :escalate, scope)
+        record_escalation(resources, task, {:failed, inspect(reason)}, scope, args)
+        record_fire(resources, task, :escalate, scope, args)
         {:error, inspect(reason)}
     end
   end
@@ -123,8 +139,8 @@ defmodule AshBpmn.Runtime.TimerWorker do
     # Outside any rescue, and unconditional. The old code wrapped this write too, so a failure
     # to record the escalation also reported success -- strictly worse than the handler case,
     # because the row that would let anyone notice is the thing that went missing.
-    record_escalation(resources, task, outcome, scope)
-    record_fire(resources, task, :escalate, scope)
+    record_escalation(resources, task, outcome, scope, args)
+    record_fire(resources, task, :escalate, scope, args)
 
     case outcome do
       :ok -> {:ok, :escalated}
@@ -136,8 +152,8 @@ defmodule AshBpmn.Runtime.TimerWorker do
   # The expiry is one step, under the instance's lock: the forced completion, its events, the
   # wake and the token's next move commit together. An expiry that died after forcing the
   # task complete used to leave an `:expired` task on a token still parked for it.
-  defp fire_timer(resources, task, "expire", scope, _args) do
-    fun = fn -> expire(resources, task, scope) end
+  defp fire_timer(resources, task, "expire", scope, args) do
+    fun = fn -> expire(resources, task, scope, args) end
 
     case task.instance_id do
       nil -> Step.transaction(resources, fun)
@@ -154,7 +170,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
     {:error, "unknown timer kind: #{kind}"}
   end
 
-  defp expire(resources, task, scope) do
+  defp expire(resources, task, scope, args) do
     # Force complete the task with :expired outcome
     resources.human_task.force_complete!(task, :expired, Scope.engine(scope))
 
@@ -166,12 +182,26 @@ defmodule AshBpmn.Runtime.TimerWorker do
         node_id: task.node_id,
         task_id: task.id,
         kind: :task_expired,
-        data: %{}
+        data: firing_data(args)
       },
       Scope.engine(scope)
     )
 
-    record_fire(resources, task, :expire, scope)
+    # And the firing itself, so a reader counting `:timer_fired` keys sees every timer that
+    # fired, the expiry included (DESIGN.md §11.4).
+    resources.process_event.create!(
+      %{
+        instance_id: task.instance_id,
+        token_id: task.token_id,
+        node_id: task.node_id,
+        task_id: task.id,
+        kind: :timer_fired,
+        data: Map.merge(firing_data(args), %{"timer_kind" => "expire"})
+      },
+      Scope.engine(scope)
+    )
+
+    record_fire(resources, task, :expire, scope, args)
 
     # If this is a process task (has token_id), advance the token
     if task.token_id do
@@ -292,7 +322,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
     e -> {:failed, Exception.message(e)}
   end
 
-  defp record_escalation(resources, task, outcome, scope) do
+  defp record_escalation(resources, task, outcome, scope, args) do
     {kind, data} =
       case outcome do
         :ok ->
@@ -316,7 +346,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
         node_id: task.node_id,
         task_id: task.id,
         kind: kind,
-        data: data
+        data: Map.merge(firing_data(args), data)
       },
       Scope.engine(scope)
     )
@@ -415,13 +445,29 @@ defmodule AshBpmn.Runtime.TimerWorker do
     |> Ash.read_one!(Scope.engine(scope))
   end
 
-  defp record_fire(resources, task, kind, scope) do
+  #
+  # A job armed since §11 carries its row's id, and is recorded by it: a task may have two
+  # timers of the same kind (two reminders, or the repetitions of one), and a lookup by kind
+  # cannot tell them apart. A job armed before carries no id and is looked up by (task, kind),
+  # earliest due first.
+  defp record_fire(resources, task, kind, scope, args) do
     if resources.timer_job do
       row =
-        resources.timer_job
-        |> Ash.Query.for_read(:read)
-        |> Ash.Query.filter(task_id == ^task.id and kind == ^kind and status == :scheduled)
-        |> Ash.read_one!(Scope.engine(scope))
+        case args["timer_job_id"] do
+          nil ->
+            resources.timer_job
+            |> Ash.Query.for_read(:read)
+            |> Ash.Query.filter(task_id == ^task.id and kind == ^kind and status == :scheduled)
+            |> Ash.Query.sort(due_at: :asc)
+            |> Ash.Query.limit(1)
+            |> Ash.read_one!(Scope.engine(scope))
+
+          id ->
+            resources.timer_job
+            |> Ash.Query.for_read(:read)
+            |> Ash.Query.filter(id == ^id and status == :scheduled)
+            |> Ash.read_one!(Scope.engine(scope))
+        end
 
       row && resources.timer_job.record_fired(row, Scope.engine(scope))
     end

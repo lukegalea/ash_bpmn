@@ -132,6 +132,10 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         # this event, and nothing retries it. Names the moment, the expression
                         # and the reason. See DESIGN.md §11.3.
                         :timer_unresolved,
+                        # A timer was not armed, or a repetition not fired, because its moment
+                        # had passed and it says `ifPast="skip"` (or a cycle's repetitions were
+                        # missed). Carries how many, so "why was nobody reminded?" has an answer.
+                        :timer_skipped,
                         # An escalation timer fired and its handler failed. Deliberately not
                         # `:action_failed`, which is what a failed service task passes to
                         # `mark_instance_failed/5` -- anything grepping the log for failed
