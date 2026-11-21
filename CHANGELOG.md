@@ -159,6 +159,7 @@ Nothing has been released yet. Everything below is the initial body of work.
   reaches the definition that tenant runs. `:default`, or no callback, keeps
   the latest published definition in the caller's scope; `{:error, reason}`
   fails the start like any child that could not start.
+
 - **A called child that ends at a terminate end releases its parent.** A
   terminate end marked the child completed without waking the call activity
   waiting on it, so the parent waited forever.
