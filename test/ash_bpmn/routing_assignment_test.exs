@@ -91,6 +91,23 @@ defmodule AshBpmn.RoutingAssignmentTest do
     end
   end
 
+  test "the routing carries on past a completed task" do
+    requester = Ash.UUID.generate()
+    decide("Approver", requester)
+
+    task = start!(created_by_id: requester)
+    approver = Resolver.role_member("Approver")
+    AshBpmn.complete_task!(task, outcome: "approved", actor: %{id: approver})
+
+    [after_task] =
+      AshBpmn.Test.Token
+      |> Ash.Query.filter(instance_id == ^task.instance_id and node_id == "End")
+      |> Ash.read!(authorize?: false)
+
+    assert after_task.routing["approver_role"] == "Approver"
+    assert after_task.routing["requested_by_id"] == requester
+  end
+
   defp decide(role, requester) do
     DecisionResolver.register("approval.who", fn _inputs ->
       %{outputs: %{"approver_role" => role, "requested_by_id" => requester}}

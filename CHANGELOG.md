@@ -163,7 +163,8 @@ Nothing has been released yet. Everything below is the initial body of work.
   promoted before a fork used to be lost on its branches, so a branch that
   read it (a user task's candidates, a message catch's correlate) saw
   nothing. A fork now copies the routing onto each branch, as a sequence
-  flow does.
+  flow does. The same holds past a completed user task: the token that leaves
+  it carries the routing that entered it.
 
 - **A user task's clauses can read the token's routing.** The assignment
   resolver's context now carries `:routing` for a diagram's user task: the
