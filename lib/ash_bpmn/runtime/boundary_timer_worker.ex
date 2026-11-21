@@ -47,6 +47,7 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
   alias AshBpmn.Runtime.CallTree
   alias AshBpmn.Runtime.DomainResolver
   alias AshBpmn.Runtime.Step
+  alias AshBpmn.Runtime.TimerLedger
   alias AshBpmn.Scope
 
   def queue, do: Config.queue()
@@ -70,6 +71,11 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
       # out at the claim; the non-interrupting path never claims, so it has to ask.
       token.status not in [:waiting, :executing, :active] ->
         {:ok, :not_live}
+
+      # Its ledger row was cancelled (the activity ended, or the timer was rescheduled) and
+      # this job escaped Oban's cancel.
+      TimerLedger.cancelled?(resources, args, scope) ->
+        {:ok, :skipped}
 
       true ->
         interrupt(resources, token, args, scope)
@@ -110,10 +116,25 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
   #
   # `parent_token_id` records where the branch came from. There is no join that reunites them
   # and BPMN does not expect one: a non-interrupting branch runs to its own end.
+  #
+  # A cycle's next repetition is armed in the same step, so a row already recorded fired means
+  # a delivery of this job finished and a redelivery starts nothing.
   defp spawn_branch(resources, token, args, scope) do
+    if match?(%{status: :fired}, TimerLedger.own_row(resources, args, scope)) do
+      {:ok, :already_fired}
+    else
+      do_spawn_branch(resources, token, args, scope)
+    end
+  end
+
+  defp do_spawn_branch(resources, token, args, scope) do
     boundary_id = args["boundary_id"]
 
     record_fired(resources, token, args, scope)
+
+    if args["cycle"] do
+      TimerLedger.arm_next(resources, {:boundary, token}, __MODULE__, args, scope)
+    end
 
     resources.process_event.create!(
       record(resources, token, boundary_id, :activity_interrupted, %{
@@ -222,6 +243,14 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
 
     record_fired(resources, token, args, scope)
 
+    # The activity is over, so every other boundary timer it armed is too.
+    TimerLedger.cancel_rows(
+      resources,
+      [token_id: token.id, kind: :boundary],
+      :token_consumed,
+      scope
+    )
+
     resources.process_event.create!(
       record(resources, token, boundary_id, :activity_interrupted, %{
         "timer_kind" => "boundary",
@@ -272,6 +301,8 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
   # The firing, as every timer records one (DESIGN.md §11.4), with the key a host deduplicates
   # on. Written only on the path that won, so a boundary that lost to a completion fired nothing.
   defp record_fired(resources, token, args, scope) do
+    TimerLedger.record_fired(resources, TimerLedger.own_row(resources, args, scope), scope)
+
     resources.process_event.create!(
       record(
         resources,

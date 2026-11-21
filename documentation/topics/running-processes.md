@@ -239,6 +239,56 @@ data may be missing. A moment already past fires at once, and its `:timer_fired`
 event says `"late" => true` with the instant it was due; `ifPast="skip"` instead
 records a `:timer_skipped` event and a ledger row cancelled with reason `:past`.
 
+### Repeating reminders
+
+A reminder and a non-interrupting timer boundary may repeat a bounded number of
+times:
+
+```xml
+<ash:timer kind="remind" cycle="R3/PT24H"/>
+<ash:timer kind="remind" cycle="= if subject.urgent then &quot;R6/PT4H&quot; else &quot;R2/P1D&quot;"/>
+<bpmn2:timeCycle>R2/PT30M</bpmn2:timeCycle>  <!-- cancelActivity="false" -->
+```
+
+`R<n>/<duration>` repeats `n` times (at most 100), one duration apart, counting from when
+the timer is armed. An expression may also return `R<n>/<date-time>/<duration>`, whose
+first repetition is at that instant. The engine arms one repetition at a time, each with
+its own ledger row and key (`.../1`, `.../2`, ...). The next repetition is armed in the
+same step that fires the current one, and none is armed once the task or activity has
+ended. Repetitions already past when they come to be armed (a start in the past, or a
+firing that ran hours late) are not fired in a burst. They are skipped, one
+`:timer_skipped` event counting them, and the next one still ahead is armed. A redelivered
+firing does not arm a second copy of the next repetition: with the ledger, the firing's own
+row says it already happened, and without it the copy is replaced by key.
+
+### When the data changes
+
+An armed instant does not move by itself. When a host changes the date a timer was computed
+from, it calls `AshBpmn.reschedule_timers(subject, tenant: ...)` in the same transaction:
+
+```elixir
+def change(changeset, _opts, _context) do
+  Ash.Changeset.after_action(changeset, fn _changeset, contract ->
+    {:ok, _moved} = AshBpmn.reschedule_timers(contract)
+    {:ok, contract}
+  end)
+end
+```
+
+Every timer whose moment is an expression and that is still armed, on the subject's
+running instances, is evaluated again against the subject as it is now (a duration still
+counts from when the timer was armed). A timer whose instant changed has its ledger row
+cancelled `:rescheduled` and is armed again under the same key, so a host deduplicating
+notices sees one firing. A new instant already past fires at once or follows
+`ifPast="skip"`. Timers that have fired, literal timers and other tenants' instances are
+not touched. Each instance with a moved timer gets one `:timers_rescheduled` event listing
+every key with its old and new instant, and the call returns `{:ok, count}`. If a moment
+no longer resolves, nothing on that instance moves and the call returns
+`{:error, {:timer_unresolved, details}}`, so the host's change can fail instead of leaving
+a reminder armed for a date that is gone. Rescheduling reads the timer ledger, so it needs
+`AshBpmn.Resources.TimerJob` installed; without it the call returns
+`{:error, :timer_ledger_not_installed}`.
+
 ### What a firing carries
 
 Every `:timer_fired` event (and the expiry's `:task_expired`) carries a stable
@@ -333,8 +383,9 @@ which is the one-artifact rule turned inside out. It is parsed at publish time,
 so a duration nobody can read is a compile error naming the node rather than an
 instance that parks at three in the morning and never wakes. A `timeDuration` or
 `timeDate` may also be a FEEL expression beginning `=`, evaluated when the token
-arrives (see [When a timer fires](#when-a-timer-fires)). `timeCycle`, a literal
-`timeDate`, and months or years inside a duration literal are refused; see
+arrives (see [When a timer fires](#when-a-timer-fires)). `timeCycle` on a catch
+event (a catch fires once; a cycle belongs on a non-interrupting boundary), a
+literal `timeDate`, and months or years inside a duration literal are refused; see
 [what it refuses](what-it-refuses.md#refused-at-compile-time).
 
 When the token arrives, the advance job parks it as `:waiting` and inserts one

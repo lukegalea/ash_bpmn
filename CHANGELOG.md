@@ -38,6 +38,25 @@ Nothing has been released yet. Everything below is the initial body of work.
   moddle descriptor declares the new attributes and `ash:schedule`, so bpmn-js
   no longer drops them on save.
 
+- **Bounded cycles, and `AshBpmn.reschedule_timers/2` (DESIGN.md §11.3).** A
+  reminder (`ash:timer kind="remind" cycle="R3/PT24H"`) and a non-interrupting
+  timer boundary (`timeCycle`) may repeat from 1 to 100 times; an expression may
+  return `R<n>/<date-time>/<duration>`. One repetition is armed at a time, each
+  with its own ledger row and key, by the firing of the one before, and none
+  once the activity has ended. Missed repetitions are skipped in one
+  `:timer_skipped` event with a count. A redelivered firing arms one next
+  repetition, not two. `R/...`, cron, a literal start, and a cycle on an
+  escalation, an expiry, an interrupting boundary or a catch event are refused.
+  `reschedule_timers/2` re-evaluates the armed data-driven timers of a subject's
+  running instances, moves the changed ones under the same key (ledger reason
+  `:rescheduled`), follows `ifPast`, leaves fired and literal timers alone,
+  writes one `:timers_rescheduled` event per instance and returns
+  `{:ok, count}`. Timer boundaries now have ledger rows (kind `:boundary`),
+  cancelled when their activity ends, and a firing whose ledger row was
+  cancelled does nothing even if its job escaped Oban's cancel. A reminder's
+  event, ledger row and next repetition now commit in one step, so a
+  redelivered reminder whose first delivery finished writes nothing.
+
 ### Bug Fixes:
 
 - **A malformed `ash:timer` is a compile error naming the node.** A timer with

@@ -291,6 +291,13 @@ gateway conditions, never in resolver specs, never in the invoker.
     expression. A literal date is refused. Deduplicate notices on the firing's
     `key`, never on the event id: delivery is at least once. `until="claimed"`
     for "nobody picked it up", the default for "nobody finished it".
+35. **Call `reschedule_timers/2` from the change that moves a date.** An armed
+    timer's instant is a fact and does not follow the data. When a host changes a
+    field a timer expression reads, it calls `AshBpmn.reschedule_timers(subject)`
+    in the same transaction and fails the change on `{:error, _}`. Repeat with a
+    bounded `cycle` on a reminder or a non-interrupting boundary, never with a
+    host-side loop of reminders; an unbounded clock belongs in the host's
+    scheduler.
 
 ## Testing
 

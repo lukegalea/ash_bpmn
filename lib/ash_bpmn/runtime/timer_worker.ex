@@ -21,6 +21,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
   alias AshBpmn.Runtime.DomainResolver
   alias AshBpmn.Runtime.Routing
   alias AshBpmn.Runtime.Step
+  alias AshBpmn.Runtime.TimerLedger
   alias AshBpmn.Scope
 
   def queue, do: Config.queue()
@@ -50,6 +51,11 @@ defmodule AshBpmn.Runtime.TimerWorker do
       args["until"] == "claimed" and task.status != :open ->
         {:ok, :skipped}
 
+      # A firing whose ledger row was cancelled (rescheduled, claimed, ended with its task)
+      # escaped Oban's cancel; the row is the record that it must not fire.
+      TimerLedger.cancelled?(resources, args, scope) ->
+        {:ok, :skipped}
+
       true ->
         fire_timer(resources, task, kind, scope, args)
     end
@@ -64,22 +70,21 @@ defmodule AshBpmn.Runtime.TimerWorker do
     |> Map.take(["key", "repetition", "due_at", "late", "timer_job_id"])
   end
 
+  # A reminder is one step: its event, its ledger row and, for a cycle, the next repetition
+  # commit together. So a row already recorded fired means a delivery of this job finished,
+  # and a redelivery does nothing rather than arming a second next repetition.
   defp fire_timer(resources, task, "remind", scope, args) do
-    resources.process_event.create!(
-      %{
-        instance_id: task.instance_id,
-        token_id: task.token_id,
-        node_id: task.node_id,
-        task_id: task.id,
-        kind: :timer_fired,
-        data: Map.merge(firing_data(args), %{"timer_kind" => "remind"})
-      },
-      Scope.engine(scope)
-    )
+    fun = fn -> remind(resources, task, scope, args) end
 
-    record_fire(resources, task, :remind, scope, args)
-
-    {:ok, :reminded}
+    case task.instance_id do
+      nil -> Step.transaction(resources, fun)
+      id -> Step.transaction(resources, fn _locked -> fun.() end, lock: {id, scope})
+    end
+    |> case do
+      {:ok, result} -> result
+      {:error, :instance_gone} -> {:ok, :skipped}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   # Escalation had a clause-level `rescue _ -> {:ok, :escalated}`, which reported success for
@@ -168,6 +173,56 @@ defmodule AshBpmn.Runtime.TimerWorker do
 
   defp fire_timer(_resources, _task, kind, _scope, _args) do
     {:error, "unknown timer kind: #{kind}"}
+  end
+
+  defp remind(resources, task, scope, args) do
+    if match?(%{status: :fired}, TimerLedger.own_row(resources, args, scope)) do
+      {:ok, :already_fired}
+    else
+      resources.process_event.create!(
+        %{
+          instance_id: task.instance_id,
+          token_id: task.token_id,
+          node_id: task.node_id,
+          task_id: task.id,
+          kind: :timer_fired,
+          data: Map.merge(firing_data(args), %{"timer_kind" => "remind"})
+        },
+        Scope.engine(scope)
+      )
+
+      record_fire(resources, task, :remind, scope, args)
+      arm_next_repetition(resources, task, scope, args)
+
+      {:ok, :reminded}
+    end
+  end
+
+  # One repetition is armed at a time, by the firing of the one before (DESIGN.md §11.3). The
+  # new job joins the task's timer ids, so completing the task cancels it like the rest.
+  defp arm_next_repetition(resources, task, scope, %{"cycle" => _} = args) do
+    case TimerLedger.arm_next(resources, {:task, task}, __MODULE__, args, scope) do
+      nil ->
+        :ok
+
+      job_id ->
+        task = reload_task(resources, task, scope)
+
+        resources.human_task.attach_timers!(
+          task,
+          Enum.uniq((task.timer_job_ids || []) ++ [job_id]),
+          Scope.engine(scope)
+        )
+    end
+  end
+
+  defp arm_next_repetition(_resources, _task, _scope, _args), do: :ok
+
+  defp reload_task(resources, task, scope) do
+    resources.human_task
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(id == ^task.id)
+    |> Ash.read_one!(Scope.engine(scope))
   end
 
   defp expire(resources, task, scope, args) do
@@ -454,22 +509,21 @@ defmodule AshBpmn.Runtime.TimerWorker do
     if resources.timer_job do
       row =
         case args["timer_job_id"] do
+          # A job with a key but no row id names its row by the key; only a job from before
+          # §11 has neither, and takes the earliest of its kind.
           nil ->
             resources.timer_job
             |> Ash.Query.for_read(:read)
             |> Ash.Query.filter(task_id == ^task.id and kind == ^kind and status == :scheduled)
             |> Ash.Query.sort(due_at: :asc)
-            |> Ash.Query.limit(1)
-            |> Ash.read_one!(Scope.engine(scope))
+            |> Ash.read!(Scope.engine(scope))
+            |> Enum.find(&(is_nil(args["key"]) or &1.data["key"] == args["key"]))
 
-          id ->
-            resources.timer_job
-            |> Ash.Query.for_read(:read)
-            |> Ash.Query.filter(id == ^id and status == :scheduled)
-            |> Ash.read_one!(Scope.engine(scope))
+          _id ->
+            TimerLedger.own_row(resources, args, scope)
         end
 
-      row && resources.timer_job.record_fired(row, Scope.engine(scope))
+      TimerLedger.record_fired(resources, row, scope)
     end
 
     :ok

@@ -61,12 +61,12 @@ defmodule AshBpmn.Compiler.Timer do
 
   # A timer event definition's moment, for an intermediate catch event or a boundary event.
   #
-  # `context` is `:catch` or `{:boundary, interrupting?}`. It decides where a cycle is allowed,
-  # which is nowhere yet.
+  # `context` is `:catch` or `{:boundary, interrupting?}`. It decides where a cycle is allowed:
+  # on a non-interrupting boundary only, the one timer event that can fire more than once.
   @doc false
   @spec event_definition(String.t(), tuple(), :catch | {:boundary, boolean()}) ::
           {:ok, map()} | {:error, map()}
-  def event_definition(id, definition, _context) do
+  def event_definition(id, definition, context) do
     children =
       definition
       |> Xml.get_element_children()
@@ -91,13 +91,29 @@ defmodule AshBpmn.Compiler.Timer do
              "takes exactly one"
          )}
 
-      [{"timeCycle", _}] ->
-        {:error,
-         Errors.error(
-           id,
-           "timer '#{id}' uses 'timeCycle', which is not supported; use timeDuration " <>
-             "(an ISO 8601 duration such as PT4H or P2D) or a timeDate expression"
-         )}
+      [{"timeCycle", element}] ->
+        case context do
+          {:boundary, false} ->
+            source = element |> Xml.element_text() |> to_string() |> String.trim()
+
+            case cycle_moment(source) do
+              {:ok, moment} ->
+                {:ok, %{"catch" => %{"kind" => "timer", "cycle" => source, "moment" => moment}}}
+
+              {:error, reason} ->
+                {:error, Errors.error(id, "timer '#{id}' has timeCycle '#{source}': #{reason}")}
+            end
+
+          _ ->
+            {:error,
+             Errors.error(
+               id,
+               "timer '#{id}' uses 'timeCycle', which is not supported here; a cycle repeats, " <>
+                 "so it belongs on a non-interrupting boundary event (cancelActivity=false) " <>
+                 "or an ash:timer kind=remind. Use timeDuration (an ISO 8601 duration " <>
+                 "such as PT4H or P2D) or a timeDate expression for a timer that fires once"
+             )}
+        end
 
       [{name, element}] ->
         source = element |> Xml.element_text() |> to_string() |> String.trim()
@@ -242,13 +258,25 @@ defmodule AshBpmn.Compiler.Timer do
     end
   end
 
-  defp ash_moment(node_id, where, _kind, {"cycle", _raw}) do
+  # A cycle repeats, so it belongs only where repeating means something: a reminder. An
+  # escalation and an expiry each fire once by their nature.
+  defp ash_moment(node_id, where, kind, {"cycle", _raw}) when kind != "remind" do
     {:error,
      Errors.error(
        node_id,
-       "#{where} has a cycle, which is not supported yet; use duration, date, minutes, hours " <>
-         "or days"
+       "#{where} is a #{kind} timer with a cycle; only a remind timer repeats, because an " <>
+         "#{kind} fires once"
      )}
+  end
+
+  defp ash_moment(node_id, where, _kind, {"cycle", raw}) do
+    case cycle_moment(raw) do
+      {:ok, moment} ->
+        {:ok, %{"moment" => moment}}
+
+      {:error, reason} ->
+        {:error, Errors.error(node_id, ~s(#{where} has cycle="#{raw}": #{reason}))}
+    end
   end
 
   # Kept beside the moment when a literal is a whole number of minutes, so the snapshot still
@@ -344,6 +372,96 @@ defmodule AshBpmn.Compiler.Timer do
          "a literal date is not supported, because a date typed into a diagram may be gone " <>
            "before a token arrives; write it as an expression computed from the case, such as " <>
            ~s(= subject.notice_at)}
+    end
+  end
+
+  # A bounded repetition: `R<n>/<duration>`, n from 1 to 100. A literal may not name a start,
+  # for the reason a literal date is refused; an expression may return
+  # `R<n>/<date-time>/<duration>`, checked when the timer is armed. Unbounded (`R/...`) and
+  # cron are refused: a clock that never stops belongs in the host's scheduler.
+  defp cycle_moment(raw) do
+    source = String.trim(raw)
+
+    cond do
+      source == "" ->
+        {:error, "it is empty"}
+
+      expression?(source) ->
+        with {:ok, expr} <- compile_expression(source) do
+          {:ok, %{"form" => "cycle", "expr" => expr}}
+        end
+
+      true ->
+        case parse_cycle(source) do
+          {:ok, %{start: nil, count: count, seconds: seconds}} ->
+            {:ok,
+             %{"form" => "cycle", "literal" => source, "count" => count, "seconds" => seconds}}
+
+          {:ok, %{start: _}} ->
+            {:error,
+             "a literal cycle may not name its start, because a date typed into a diagram may " <>
+               "be gone before a token arrives; compute the start in an expression"}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+    end
+  end
+
+  @max_repetitions 100
+
+  @doc false
+  # Parses `R<n>/<duration>` or `R<n>/<date-time>/<duration>`. Shared with the runtime, which
+  # parses what a cycle expression returns by the same rules.
+  @spec parse_cycle(String.t()) ::
+          {:ok, %{count: pos_integer(), seconds: pos_integer(), start: DateTime.t() | nil}}
+          | {:error, String.t()}
+  def parse_cycle(source) when is_binary(source) do
+    case String.split(String.trim(source), "/") do
+      ["R" <> count, duration] -> cycle_parts(count, nil, duration)
+      ["R" <> count, start, duration] -> cycle_parts(count, start, duration)
+      _ -> {:error, "a cycle is R<n>/<duration> or R<n>/<date-time>/<duration>, such as R3/PT1H"}
+    end
+  end
+
+  def parse_cycle(_other), do: {:error, "a cycle is a string such as R3/PT1H"}
+
+  defp cycle_parts("", _start, _duration),
+    do:
+      {:error,
+       "an unbounded cycle (R/...) is not supported; name the count, at most " <>
+         "#{@max_repetitions}. A clock that never stops belongs in the host's scheduler"}
+
+  defp cycle_parts(count, start, duration) do
+    with {:ok, n} <- cycle_count(count),
+         {:ok, seconds} <- parse_duration(duration),
+         {:ok, start} <- cycle_start(start) do
+      {:ok, %{count: n, seconds: seconds, start: start}}
+    end
+  end
+
+  defp cycle_count(count) do
+    case Integer.parse(count) do
+      {n, ""} when n >= 1 and n <= @max_repetitions ->
+        {:ok, n}
+
+      _ ->
+        {:error, "a cycle repeats from 1 to #{@max_repetitions} times; R#{count} is not that"}
+    end
+  end
+
+  defp cycle_start(nil), do: {:ok, nil}
+
+  defp cycle_start(start) do
+    case DateTime.from_iso8601(start) do
+      {:ok, dt, _offset} ->
+        {:ok, DateTime.shift_zone!(dt, "Etc/UTC")}
+
+      {:error, :missing_offset} ->
+        {:error, "the cycle's start '#{start}' has no offset, so it names no instant"}
+
+      {:error, _} ->
+        {:error, "the cycle's start '#{start}' is not an ISO 8601 date and time"}
     end
   end
 

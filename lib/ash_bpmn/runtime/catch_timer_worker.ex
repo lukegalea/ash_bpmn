@@ -45,12 +45,19 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
       |> Ash.Query.filter(id == ^args["token_id"])
       |> Ash.read_one!(Scope.engine(scope))
 
-    if is_nil(token) do
+    cond do
       # The instance was hard-deleted under us. Nothing to wake and nothing to complain about;
       # cancelling stops Oban retrying something that cannot become true.
-      {:cancel, :token_gone}
-    else
-      wake(resources, token, args, scope)
+      is_nil(token) ->
+        {:cancel, :token_gone}
+
+      # Rescheduled, and this job escaped Oban's cancel: its ledger row says it is not the
+      # timer any more, and waking the token early would be the bug.
+      AshBpmn.Runtime.TimerLedger.cancelled?(resources, args, scope) ->
+        {:ok, :skipped}
+
+      true ->
+        wake(resources, token, args, scope)
     end
   end
 

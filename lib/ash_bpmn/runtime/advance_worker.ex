@@ -27,7 +27,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
 
   alias AshBpmn.Config
   alias AshBpmn.FlightView
-  alias AshBpmn.Runtime.{DomainResolver, Interpreter, Step}
+  alias AshBpmn.Runtime.{DomainResolver, Interpreter, Step, TimerLedger}
   alias AshBpmn.Scope
 
   def queue, do: Config.queue()
@@ -971,9 +971,9 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
             token_id: ctx[:token] && ctx[:token].id,
             task_id: task_id,
             node_id: node_id,
-            kind: timer_kind(args["kind"]),
+            kind: TimerLedger.timer_kind(args["kind"]),
             due_at: due_at,
-            data: ledger_data(args)
+            data: TimerLedger.data(args)
           })
 
         arm_task_timer(resources, spec, args, row, ctx, scope)
@@ -996,39 +996,39 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   # `ifPast="skip"` on a moment already past (DESIGN.md §11.3): nothing is armed, and the skip
   # is written down twice -- a ledger row cancelled with reason `:past`, and a `:timer_skipped`
   # event -- so "why was nobody reminded?" has an answer either way the question is asked.
+  #
+  # A cycle whose every repetition was past is a skip too, of all of them at once.
   defp arm_task_timer(resources, {:skip, _args, due_at}, args, row, ctx, scope) do
     row && resources.timer_job.record_cancelled(row, :past, Scope.engine(scope))
 
-    resources.process_event.create!(
-      %{
-        instance_id: ctx[:instance] && ctx[:instance].id,
-        token_id: ctx[:token] && ctx[:token].id,
-        node_id: ctx[:token] && ctx[:token].node_id,
-        task_id: args["task_id"],
-        kind: :timer_skipped,
-        data: %{
-          "timer_kind" => args["kind"],
-          "key" => args["key"],
-          "due_at" => DateTime.to_iso8601(due_at),
-          "reason" => "past",
-          "count" => 1
-        }
-      },
-      Scope.engine(scope)
+    TimerLedger.skipped!(
+      resources,
+      scope,
+      task_event(args, ctx),
+      args,
+      args["missed"] || 1,
+      due_at
     )
 
     []
   end
 
-  defp arm_task_timer(resources, {worker, _args, opts}, args, row, _ctx, scope) do
+  defp arm_task_timer(resources, {worker, _args, opts}, args, row, ctx, scope) do
+    # A cycle armed late skips the repetitions already gone and arms the next one ahead.
+    if args["missed"] do
+      TimerLedger.skipped!(resources, scope, task_event(args, ctx), args, args["missed"], nil)
+    end
+
     args = if row, do: Map.put(args, "timer_job_id", row.id), else: args
 
     # Every task timer carries its owner in `meta`, so a claim can cancel exactly the ones that
-    # end at a claim (`until="claimed"`) and nothing else.
+    # end at a claim (`until="claimed"`) and nothing else. A repeating one also carries its key,
+    # so the firing that arms its next repetition can replace a copy rather than double it.
     meta =
       AshBpmn.Runtime.Oban.timer_meta(
         %{task_id: args["task_id"], kind: "task"}
         |> then(&if(args["until"], do: Map.put(&1, :until, args["until"]), else: &1))
+        |> then(&if(args["cycle"], do: Map.put(&1, :key, args["key"]), else: &1))
       )
 
     {:ok, job} =
@@ -1043,9 +1043,13 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
     [job.id]
   end
 
-  defp ledger_data(args) do
-    args
-    |> Map.take(["key", "repetition", "until", "late"])
+  defp task_event(args, ctx) do
+    %{
+      instance_id: ctx[:instance] && ctx[:instance].id,
+      token_id: ctx[:token] && ctx[:token].id,
+      node_id: ctx[:token] && ctx[:token].node_id,
+      task_id: args["task_id"]
+    }
   end
 
   # A catch timer earns a ledger row; an ordinary advance job does not. This clause is
@@ -1059,13 +1063,50 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         node_id: args["node_id"],
         kind: :catch,
         due_at: Keyword.get(opts, :scheduled_at),
-        data: ledger_data(args)
+        data: TimerLedger.data(args)
       })
 
     args = if row, do: Map.put(args, "timer_job_id", row.id), else: args
 
     {:ok, job} = AshBpmn.Runtime.Oban.insert(worker, Scope.to_job_args(scope, args), opts)
     row && resources.timer_job.attach_job!(row, job.id, Scope.engine(scope))
+    :ok
+  end
+
+  # A boundary timer earns a ledger row too, one per repetition of a cycle. A cycle armed with
+  # every repetition already past arms nothing and records the skip; one armed late skips the
+  # repetitions gone and arms the next.
+  defp insert_job(resources, AshBpmn.Runtime.BoundaryTimerWorker = worker, args, opts, scope) do
+    due_at = Keyword.get(opts, :scheduled_at)
+
+    row =
+      TimerLedger.row(resources, scope, %{
+        instance_id: args["instance_id"],
+        token_id: args["token_id"],
+        node_id: args["boundary_id"],
+        kind: :boundary,
+        due_at: due_at,
+        data: TimerLedger.data(args)
+      })
+
+    event = %{
+      instance_id: args["instance_id"],
+      token_id: args["token_id"],
+      node_id: args["boundary_id"]
+    }
+
+    if args["skip"] do
+      row && resources.timer_job.record_cancelled(row, :past, Scope.engine(scope))
+      TimerLedger.skipped!(resources, scope, event, args, args["missed"], due_at)
+    else
+      if args["missed"],
+        do: TimerLedger.skipped!(resources, scope, event, args, args["missed"], nil)
+
+      args = if row, do: Map.put(args, "timer_job_id", row.id), else: args
+      {:ok, job} = AshBpmn.Runtime.Oban.insert(worker, Scope.to_job_args(scope, args), opts)
+      row && resources.timer_job.attach_job!(row, job.id, Scope.engine(scope))
+    end
+
     :ok
   end
 
@@ -1077,19 +1118,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
   # `nil` when the host has not installed the ledger, which is a supported configuration --
   # the kind is optional exactly like the trigger kinds. Every caller must therefore treat
   # `nil` as "not installed" rather than as a failure.
-  defp ledger_row(resources, scope, attrs) do
-    if resources.timer_job && attrs.kind do
-      resources.timer_job.create!(attrs, Scope.engine(scope))
-    end
-  end
-
-  # Mapped explicitly rather than through `String.to_existing_atom/1`. The kind arrives from
-  # the diagram, and an unrecognized one must not take the whole advance down over a
-  # bookkeeping row -- it loses its ledger entry and the timer still arms.
-  defp timer_kind("remind"), do: :remind
-  defp timer_kind("escalate"), do: :escalate
-  defp timer_kind("expire"), do: :expire
-  defp timer_kind(_), do: nil
+  defp ledger_row(resources, scope, attrs), do: TimerLedger.row(resources, scope, attrs)
 
   # ── Instance failure ─────────────────────────────────────────────────────
 
@@ -1282,7 +1311,7 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
              Keyword.put(Scope.engine(parent_scope), :rollback_on_error?, false)
            ) do
       # The call activity's deadlines are moot once its child has finished.
-      AshBpmn.Runtime.Oban.cancel_all(%{"token_id" => token.id, "kind" => "boundary"})
+      TimerLedger.cancel_boundaries(resources, token.id, :token_consumed, parent_scope)
 
       parent =
         resources.instance

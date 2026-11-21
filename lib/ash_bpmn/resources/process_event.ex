@@ -136,6 +136,10 @@ defmodule AshBpmn.Resources.ProcessEvent do
                         # had passed and it says `ifPast="skip"` (or a cycle's repetitions were
                         # missed). Carries how many, so "why was nobody reminded?" has an answer.
                         :timer_skipped,
+                        # `AshBpmn.reschedule_timers/2` moved an instance's data-driven timers
+                        # after the data they read changed: one event per instance, listing
+                        # each timer's key and its old and new instants.
+                        :timers_rescheduled,
                         # An escalation timer fired and its handler failed. Deliberately not
                         # `:action_failed`, which is what a failed service task passes to
                         # `mark_instance_failed/5` -- anything grepping the log for failed

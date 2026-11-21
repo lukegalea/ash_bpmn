@@ -1447,20 +1447,39 @@ defmodule AshBpmn.Runtime.Interpreter do
             "boundary_id" => boundary_id,
             "attached_to" => node_id,
             "interrupting" => get_in(graph, ["nodes", boundary_id, "interrupting"]) != false,
-            "key" => TimerMoment.key(ctx[:token].id, node_id, boundary_id, 1),
-            "repetition" => 1,
-            "due_at" => DateTime.to_iso8601(resolved.due_at)
+            "repetition" => 1
           }
-          |> put_late(resolved)
+          |> TimerMoment.cycle_args(resolved)
+
+        key = TimerMoment.key(ctx[:token].id, node_id, boundary_id, args["repetition"])
+
+        # A cycle with every repetition past arms nothing; the worker records the skip.
+        {args, due_at} =
+          case resolved.due_at do
+            nil ->
+              {Map.merge(args, %{
+                 "skip" => true,
+                 "due_at" => DateTime.to_iso8601(resolved.last_due_at)
+               }), resolved.last_due_at}
+
+            due_at ->
+              {due_args(args, resolved), due_at}
+          end
 
         {:ok,
-         {AshBpmn.Runtime.BoundaryTimerWorker, args,
+         {AshBpmn.Runtime.BoundaryTimerWorker, Map.put(args, "key", key),
           [
-            scheduled_at: resolved.due_at,
+            scheduled_at: due_at,
             # Tagged so `AshBpmn.Runtime.Oban.cancel_all/1` can find every boundary timer for a
             # token when the task is decided -- the first production caller of a function built
-            # for exactly this and until now used only by its own test.
-            meta: AshBpmn.Runtime.Oban.timer_meta(%{token_id: ctx[:token].id, kind: "boundary"})
+            # for exactly this and until now used only by its own test. The key lets the firing
+            # that arms the next repetition replace a copy armed by an earlier delivery of itself.
+            meta:
+              AshBpmn.Runtime.Oban.timer_meta(%{
+                token_id: ctx[:token].id,
+                kind: "boundary",
+                key: key
+              })
           ]}}
       end
     end)
@@ -1488,13 +1507,22 @@ defmodule AshBpmn.Runtime.Interpreter do
           %{"kind" => timer["kind"], "index" => index, "repetition" => 1}
           |> put_present("signal", timer["signal"])
           |> put_present("until", timer["until"])
-          |> Map.put("due_at", DateTime.to_iso8601(resolved.due_at))
-          |> put_late(resolved)
+          |> TimerMoment.cycle_args(resolved)
 
-        if resolved.late and timer["if_past"] == "skip" do
-          {:ok, {:skip, args, resolved.due_at}}
-        else
-          {:ok, {AshBpmn.Runtime.TimerWorker, args, [scheduled_at: resolved.due_at]}}
+        cond do
+          # A cycle whose every repetition is already past: all of them are skipped, none armed.
+          is_nil(resolved.due_at) ->
+            {:ok,
+             {:skip, Map.put(args, "due_at", DateTime.to_iso8601(resolved.last_due_at)),
+              resolved.last_due_at}}
+
+          resolved.late and timer["if_past"] == "skip" ->
+            {:ok, {:skip, due_args(args, resolved), resolved.due_at}}
+
+          true ->
+            {:ok,
+             {AshBpmn.Runtime.TimerWorker, due_args(args, resolved),
+              [scheduled_at: resolved.due_at]}}
         end
       end
     end)
@@ -1522,6 +1550,12 @@ defmodule AshBpmn.Runtime.Interpreter do
           %{"node" => node_id, "timer" => index, "reason" => reason}
           |> put_present("expression", TimerMoment.expression_text(spec))}}
     end
+  end
+
+  defp due_args(args, resolved) do
+    args
+    |> Map.put("due_at", DateTime.to_iso8601(resolved.due_at))
+    |> put_late(resolved)
   end
 
   defp put_late(args, %{late: true}), do: Map.put(args, "late", true)
