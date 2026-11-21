@@ -249,6 +249,87 @@ defmodule AshBpmn.CallActivityTest do
     end
   end
 
+  describe "the host resolves the child" do
+    defmodule ResolvingLoader do
+      @moduledoc false
+      @behaviour AshBpmn.DefinitionLoader
+
+      @impl true
+      def load(resource, id, instance, scope),
+        do: AshBpmn.DefinitionLoader.Default.load(resource, id, instance, scope)
+
+      # Answers only for keys this process staged, and defers for every other key.
+      @impl true
+      def resolve(_resource, key, _scope) do
+        case Process.get({__MODULE__, key}) do
+          nil -> :default
+          answer -> answer
+        end
+      end
+    end
+
+    setup do
+      previous = Application.get_env(:ash_bpmn, :definition_loader)
+      Application.put_env(:ash_bpmn, :definition_loader, ResolvingLoader)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:ash_bpmn, :definition_loader, previous),
+          else: Application.delete_env(:ash_bpmn, :definition_loader)
+      end)
+
+      :ok
+    end
+
+    # A baseline that lives outside the tenant: the child's key has no published row the
+    # engine could find on its own, and the host's loader says which definition it runs.
+    test "a loader's resolve/3 names the definition the child runs" do
+      elsewhere = publish!("linear.bpmn", key())
+      child_key = key()
+      Process.put({ResolvingLoader, child_key}, {:ok, elsewhere})
+
+      {parent, ^child_key} = start_with_child_key!(child_key)
+
+      assert [child] = children_of(parent)
+      assert child.definition_id == elsewhere.id
+    end
+
+    test "a loader that refuses fails the call activity instead of guessing" do
+      child_key = key()
+      Process.put({ResolvingLoader, child_key}, {:error, :not_bound})
+
+      assert {:error, %RuntimeError{message: message}} = start_parent_with_child_key(child_key)
+      assert message =~ "refused to resolve process #{child_key}"
+    end
+
+    test ":default keeps the latest published definition in the instance's scope" do
+      {parent, child_key} = start!()
+
+      assert [child] = children_of(parent)
+      assert [latest | _] = Definition.latest_published!(child_key, authorize?: false)
+      assert child.definition_id == latest.id
+    end
+  end
+
+  defp start_with_child_key!(child_key) do
+    {:ok, parent} = start_parent_with_child_key(child_key)
+    {parent, child_key}
+  end
+
+  defp start_parent_with_child_key(child_key) do
+    parent_xml =
+      "test/fixtures/call_parent.bpmn" |> File.read!() |> String.replace("CHILD_KEY", child_key)
+
+    parent_defn = Definition.create!(%{key: key(), name: "parent", xml: parent_xml})
+    if is_nil(parent_defn.graph), do: raise("compile failed: #{inspect(parent_defn.errors)}")
+    parent_defn = Definition.publish!(parent_defn)
+
+    {:ok, subject} =
+      AshBpmn.Test.Subject.create!(%{name: "ca", amount: 0, is_privileged: true})
+
+    AshBpmn.start_instance(AshBpmn.Test.Domain, definition: parent_defn, subject: subject)
+  end
+
   # ── helpers ──────────────────────────────────────────────────────────────
 
   defp parent_xml(child_key, opts \\ []) do

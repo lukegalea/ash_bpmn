@@ -54,6 +54,43 @@ defmodule AshBpmn.DefinitionLoader do
               scope :: AshBpmn.Scope.t()
             ) :: {:ok, struct()} | {:error, term()}
 
+  @doc """
+  Resolves which published definition a new instance of `key` runs, when it is started by key
+  with no version pinned: a call activity's child, or `start_instance(process: key)`.
+
+  Optional. Without it, or when it returns `:default`, the engine runs the latest published
+  definition for `key` in the caller's scope, as before. A host that ships baseline processes
+  centrally implements it so a call activity in a tenant's instance reaches the definition
+  that tenant runs, wherever it lives. Return `{:error, reason}` to refuse the start; a call
+  activity then fails like any other child that could not start.
+
+  This is resolution, for a new instance only. A running instance keeps the definition it
+  pinned, read through `load/4`.
+  """
+  @callback resolve(
+              definition_resource :: module(),
+              key :: String.t(),
+              scope :: AshBpmn.Scope.t()
+            ) ::
+              {:ok, struct()} | :default | {:error, term()}
+
+  @optional_callbacks resolve: 3
+
+  @doc """
+  The definition a new instance of `key` runs: the configured loader's `resolve/3`, when it
+  implements it and has an answer, else `:default`.
+  """
+  @spec resolve(module(), String.t(), AshBpmn.Scope.t()) ::
+          {:ok, struct()} | :default | {:error, term()}
+  def resolve(definition_resource, key, scope) do
+    loader = AshBpmn.Config.definition_loader()
+    Code.ensure_loaded(loader)
+
+    if function_exported?(loader, :resolve, 3),
+      do: loader.resolve(definition_resource, key, scope),
+      else: :default
+  end
+
   @doc "Loads through the configured loader, or raises with the reason it could not."
   @spec load!(module(), term(), struct(), AshBpmn.Scope.t()) :: struct()
   def load!(definition_resource, definition_id, instance, scope) do
