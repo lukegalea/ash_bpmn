@@ -191,20 +191,78 @@ property of how the engine happened to run.
 
 ## Timers
 
-Human tasks may declare three timers, each an Oban job with `scheduled_at` and its
-id recorded on the task row:
+Human tasks may declare timers, each an Oban job with `scheduled_at` and its id
+recorded on the task row:
 
 - **remind** — records a `:timer_fired` event; your notifier reads the log.
 - **escalate** — calls your resolver's optional `escalate/2` callback and records
-  the event; typical use: reassign to the assignee's manager.
+  the event; typical use: reassign to the assignee's manager. With `signal="..."`
+  it throws that signal instead.
 - **expire** — force-completes the task with outcome `:expired` and advances the
   token so the graph's expiry path (often a rejection route) runs.
+
+### When a timer fires
+
+A timer's moment is one of (DESIGN.md §11.3):
+
+```xml
+<ash:timers>
+  <ash:timer kind="remind" hours="12"/>
+  <ash:timer kind="escalate" duration="PT36H"/>
+  <ash:timer kind="remind" date="= subject.notice_at - duration(&quot;P2D&quot;)" ifPast="skip"/>
+  <ash:timer kind="escalate" minutes="15" until="claimed"/>
+  <ash:timer kind="expire" date="= subject.received_at + duration(&quot;P30D&quot;)"/>
+</ash:timers>
+```
+
+- `minutes`, `hours`, `days`: a whole number, from task creation.
+- `duration`: an ISO 8601 duration from task creation, or a FEEL expression
+  (beginning `=`) returning a days-and-time duration.
+- `date`: a FEEL expression returning a date and time with an offset. A literal
+  date is refused.
+
+An expression is evaluated **once, when the timer is armed** (for a user task,
+when the task is created), against the same context a gateway condition reads at
+that node: `subject` (only the paths the node declares in `ash:load`, loaded in
+the instance's tenant), `routing`, `task.inserted_at`, and `task.due_at` when the
+task's `ash:schedule` names a `due` (so a reminder can be
+`= task.due_at - duration("P2D")`). The instant is then
+written to the timer ledger and to Oban's `scheduled_at`, and from then on it is a
+fact: a later change to the data moves nothing. BPMN's `timeDuration` and
+`timeDate` on a catch event or a timer boundary take the same forms, evaluated
+when the token parks.
+
+Missing or ill-typed data is a **timer incident**, not a guess: the instance
+fails at the node with a `:timer_unresolved` event, nothing is parked without its
+deadline, and the job is not retried. Write a fallback into the expression if the
+data may be missing. A moment already past fires at once, and its `:timer_fired`
+event says `"late" => true` with the instant it was due; `ifPast="skip"` instead
+records a `:timer_skipped` event and a ledger row cancelled with reason `:past`.
+
+### What a firing carries
+
+Every `:timer_fired` event (and the expiry's `:task_expired`) carries a stable
+`key`: `<task or token id>/<node id>/<timer index>/<repetition>`, where the index
+is the timer's position in `ash:timers` (0 for a catch event, the boundary's id
+for a boundary). It is the same on every retry of a firing and is the key a host
+deduplicates on; Oban delivers at least once, so a reader counts distinct keys.
+It does not depend on the timer ledger being installed. When it is, the job also
+carries its ledger row's id, and the row is recorded fired by that id.
+
+### Start and completion deadlines
+
+`until="claimed"` makes a timer a start deadline (WS-HumanTask's): it is
+cancelled, with ledger reason `:claimed`, when somebody claims the task. The
+default, `until="completed"`, runs until the task ends. This is what lets
+"nobody has picked this up in fifteen minutes" escalate without also escalating a
+task someone is working.
 
 When a task completes, the engine cancels its outstanding timer jobs. This
 bookkeeping is not optional in either direction: completing without cancelling
 produces escalation emails for decided work, and expiring without advancing
 produces a zombie token. If you add a completion path in a host extension,
-cancel the timers.
+cancel the timers. A timer that fires anyway for a completed or cancelled task,
+or a start deadline for a claimed one, does nothing.
 
 ## Due and follow-up dates
 
@@ -273,8 +331,10 @@ there. An `ash:` attribute spelling the same thing — `hours="48"` — would me
 diagram drawn in Camunda or bpmn.io carries a delay this compiler cannot see,
 which is the one-artifact rule turned inside out. It is parsed at publish time,
 so a duration nobody can read is a compile error naming the node rather than an
-instance that parks at three in the morning and never wakes. `timeCycle`,
-`timeDate`, and months or years inside a duration are refused; see
+instance that parks at three in the morning and never wakes. A `timeDuration` or
+`timeDate` may also be a FEEL expression beginning `=`, evaluated when the token
+arrives (see [When a timer fires](#when-a-timer-fires)). `timeCycle`, a literal
+`timeDate`, and months or years inside a duration literal are refused; see
 [what it refuses](what-it-refuses.md#refused-at-compile-time).
 
 When the token arrives, the advance job parks it as `:waiting` and inserts one

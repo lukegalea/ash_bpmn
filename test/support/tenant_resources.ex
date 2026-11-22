@@ -148,6 +148,58 @@ defmodule AshBpmn.TenantTest.Redrive do
   end
 end
 
+# A subject that belongs to a tenant, for the tests that a timer reads its data in the
+# instance's tenant and never another's (DESIGN.md §11.3). Plain Ash, no BPMN macro: a host's
+# subject is the host's own resource.
+defmodule AshBpmn.TenantTest.Subject do
+  @moduledoc false
+  use Ash.Resource,
+    domain: AshBpmn.TenantTest.Domain,
+    data_layer: AshPostgres.DataLayer
+
+  @ash_bpmn_kind :not_bpmn
+
+  def ash_bpmn_kind, do: @ash_bpmn_kind
+
+  postgres do
+    table "tenant_bpmn_test_subjects"
+    repo AshBpmn.TestRepo
+  end
+
+  multitenancy do
+    strategy :attribute
+    attribute :organization_id
+  end
+
+  attributes do
+    uuid_primary_key :id
+
+    attribute :name, :string do
+      allow_nil? false
+      public? true
+    end
+
+    attribute :notice_at, :utc_datetime_usec do
+      public? true
+    end
+
+    attribute :organization_id, :uuid do
+      allow_nil? false
+      public? true
+    end
+
+    timestamps()
+  end
+
+  actions do
+    defaults [:read]
+
+    create :create do
+      accept [:name, :notice_at]
+    end
+  end
+end
+
 defmodule AshBpmn.TenantTest.Domain do
   @moduledoc false
   use Ash.Domain
@@ -165,5 +217,6 @@ defmodule AshBpmn.TenantTest.Domain do
     resource AshBpmn.TenantTest.TimerJob
     resource AshBpmn.TenantTest.Signal
     resource AshBpmn.TenantTest.Redrive
+    resource AshBpmn.TenantTest.Subject
   end
 end

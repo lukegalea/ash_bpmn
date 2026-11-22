@@ -41,8 +41,9 @@ import './ash_bpmn.css';
 //   Outcomes     child: outcome
 //   Outcome      attrs: name
 //   Timers       child: timer
-//   Timer        attrs: kind, minutes?, hours?, days?
-//   Schedule     attrs: due?, followUp?  (a duration, or "=" and a FEEL expression)
+//   Timer        attrs: kind, minutes?, hours?, days?, duration?, date?, cycle?,
+//                       signal?, ifPast?, until?   (DESIGN.md §11.3, §11.4)
+//   Schedule     attrs: due?, followUp?            (DESIGN.md §11.5)
 //
 // The package declares `xml: { tagAlias: 'lowerCase' }`, the same way
 // camunda-bpmn-moddle does. Without it moddle looks for <ash:TaskConfig> and
@@ -194,7 +195,15 @@ export const ashBpmnModdle = {
         { name: 'kind', type: 'String', isAttr: true },
         { name: 'minutes', type: 'Integer', isAttr: true },
         { name: 'hours', type: 'Integer', isAttr: true },
-        { name: 'days', type: 'Integer', isAttr: true }
+        { name: 'days', type: 'Integer', isAttr: true },
+        // A moment as an ISO 8601 duration or a FEEL expression (`= ...`), a point in time
+        // (expression only) or a bounded repetition. Strings, because an expression is text.
+        { name: 'duration', type: 'String', isAttr: true },
+        { name: 'date', type: 'String', isAttr: true },
+        { name: 'cycle', type: 'String', isAttr: true },
+        { name: 'signal', type: 'String', isAttr: true },
+        { name: 'ifPast', type: 'String', isAttr: true },
+        { name: 'until', type: 'String', isAttr: true }
       ]
     },
     // A user task's due and follow-up dates (DESIGN.md §11.5). Registered so bpmn-js keeps
@@ -209,6 +218,9 @@ export const ashBpmnModdle = {
     }
   ]
 };
+
+// The ash:timer attributes carried as text, in the order a timer is read back.
+const TIMER_TEXT_ATTRS = ['duration', 'date', 'cycle', 'signal', 'ifPast', 'until'];
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -361,12 +373,18 @@ function readConfig(element) {
       return o.name || '';
     }),
     timers: list(cfg.timers, 'timer').map(function (t) {
-      return {
+      const timer = {
         kind: t.kind || '',
         minutes: t.minutes != null ? t.minutes : null,
         hours: t.hours != null ? t.hours : null,
         days: t.days != null ? t.days : null
       };
+      // Read back only when present, so a timer in the original vocabulary keeps the shape
+      // the panel has always been handed.
+      TIMER_TEXT_ATTRS.forEach(function (name) {
+        if (nonBlank(t[name])) timer[name] = String(t[name]);
+      });
+      return timer;
     }),
     schedule: cfg.schedule
       ? { due: cfg.schedule.due || '', followUp: cfg.schedule.followUp || '' }
@@ -434,12 +452,18 @@ function buildTaskConfig(moddle, config) {
   if (Array.isArray(config.timers) && config.timers.length > 0) {
     props.timers = moddle.create('ash:Timers', {
       timer: config.timers.map(function (t) {
-        return moddle.create('ash:Timer', {
+        const attrs = {
           kind: String(t.kind || ''),
           minutes: t.minutes != null ? Number(t.minutes) : undefined,
           hours: t.hours != null ? Number(t.hours) : undefined,
           days: t.days != null ? Number(t.days) : undefined
+        };
+        // Written only when set: an empty attribute is a different timer to the compiler
+        // (`date=""` is a refusal), so blank must mean absent.
+        TIMER_TEXT_ATTRS.forEach(function (name) {
+          if (nonBlank(t[name])) attrs[name] = String(t[name]);
         });
+        return moddle.create('ash:Timer', attrs);
       })
     });
   }

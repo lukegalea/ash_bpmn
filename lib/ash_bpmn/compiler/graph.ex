@@ -5,6 +5,7 @@ defmodule AshBpmn.Compiler.Graph do
   @moduledoc false
 
   alias AshBpmn.Compiler.Errors
+  alias AshBpmn.Compiler.Timer
   alias AshBpmn.Compiler.Xml
 
   @spec build(map()) :: {:ok, map()} | {:error, [map()]}
@@ -146,12 +147,6 @@ defmodule AshBpmn.Compiler.Graph do
     "signalEventDefinition" => ["intermediateCatchEvent", "intermediateThrowEvent"],
     "conditionalEventDefinition" => ["intermediateCatchEvent"]
   }
-
-  # Children of a `timerEventDefinition`. Only `timeDuration` is implemented; the other two are
-  # listed so they refuse with their own name rather than as an unrecognized element, because a
-  # modeller who drew a timer with a cycle needs to be told that *cycles* are not supported, not
-  # that BPMN contains no such element.
-  @timer_definition_children MapSet.new(~w(timeDuration timeDate timeCycle))
 
   @known_unimplemented MapSet.new(~w(
     timerEventDefinition messageEventDefinition conditionalEventDefinition
@@ -795,7 +790,7 @@ defmodule AshBpmn.Compiler.Graph do
 
       [definition] ->
         case Xml.normalize_name(Xml.local_name(definition)) do
-          "timerEventDefinition" -> build_timer_catch(id, definition)
+          "timerEventDefinition" -> Timer.event_definition(id, definition, :catch)
           "messageEventDefinition" -> build_message_catch(id, node)
           "signalEventDefinition" -> build_signal_catch(id, definition)
           "conditionalEventDefinition" -> build_conditional_catch(id, node, definition)
@@ -1360,8 +1355,11 @@ defmodule AshBpmn.Compiler.Graph do
 
   defp boundary_trigger(id, definition, interrupting?, errors) do
     case Xml.normalize_name(Xml.local_name(definition)) do
-      "timerEventDefinition" -> build_timer_catch(id, definition)
-      "errorEventDefinition" -> build_error_catch(id, definition, interrupting?, errors)
+      "timerEventDefinition" ->
+        Timer.event_definition(id, definition, {:boundary, interrupting?})
+
+      "errorEventDefinition" ->
+        build_error_catch(id, definition, interrupting?, errors)
     end
   end
 
@@ -1429,72 +1427,6 @@ defmodule AshBpmn.Compiler.Graph do
 
   defp single_boundary_definition(id, _many) do
     {:error, Errors.error(id, "boundaryEvent '#{id}' has more than one event definition")}
-  end
-
-  defp build_timer_catch(id, definition) do
-    children =
-      definition
-      |> Xml.get_element_children()
-      |> Enum.map(&{Xml.normalize_name(Xml.local_name(&1)), &1})
-
-    unsupported =
-      Enum.filter(children, fn {name, _} ->
-        name in @timer_definition_children and name != "timeDuration"
-      end)
-
-    case {unsupported, List.keyfind(children, "timeDuration", 0)} do
-      {[{name, _} | _], _} ->
-        {:error,
-         Errors.error(
-           id,
-           "timer '#{id}' uses '#{name}', which is not supported; use timeDuration " <>
-             "(an ISO 8601 duration such as PT4H or P2D)"
-         )}
-
-      {[], nil} ->
-        {:error,
-         Errors.error(id, "timer '#{id}' has no timeDuration; an ISO 8601 duration is required")}
-
-      {[], {_, element}} ->
-        source = element |> Xml.element_text() |> to_string() |> String.trim()
-
-        # Parsed at publish time, not at three in the morning when the token arrives. A
-        # duration that cannot be read is a compile error naming the node; a duration read
-        # lazily is a process that parks and then fails to ever wake.
-        case parse_duration(source) do
-          {:ok, seconds} ->
-            {:ok, %{"catch" => %{"kind" => "timer", "duration" => source, "seconds" => seconds}}}
-
-          {:error, reason} ->
-            {:error,
-             Errors.error(id, "timer '#{id}' has an invalid duration '#{source}': #{reason}")}
-        end
-    end
-  end
-
-  # Months and years are refused rather than approximated. ISO 8601 allows them, but their
-  # length depends on when you start counting, and a process that fires "in one month" at a
-  # different instant depending on the day it parked is not a thing to hand an auditor. A
-  # modeller who wants a month writes P30D and means it.
-  defp parse_duration(source) do
-    case Duration.from_iso8601(source) do
-      {:ok, %Duration{month: m, year: y}} when m != 0 or y != 0 ->
-        {:error, "months and years are not supported because their length is not fixed; use days"}
-
-      {:ok, duration} ->
-        seconds =
-          duration.week * 604_800 + duration.day * 86_400 + duration.hour * 3600 +
-            duration.minute * 60 + duration.second
-
-        if seconds > 0 do
-          {:ok, seconds}
-        else
-          {:error, "a timer must wait for a positive amount of time"}
-        end
-
-      {:error, reason} ->
-        {:error, to_string(reason)}
-    end
   end
 
   # An `ash:call` names a callable the host declared in a domain's `callables` block —
@@ -1775,16 +1707,19 @@ defmodule AshBpmn.Compiler.Graph do
         |> Enum.map(&Xml.element_attr(&1, "name"))
         |> Enum.filter(&(&1 != nil))
 
-      # Parse timers
+      # Parse timers. Every malformed one is a compile error naming the node; none is dropped.
       timers =
         config
         |> Xml.find_children("timers")
         |> Enum.flat_map(&Xml.get_element_children/1)
-        |> Enum.map(&parse_timer/1)
-        |> Enum.filter(&(&1 != nil))
+        |> Enum.with_index()
+        |> Enum.map(fn {el, index} -> Timer.ash_timer(el, id, index) end)
 
       # Validate: >=1 candidate, >=1 outcome
       cond do
+        error = Enum.find_value(timers, fn r -> match?({:error, _}, r) && elem(r, 1) end) ->
+          {:error, error}
+
         candidates == [] ->
           {:error, Errors.error(id, "userTask '#{id}' must have at least one candidate")}
 
@@ -1798,7 +1733,7 @@ defmodule AshBpmn.Compiler.Graph do
                 "candidates" => candidates,
                 "exclusions" => exclusions,
                 "outcomes" => outcomes,
-                "timers" => timers,
+                "timers" => Enum.map(timers, fn {:ok, timer} -> timer end),
                 "schedule" => schedule
               }
               |> Map.filter(fn {_, v} -> v not in [[], nil] end)
@@ -1866,35 +1801,6 @@ defmodule AshBpmn.Compiler.Graph do
       end
     end)
   end
-
-  defp parse_timer(timer_el) do
-    kind = Xml.element_attr(timer_el, "kind")
-
-    minutes =
-      cond do
-        m = Xml.element_attr(timer_el, "minutes") -> String.to_integer(m)
-        h = Xml.element_attr(timer_el, "hours") -> String.to_integer(h) * 60
-        d = Xml.element_attr(timer_el, "days") -> String.to_integer(d) * 60 * 24
-        true -> nil
-      end
-
-    if kind != nil and minutes != nil do
-      # `signal` turns an escalation from a call into a throw. With it, the escalation
-      # broadcasts a name and whatever processes are listening react -- which is what makes
-      # escalation composable: the thing that handles a stalled approval becomes a process
-      # somebody drew, rather than a callback only Elixir can see.
-      #
-      # Without it the resolver's `escalate/2` is called as before. Both remain, because they
-      # answer different questions: a resolver notifies a person, a signal starts work.
-      %{"kind" => kind, "minutes" => minutes}
-      |> put_if("signal", Xml.element_attr(timer_el, "signal"))
-    else
-      nil
-    end
-  end
-
-  defp put_if(map, _key, nil), do: map
-  defp put_if(map, key, value), do: Map.put(map, key, value)
 
   defp check_unknown_ash_children(config, node, known_children, extra \\ %{}) do
     id = Xml.element_attr(node, "id")

@@ -16,7 +16,35 @@ Requires Elixir 1.20 or later.
 
 Nothing has been released yet. Everything below is the initial body of work.
 
+### Features:
+
+- **A timer's moment comes from data (DESIGN.md §11.3, §11.4).** `ash:timer`
+  takes `duration` (an ISO 8601 literal or a FEEL expression beginning `=`) and
+  `date` (an expression returning a date and time with an offset), and BPMN
+  `timeDuration` and `timeDate` on catch events and timer boundaries take the
+  same forms. An expression is evaluated once, when the timer is armed, against
+  the node's `ash:load` subject in the instance's tenant, and the instant is
+  recorded. Missing or ill-typed data is a timer incident: the instance fails at
+  the node with a `:timer_unresolved` event and is not retried, and
+  `retry_instance/2` asks again. A moment already past fires at once with
+  `"late" => true`, or with `ifPast="skip"` writes `:timer_skipped` and a ledger
+  row cancelled `:past`. Every firing carries a stable key,
+  `<task or token>/<node>/<index>/<repetition>`, and a timer boundary now writes
+  `:timer_fired` like every other timer. `until="claimed"` ends a timer at the
+  claim (ledger reason `:claimed`). The timer ledger gains the cancel reasons
+  `:past`, `:claimed` and `:rescheduled`, and a job records its own ledger row by
+  id, so two timers of one kind on a task no longer collide. Definitions in the
+  original forms compile to exactly the graph they did before. The designer's
+  moddle descriptor declares the new attributes and `ash:schedule`, so bpmn-js
+  no longer drops them on save.
+
 ### Bug Fixes:
+
+- **A malformed `ash:timer` is a compile error naming the node.** A timer with
+  no unit or no kind was dropped, a misspelled kind compiled and failed at run
+  time, `hours="2.5"` raised inside the compiler, and `signal` on a reminder
+  was ignored. Each is now refused at publish, as are an unknown attribute,
+  more than one moment, and `ifPast="skip"` or `until="claimed"` on an expiry.
 
 - **Inline-mode timer storage survives concurrent tests.** `TestJobs`
   created its ETS table in whichever process stored the first timer, so the

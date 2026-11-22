@@ -8,7 +8,8 @@
     "build": "npm run build:js && npm run build:css",
     "build:js": "NODE_PATH=../../deps:./node_modules esbuild js/app.js --bundle --format=esm --target=es2020 --outfile=../priv/static/assets/app.js --loader:.woff=dataurl --loader:.woff2=dataurl --loader:.ttf=dataurl --loader:.svg=dataurl --loader:.eot=dataurl --loader:.png=dataurl",
     "build:css": "tailwindcss -i css/app.css -o ../priv/static/assets/tailwind.css --minify",
-    "watch": "npm run build:js -- --watch"
+    "watch": "npm run build:js -- --watch",
+    "test:moddle": "node moddle_roundtrip.mjs"
   },
   "dependencies": {
     "bpmn-js": "^18.0.0"

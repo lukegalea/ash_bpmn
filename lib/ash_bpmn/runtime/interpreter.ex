@@ -44,6 +44,7 @@ defmodule AshBpmn.Runtime.Interpreter do
 
   alias AshBpmn.Runtime.Promotion
   alias AshBpmn.Runtime.Routing
+  alias AshBpmn.Runtime.TimerMoment
 
   @doc """
   Dispatches execution for a single node.
@@ -656,7 +657,24 @@ defmodule AshBpmn.Runtime.Interpreter do
 
   # ── userTask ─────────────────────────────────────────────────────────────
 
+  # The task's deadlines are resolved before anything else is asked of the host: a timer whose
+  # data is missing is an incident at this node, and an incident must not first have asked the
+  # resolver for candidates (or its nobody-eligible fallback, which a host may act on).
   defp user_task(graph, node_id, node, ctx) do
+    now = DateTime.utc_now()
+
+    # The explicit due date first, so a timer can be written relative to it
+    # (`= task.due_at - duration("P2D")`); then the timers; then the rest of the schedule, whose
+    # due date falls back to the expire timer's instant (DESIGN.md §11.3, §11.5).
+    with {:ok, due_at} <- explicit_due(node_id, node["schedule"], ctx, now),
+         {:ok, timer_specs} <-
+           task_timer_specs(node_id, node["timers"] || [], ctx, now, due_at),
+         {:ok, boundary_jobs} <- boundary_timer_jobs(graph, node_id, ctx, now) do
+      user_task(graph, node_id, node, ctx, {timer_specs, boundary_jobs, now})
+    end
+  end
+
+  defp user_task(graph, node_id, node, ctx, {timer_specs, boundary_jobs, now}) do
     resolver = AshBpmn.Config.assignment_resolver!()
     instance = ctx[:instance]
     token = ctx[:token]
@@ -690,29 +708,29 @@ defmodule AshBpmn.Runtime.Interpreter do
         candidate_ctx
       )
 
-    timers = timer_jobs(node["timers"] || [])
-
-    with {:ok, dates} <- schedule(node_id, node["schedule"], timers, ctx) do
+    with {:ok, dates} <- schedule(node_id, node["schedule"], timer_specs, ctx, now) do
       user_task_effects(graph, node_id, node, ctx, %{
         instance: instance,
         token: token,
         exclusions: exclusions,
         candidates: filtered_candidates,
         unassignable: unassignable,
-        timers: timers,
+        timers: timer_specs,
+        jobs: boundary_jobs,
         dates: dates
       })
     end
   end
 
-  defp user_task_effects(graph, node_id, node, ctx, spec) do
+  defp user_task_effects(_graph, node_id, node, ctx, spec) do
     %{
       instance: instance,
       token: token,
       exclusions: exclusions,
       candidates: filtered_candidates,
       unassignable: unassignable,
-      timers: timers,
+      timers: timer_specs,
+      jobs: boundary_jobs,
       dates: dates
     } = spec
 
@@ -750,8 +768,8 @@ defmodule AshBpmn.Runtime.Interpreter do
           unassignable_event(ctx, node_id, task_ref, unassignable),
       tasks: [{task_ref, task_attrs}],
       candidates: {task_ref, candidate_attrs},
-      timers: {task_ref, timers},
-      jobs: boundary_timer_jobs(graph, node_id, ctx)
+      timers: {task_ref, timer_specs},
+      jobs: boundary_jobs
     ]
 
     {:ok, effects}
@@ -767,9 +785,8 @@ defmodule AshBpmn.Runtime.Interpreter do
   # A moment that cannot be resolved is an incident, not a guess: the instance fails at this
   # node with a `:timer_unresolved` event, and nothing retries it, because the same data gives
   # the same answer. A modeller who wants a fallback writes it in the expression.
-  defp schedule(node_id, schedule, timers, ctx) do
+  defp schedule(node_id, schedule, timers, ctx, now) do
     schedule = schedule || %{}
-    now = DateTime.utc_now()
     expr_ctx = build_expr_ctx(ctx)
 
     with {:ok, due_at} <-
@@ -811,9 +828,16 @@ defmodule AshBpmn.Runtime.Interpreter do
   end
 
   defp expire_instant(timers) do
-    Enum.find_value(timers, fn {_worker, args, opts} ->
-      args["kind"] == "expire" && Keyword.get(opts, :scheduled_at)
+    Enum.find_value(timers, fn
+      {:skip, _args, _due_at} -> nil
+      {_worker, args, opts} -> args["kind"] == "expire" && Keyword.get(opts, :scheduled_at)
     end)
+  end
+
+  defp explicit_due(node_id, schedule, ctx, now) do
+    resolve_moment(node_id, "due", (schedule || %{})["due"], now, build_expr_ctx(ctx), %{
+      "inserted_at" => now
+    })
   end
 
   defp schedule_event_data(%{due_at: nil, follow_up_at: nil}), do: %{}
@@ -872,19 +896,26 @@ defmodule AshBpmn.Runtime.Interpreter do
           correlation_key: nil
         }
 
-        effects = [
-          park_token: park,
-          events: [
-            event_attrs(ctx, node_id, :node_entered, %{
-              "waiting_for" => "timer",
-              "duration" => catch_spec["duration"]
-            })
-          ],
-          jobs: [timer_catch_job(ctx, node_id, catch_spec)]
-        ]
+        with {:ok, {job, resolved}} <- timer_catch_job(ctx, node_id, catch_spec) do
+          effects = [
+            park_token: park,
+            events: [
+              event_attrs(
+                ctx,
+                node_id,
+                :node_entered,
+                %{"waiting_for" => "timer", "due_at" => DateTime.to_iso8601(resolved.due_at)}
+                |> put_present("duration", catch_spec["duration"])
+                |> put_present("date", catch_spec["date"])
+                |> then(&if(resolved.late, do: Map.put(&1, "late", true), else: &1))
+              )
+            ],
+            jobs: [job]
+          ]
 
-        _ = graph
-        {:ok, effects}
+          _ = graph
+          {:ok, effects}
+        end
 
       "message" ->
         message_catch(node_id, catch_spec, ctx)
@@ -1033,16 +1064,27 @@ defmodule AshBpmn.Runtime.Interpreter do
 
   # Scheduled from *now*, which is when the token actually arrived. Computing it at compile
   # time would make the delay relative to publication, so every instance of a published
-  # definition would fire at the same instant.
+  # definition would fire at the same instant. A moment written as an expression is evaluated
+  # now too, against the case as it is at arrival, and recorded as an instant.
+  #
+  # A catch event is one timer at index 0, fired once.
   defp timer_catch_job(ctx, node_id, catch_spec) do
-    seconds = catch_spec["seconds"]
+    now = DateTime.utc_now()
 
-    {AshBpmn.Runtime.CatchTimerWorker,
-     %{
-       "instance_id" => ctx[:instance].id,
-       "token_id" => ctx[:token].id,
-       "node_id" => node_id
-     }, [scheduled_at: DateTime.add(DateTime.utc_now(), seconds, :second)]}
+    with {:ok, resolved} <- resolve_timer(catch_spec, node_id, 0, build_expr_ctx(ctx), now) do
+      args =
+        %{
+          "instance_id" => ctx[:instance].id,
+          "token_id" => ctx[:token].id,
+          "node_id" => node_id,
+          "key" => TimerMoment.key(ctx[:token].id, node_id, 0, 1),
+          "repetition" => 1,
+          "due_at" => DateTime.to_iso8601(resolved.due_at)
+        }
+        |> put_late(resolved)
+
+      {:ok, {{AshBpmn.Runtime.CatchTimerWorker, args, [scheduled_at: resolved.due_at]}, resolved}}
+    end
   end
 
   # ── callActivity ─────────────────────────────────────────────────────────
@@ -1364,9 +1406,10 @@ defmodule AshBpmn.Runtime.Interpreter do
   # wait itself needs (a receive task's lookback), so a park that rolls back takes its timers
   # with it.
   defp with_boundary_timers({:ok, effects}, graph, node_id, ctx) do
-    case boundary_timer_jobs(graph, node_id, ctx) do
-      [] -> {:ok, effects}
-      jobs -> {:ok, Keyword.update(effects, :jobs, jobs, &(&1 ++ jobs))}
+    case boundary_timer_jobs(graph, node_id, ctx, DateTime.utc_now()) do
+      {:ok, []} -> {:ok, effects}
+      {:ok, jobs} -> {:ok, Keyword.update(effects, :jobs, jobs, &(&1 ++ jobs))}
+      {:error, _} = incident -> incident
     end
   end
 
@@ -1383,49 +1426,122 @@ defmodule AshBpmn.Runtime.Interpreter do
   # is a no-op today because nothing mints a token at the boundary, but it is a rewrite lying
   # in wait for the first change that does, and it would substitute the wrong token into a
   # timer that has no way to notice.
-  defp boundary_timer_jobs(graph, node_id, ctx) do
+  #
+  # A boundary's moment is evaluated in the attached activity's context: the subject as that
+  # activity's `ash:load` declares it, the token's routing. Its key is
+  # `<token>/<activity>/<boundary id>/<repetition>`.
+  defp boundary_timer_jobs(graph, node_id, ctx, now) do
     (graph["boundaries"] || %{})
     |> Map.get(node_id, [])
     # An error boundary has no timer to arm; the activity's own work fires it.
     |> Enum.filter(&get_in(graph, ["nodes", &1, "catch"]))
-    |> Enum.map(fn boundary_id ->
-      seconds = get_in(graph, ["nodes", boundary_id, "catch", "seconds"])
+    |> reduce_ok(fn boundary_id ->
+      spec = get_in(graph, ["nodes", boundary_id, "catch"])
 
-      {AshBpmn.Runtime.BoundaryTimerWorker,
-       %{
-         "instance_id" => ctx[:instance].id,
-         "token_id" => ctx[:token].id,
-         "boundary_id" => boundary_id,
-         "attached_to" => node_id,
-         "interrupting" => get_in(graph, ["nodes", boundary_id, "interrupting"]) != false
-       },
-       [
-         scheduled_at: DateTime.add(DateTime.utc_now(), seconds, :second),
-         # Tagged so `AshBpmn.Runtime.Oban.cancel_all/1` can find every boundary timer for a
-         # token when the task is decided -- the first production caller of a function built
-         # for exactly this and until now used only by its own test.
-         meta: AshBpmn.Runtime.Oban.timer_meta(%{token_id: ctx[:token].id, kind: "boundary"})
-       ]}
+      with {:ok, resolved} <-
+             resolve_timer(spec, boundary_id, boundary_id, build_expr_ctx(ctx), now) do
+        args =
+          %{
+            "instance_id" => ctx[:instance].id,
+            "token_id" => ctx[:token].id,
+            "boundary_id" => boundary_id,
+            "attached_to" => node_id,
+            "interrupting" => get_in(graph, ["nodes", boundary_id, "interrupting"]) != false,
+            "key" => TimerMoment.key(ctx[:token].id, node_id, boundary_id, 1),
+            "repetition" => 1,
+            "due_at" => DateTime.to_iso8601(resolved.due_at)
+          }
+          |> put_late(resolved)
+
+        {:ok,
+         {AshBpmn.Runtime.BoundaryTimerWorker, args,
+          [
+            scheduled_at: resolved.due_at,
+            # Tagged so `AshBpmn.Runtime.Oban.cancel_all/1` can find every boundary timer for a
+            # token when the task is decided -- the first production caller of a function built
+            # for exactly this and until now used only by its own test.
+            meta: AshBpmn.Runtime.Oban.timer_meta(%{token_id: ctx[:token].id, kind: "boundary"})
+          ]}}
+      end
     end)
   end
 
-  # The worker fills in "task_id" once the task row exists.
+  # A user task's `ash:timer`s, each resolved to its instant now, at task creation.
   #
-  # "index" is the timer's position in the node's `ash:timers`, which with the task id, the node
-  # id and the repetition makes the timer's key (DESIGN.md §11.4).
-  defp timer_jobs(timers) do
+  # The worker fills in "task_id" and the key once the task row exists. A timer whose moment is
+  # past fires at once unless it says `ifPast="skip"`, in which case it is handed over as a
+  # `{:skip, args, due_at}` for the worker to record, rather than dropped: "why was nobody
+  # reminded?" must still have an answer.
+  #
+  # `task.inserted_at` is the arming instant: the row is written in this same step.
+  # `task.due_at` and `task.follow_up_at` read null until the task schedule lands.
+  defp task_timer_specs(node_id, timers, ctx, now, due_at) do
+    expr_ctx = Map.put(build_expr_ctx(ctx), "task", task_ctx(now, due_at))
+
     timers
     |> Enum.with_index()
-    |> Enum.map(fn {timer, index} ->
-      minutes = timer["minutes"] || 0
-      scheduled_at = DateTime.add(DateTime.utc_now(), minutes, :minute)
+    |> reduce_ok(fn {timer, position} ->
+      index = timer["index"] || position
 
-      args =
-        %{"kind" => timer["kind"], "index" => index}
-        |> then(&if(timer["signal"], do: Map.put(&1, "signal", timer["signal"]), else: &1))
+      with {:ok, resolved} <- resolve_timer(timer, node_id, index, expr_ctx, now) do
+        args =
+          %{"kind" => timer["kind"], "index" => index, "repetition" => 1}
+          |> put_present("signal", timer["signal"])
+          |> put_present("until", timer["until"])
+          |> Map.put("due_at", DateTime.to_iso8601(resolved.due_at))
+          |> put_late(resolved)
 
-      {AshBpmn.Runtime.TimerWorker, args, [scheduled_at: scheduled_at]}
+        if resolved.late and timer["if_past"] == "skip" do
+          {:ok, {:skip, args, resolved.due_at}}
+        else
+          {:ok, {AshBpmn.Runtime.TimerWorker, args, [scheduled_at: resolved.due_at]}}
+        end
+      end
     end)
+  end
+
+  # The task being created, and only that: in the step that leaves a completed task the
+  # expression context's `task` is the previous task's outcome, which a timer must not read by
+  # accident. `due_at` is the schedule's explicit due date; a due date that falls back to the
+  # expire timer is not known to the timers, which resolve first.
+  defp task_ctx(now, due_at),
+    do: %{"inserted_at" => now, "due_at" => due_at, "follow_up_at" => nil}
+
+  # A moment that cannot be resolved is a timer incident: the step that would arm it fails, and
+  # the worker marks the instance failed at this node with a `:timer_unresolved` event. It is
+  # not retried, because the same data gives the same answer.
+  defp resolve_timer(spec, node_id, index, expr_ctx, now) do
+    case TimerMoment.resolve(spec, expr_ctx, now) do
+      {:ok, resolved} ->
+        {:ok, resolved}
+
+      {:error, reason} ->
+        {:error,
+         {:incident, :timer_unresolved,
+          "timer #{index} on #{node_id} could not be resolved: #{reason}",
+          %{"node" => node_id, "timer" => index, "reason" => reason}
+          |> put_present("expression", TimerMoment.expression_text(spec))}}
+    end
+  end
+
+  defp put_late(args, %{late: true}), do: Map.put(args, "late", true)
+  defp put_late(args, _resolved), do: args
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
+
+  defp reduce_ok(list, fun) do
+    list
+    |> Enum.reduce_while({:ok, []}, fn item, {:ok, acc} ->
+      case fun.(item) do
+        {:ok, value} -> {:cont, {:ok, [value | acc]}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      error -> error
+    end
   end
 
   # ── Expression context ─────────────────────────────────────────────────

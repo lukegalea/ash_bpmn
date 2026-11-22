@@ -399,7 +399,29 @@ defmodule AshBpmn do
       )
 
     record_claim_event(resources, claimed, actor, scope)
+    cancel_start_deadlines(resources, claimed, scope)
     claimed
+  end
+
+  # A start deadline (`until="claimed"`, DESIGN.md §11.4) ends when somebody claims the task,
+  # and is not re-armed if the task is released: "nobody has picked this up in fifteen minutes"
+  # stopped being true at the claim. Completion deadlines keep running.
+  #
+  # The Oban jobs are found by the owner they carry in `meta`; the ledger rows by the `until`
+  # they recorded, and cancelled with reason `:claimed`.
+  defp cancel_start_deadlines(resources, task, scope) do
+    AshBpmn.Runtime.Oban.cancel_all(%{"task_id" => task.id, "until" => "claimed"})
+
+    if resources.timer_job do
+      resources.timer_job
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(task_id == ^task.id and status == :scheduled)
+      |> Ash.read!(Scope.engine(scope))
+      |> Enum.filter(&((&1.data || %{})["until"] == "claimed"))
+      |> Enum.each(&resources.timer_job.record_cancelled(&1, :claimed, Scope.engine(scope)))
+    end
+
+    :ok
   end
 
   defp ensure_candidate!(resources, task, principals, scope) do
@@ -982,15 +1004,17 @@ defmodule AshBpmn do
   # A failed instance retries what the engine gave up on, and nothing else. Its other dead
   # tokens are branches that ended on purpose -- every branch arriving at a parallel join dies
   # there -- and reactivating those would run the join's far side a second time. The tokens the
-  # engine gave up on are the ones its `:action_failed` events name, plus any left
-  # `:executing` by a failure from before the engine killed them.
+  # engine gave up on are the ones its `:action_failed` and `:timer_unresolved` events name,
+  # plus any left `:executing` by a failure from before the engine killed them.
   #
   # Any other status keeps the old behaviour: every dead token.
   defp tokens_to_retry(resources, %{status: :failed} = instance, scope) do
     given_up =
       resources.process_event
       |> Ash.Query.for_read(:read)
-      |> Ash.Query.filter(instance_id == ^instance.id and kind == :action_failed)
+      |> Ash.Query.filter(
+        instance_id == ^instance.id and kind in [:action_failed, :timer_unresolved]
+      )
       |> Ash.read!(Scope.engine(scope))
       |> Enum.map(& &1.token_id)
       |> Enum.reject(&is_nil/1)

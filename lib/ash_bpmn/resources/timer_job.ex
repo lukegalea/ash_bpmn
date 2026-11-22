@@ -249,6 +249,14 @@ defmodule AshBpmn.Resources.TimerJob do
                         # the others because it is the only reason that means the clock is still
                         # running, just on a different row.
                         :superseded,
+                        # The moment had already passed when the timer was armed, and the timer
+                        # says `ifPast="skip"`. Never armed in Oban; the row is the record.
+                        :past,
+                        # A start deadline (`until="claimed"`): somebody claimed the task.
+                        :claimed,
+                        # `AshBpmn.reschedule_timers/2` moved it; a new row carries the new
+                        # instant.
+                        :rescheduled,
                         # The host cancelled it deliberately, for a reason this package has no
                         # vocabulary for. `data` is where the host says what it was.
                         :host_request
