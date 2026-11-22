@@ -45,8 +45,7 @@ defmodule AshBpmn.TimerMomentTest do
           {~s|kind="remind" date="2026-12-01T00:00:00Z"|, "write it as an expression"},
           {~s|kind="remind" duration="P1M"|, "months and years"},
           {~s|kind="remind" duration="PT0S"|, "positive amount"},
-          {~s|kind="remind" duration="= | <> ~s|&lt;&lt;"|, ~s|duration="= <<"|},
-          {~s|kind="remind" cycle="R3/PT1H"|, "cycle"}
+          {~s|kind="remind" duration="= | <> ~s|&lt;&lt;"|, ~s|duration="= <<"|}
         ] do
       test "#{attrs}" do
         errors = errors_for(task_xml(~s|<ash:timer #{unquote(attrs)}/>|))
@@ -102,9 +101,10 @@ defmodule AshBpmn.TimerMomentTest do
       assert errors =~ "write it as an expression"
     end
 
-    test "timeCycle is refused by name" do
+    test "timeCycle on a catch event is refused by name" do
       errors = errors_for(catch_xml(~s|<bpmn2:timeCycle>R3/PT1H</bpmn2:timeCycle>|))
       assert errors =~ "timeCycle"
+      assert errors =~ "non-interrupting boundary"
     end
 
     test "two moments are refused, because BPMN makes them exclusive" do
@@ -355,10 +355,13 @@ defmodule AshBpmn.TimerMomentTest do
       assert job.args["timer_job_id"]
 
       {:ok, :reminded} = AshBpmn.Runtime.TimerWorker.perform(%Oban.Job{args: job.args})
-      {:ok, :reminded} = AshBpmn.Runtime.TimerWorker.perform(%Oban.Job{args: job.args})
 
-      # At least once: two events for one firing, one key. Readers count distinct keys.
-      assert [key, key] == Enum.map(events_of(instance, :timer_fired), & &1.data["key"])
+      # A reminder's event and its ledger row commit together, so with the ledger installed a
+      # redelivery after a finished delivery does nothing. Without it delivery is at least
+      # once, and readers count distinct keys.
+      {:ok, :already_fired} = AshBpmn.Runtime.TimerWorker.perform(%Oban.Job{args: job.args})
+
+      assert [key] == Enum.map(events_of(instance, :timer_fired), & &1.data["key"])
       assert [%{status: :fired}] = ledger_for(instance)
     end
 

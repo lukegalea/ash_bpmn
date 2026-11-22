@@ -496,7 +496,7 @@ defmodule AshBpmn do
         record_task_event(resources, task, :timer_cancelled, %{"job_ids" => job_ids}, scope)
     end
 
-    cancel_boundary_timers(resources, task, scope)
+    cancel_boundary_timers(resources, task, reason, scope)
     cancel_ledger_rows(resources, task, reason, scope)
   end
 
@@ -508,9 +508,9 @@ defmodule AshBpmn do
   #
   # Cancelled by owner through the meta index rather than by id, which is what
   # `AshBpmn.Runtime.Oban.cancel_all/1` was built for.
-  defp cancel_boundary_timers(resources, task, scope) do
+  defp cancel_boundary_timers(resources, task, reason, scope) do
     if task.token_id do
-      case AshBpmn.Runtime.Oban.cancel_all(%{"token_id" => task.token_id, "kind" => "boundary"}) do
+      case AshBpmn.Runtime.TimerLedger.cancel_boundaries(resources, task.token_id, reason, scope) do
         {:ok, 0} ->
           :ok
 
@@ -936,6 +936,42 @@ defmodule AshBpmn do
     else
       {:error, :signals_not_installed}
     end
+  end
+
+  @doc """
+  Re-evaluates the data-driven timers of a subject's live instances after the data they read
+  has changed (DESIGN.md §11.3).
+
+  An armed timer's instant is a fact, so nothing moves when the data does. A host calls this
+  from the change that moves a date, in the same transaction. Every timer whose moment is an
+  expression and that is still armed (on a live task, a parked catch event or an activity's
+  timer boundary) is evaluated again, against the subject as it is now and counting a duration
+  from when the timer was armed:
+
+    * a timer whose instant is unchanged is left alone;
+    * a moved timer's ledger row is cancelled with reason `:rescheduled` and a new one armed
+      with the same key, so a host deduplicating notices sees one firing;
+    * a new instant already past follows the timer's `ifPast` rule: it fires at once marked
+      late, or with `ifPast="skip"` is recorded as skipped;
+    * a repeating timer keeps its repetition count and moves its remaining repetitions;
+    * timers that have fired, and literal timers, are not touched;
+    * each instance with a moved timer gets one `:timers_rescheduled` event listing every
+      timer's key and its old and new instants.
+
+  Returns `{:ok, count}` with the number of timers moved (zero for a subject with no live
+  instances). A moment that can no longer be resolved, because the data it reads is now
+  missing or of the wrong type, moves nothing on that instance and returns
+  `{:error, {:timer_unresolved, details}}`, so the host's change can fail rather than leave a
+  timer armed for data that no longer says so. The timer ledger
+  (`AshBpmn.Resources.TimerJob`) is required: it is what records which timers are armed.
+  Without it this returns `{:error, :timer_ledger_not_installed}`.
+
+  Options: `:actor`, `:tenant` (defaults to the subject's own `organization_id`) and
+  `:domain`.
+  """
+  @spec reschedule_timers(struct(), keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def reschedule_timers(subject, opts \\ []) do
+    AshBpmn.Runtime.Reschedule.run(subject, opts)
   end
 
   @doc "Retries a failed instance by reactivating dead tokens."

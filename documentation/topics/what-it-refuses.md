@@ -59,17 +59,24 @@ The compiler rejects, each with the offending element's id in the error:
   event definition, or with more than one. The first parks a token that nothing
   will ever wake: a deadlock, compiled and published. The compiler will not ship
   a hang it can see in the document.
-- **Timer cycles and literal dates** (`timeCycle`, a `timeDate` that is not an
-  expression). A catch event's or boundary's moment is a `timeDuration` (an ISO
-  8601 literal or a FEEL expression beginning `=`) or a `timeDate` written as an
-  expression, such as `= subject.notice_at`; see DESIGN.md §11.3. A literal date
-  is refused because a date typed into a definition published months before the
-  token arrives is a deadline that may already be in the past; an expression is
-  computed from the case when the timer is armed, and recorded as an instant.
-  Two moments on one timer (BPMN makes them mutually exclusive) are refused.
-  `timeCycle` is named in the error rather than falling through as an
-  unrecognized element, because a modeller who drew a cycle needs to be told
-  that *cycles* are not supported, not that BPMN contains no such element.
+- **A cycle where repeating means nothing, a cycle with no count, and literal
+  dates** (`timeCycle`, `ash:timer cycle`, a `timeDate` that is not an
+  expression). A cycle is allowed on an `ash:timer kind="remind"` and on a
+  non-interrupting timer boundary (`cancelActivity="false"`), the two timers
+  that can fire more than once; on an escalation, an expiry, an interrupting
+  boundary or a catch event it is refused, because each of those fires once by
+  its nature. It must name its count, from 1 to 100: `R/PT1H` (unbounded) and
+  cron are refused, because a clock that never stops belongs in the host's
+  scheduler, not in a process instance. A literal cycle may not name its start
+  (`R3/2026-12-01T09:00:00Z/P1D`) for the reason a literal date is refused; an
+  expression may return one. A catch event's or boundary's single moment is a
+  `timeDuration` (an ISO 8601 literal or a FEEL expression beginning `=`) or a
+  `timeDate` written as an expression, such as `= subject.notice_at`; see
+  DESIGN.md §11.3. A literal date is refused because a date typed into a
+  definition published months before the token arrives is a deadline that may
+  already be in the past; an expression is computed from the case when the
+  timer is armed, and recorded as an instant. Two moments on one timer (BPMN
+  makes them mutually exclusive) are refused.
 - **A malformed `ash:timer`.** A timer with no `kind` or an unknown one, no
   moment or more than one (`minutes`, `hours`, `days`, `duration`, `date`), a
   `minutes`/`hours`/`days` that is not a whole number above zero, an unknown
@@ -80,11 +87,12 @@ The compiler rejects, each with the offending element's id in the error:
   claim, would leave the task open past its own deadline). Each used to be
   dropped, or to fail at run time, or to raise inside the compiler; each is now
   a compile error naming the node. A literal `date` is refused for the reason a
-  literal `timeDate` is. A `cycle` is refused until bounded cycles land.
+  literal `timeDate` is. A `cycle` is refused on anything but a reminder.
 - **A timer whose data is missing, at run time.** Not a compile error, because
   the data does not exist until the timer is armed: an expression returning
   `null`, a `date` with no time, a date-time with no offset, a duration of zero
-  or less, or a years-and-months duration where a duration is required is a
+  or less, a years-and-months duration where a duration is required, or a
+  cycle with no count is a
   *timer incident*. The instance fails at the node with a `:timer_unresolved`
   event naming the node, the timer, the expression and the reason, nothing is
   parked without its deadline, and the job is not retried, because the same

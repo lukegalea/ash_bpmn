@@ -197,6 +197,10 @@ defmodule AshBpmn.TenantTest.Subject do
     create :create do
       accept [:name, :notice_at]
     end
+
+    update :update do
+      accept [:name, :notice_at]
+    end
   end
 end
 

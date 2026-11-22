@@ -20,7 +20,13 @@ defmodule AshBpmn.Runtime.TimerMoment do
   alias Boxic.FEEL.DateTime, as: FeelDateTime
   alias Boxic.FEEL.Duration, as: FeelDuration
 
-  @type resolved :: %{due_at: DateTime.t(), late: boolean()}
+  @type resolved :: %{
+          required(:due_at) => DateTime.t() | nil,
+          required(:late) => boolean(),
+          optional(:cycle) => map(),
+          optional(:repetition) => pos_integer(),
+          optional(:missed) => non_neg_integer()
+        }
 
   @doc """
   Resolves a compiled timer (an `ash:timer` map or a catch spec) to its instant.
@@ -29,11 +35,101 @@ defmodule AshBpmn.Runtime.TimerMoment do
   fire it at once or skip it is the caller's rule (`ifPast`).
   """
   @spec resolve(map(), map(), DateTime.t()) :: {:ok, resolved()} | {:error, String.t()}
+  def resolve(%{"moment" => %{"form" => "cycle"} = moment}, expr_ctx, now) do
+    with {:ok, cycle} <- cycle(moment, expr_ctx, now) do
+      {:ok, Map.merge(%{late: false, cycle: cycle}, next_repetition(cycle, 1, now))}
+    end
+  end
+
   def resolve(spec, expr_ctx, now) do
     with {:ok, due_at} <- instant(spec, expr_ctx, now) do
       {:ok, %{due_at: due_at, late: DateTime.compare(due_at, now) == :lt}}
     end
   end
+
+  @doc """
+  The next repetition of a cycle at or after `now`, counting from repetition `from`.
+
+  `cycle` is `%{"count", "seconds", "anchor"}`, where repetition `k` is due at
+  `anchor + k * seconds`. Repetitions already past are missed, not fired: a cycle whose start
+  is in the past, or a firing that ran late, skips them and arms the next one still ahead, and
+  `missed` says how many. When none is left, `due_at` is nil, every repetition from `from` on
+  is missed, and `last_due_at` is when the last of them was due.
+  """
+  @spec next_repetition(map(), pos_integer(), DateTime.t()) :: %{
+          required(:due_at) => DateTime.t() | nil,
+          required(:repetition) => pos_integer(),
+          required(:missed) => non_neg_integer(),
+          optional(:last_due_at) => DateTime.t()
+        }
+  def next_repetition(%{"count" => count, "seconds" => seconds, "anchor" => anchor}, from, now) do
+    {:ok, anchor, _} = DateTime.from_iso8601(anchor)
+    elapsed = DateTime.diff(now, anchor, :microsecond)
+
+    # The first k with anchor + k * seconds >= now.
+    first_ahead = max(from, ceil_div(elapsed, seconds * 1_000_000))
+
+    if first_ahead > count do
+      %{
+        due_at: nil,
+        repetition: count,
+        missed: max(count - from + 1, 0),
+        last_due_at: DateTime.add(anchor, count * seconds)
+      }
+    else
+      %{
+        due_at: DateTime.add(anchor, first_ahead * seconds),
+        repetition: first_ahead,
+        missed: first_ahead - from
+      }
+    end
+  end
+
+  defp ceil_div(a, b) when a <= 0, do: div(a, b)
+  defp ceil_div(a, b), do: div(a + b - 1, b)
+
+  # A cycle with no start counts from the arming instant (`R3/PT1H` fires one, two and three
+  # hours after it is armed); a cycle with a start fires its first repetition at the start.
+  defp cycle(%{"count" => count, "seconds" => seconds}, _ctx, now),
+    do: {:ok, cycle_map(count, seconds, now)}
+
+  defp cycle(%{"expr" => expr}, ctx, now) do
+    with {:ok, value} <- evaluate(expr, ctx),
+         {:ok, text} <- cycle_text(value),
+         {:ok, parsed} <- parse_cycle(text) do
+      anchor = if parsed.start, do: DateTime.add(parsed.start, -parsed.seconds), else: now
+      {:ok, cycle_map(parsed.count, parsed.seconds, anchor)}
+    end
+  end
+
+  defp cycle_text(value) when is_binary(value), do: {:ok, value}
+
+  defp cycle_text(other),
+    do:
+      {:error,
+       "the expression returned #{describe(other)}, not a cycle such as \"R3/PT1H\" or " <>
+         "\"R3/2026-01-01T09:00:00Z/P1D\""}
+
+  defp parse_cycle(text) do
+    case AshBpmn.Compiler.Timer.parse_cycle(text) do
+      {:ok, parsed} -> {:ok, parsed}
+      {:error, reason} -> {:error, "the expression returned the cycle '#{text}': #{reason}"}
+    end
+  end
+
+  defp cycle_map(count, seconds, anchor),
+    do: %{"count" => count, "seconds" => seconds, "anchor" => DateTime.to_iso8601(anchor)}
+
+  @doc "The args a repeating timer carries: its cycle and the repetitions it skipped."
+  @spec cycle_args(map(), resolved()) :: map()
+  def cycle_args(args, %{cycle: cycle} = resolved) do
+    args
+    |> Map.put("cycle", cycle)
+    |> Map.put("repetition", resolved.repetition)
+    |> then(&if(resolved.missed > 0, do: Map.put(&1, "missed", resolved.missed), else: &1))
+  end
+
+  def cycle_args(args, _resolved), do: args
 
   @doc "Whether the timer's moment is an expression (and so moves under `reschedule_timers/2`)."
   @spec data_driven?(map()) :: boolean()

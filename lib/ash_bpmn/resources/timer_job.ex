@@ -187,7 +187,7 @@ defmodule AshBpmn.Resources.TimerJob do
         end
 
         attribute :kind, :atom do
-          constraints one_of: [:remind, :escalate, :expire, :catch]
+          constraints one_of: [:remind, :escalate, :expire, :catch, :boundary]
           allow_nil? false
           public? true
         end
