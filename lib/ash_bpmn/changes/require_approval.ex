@@ -18,7 +18,16 @@ defmodule AshBpmn.Changes.RequireApproval do
       deadline.
     * `:follow_up_in` — duration keyword list (optional), written to `follow_up_at`. Like
       `due_at`, it is data for a host's board and triggers nothing.
-    * `:escalate_in` — duration keyword list (optional)
+    * `:remind_in` — duration keyword list (optional). Delivers a `:remind` notice through
+      the configured `AshBpmn.TaskNotifier`.
+    * `:escalate_in` — duration keyword list (optional). Asks the resolver's `escalate/2`
+      whom to add (see "Escalation" in `AshBpmn.AssignmentResolver`).
+
+  `:remind_in` needs a task notifier, and `:escalate_in` needs the resolver's `escalate/2`
+  and a task notifier. Without them the approval is refused when it is created, and the
+  action that requested it fails: a reminder or escalation nobody wired up would otherwise
+  fire on schedule and tell nobody (DESIGN.md §11.8). This change has no publish step, so
+  creation is where it is checked.
     * `:expire_in` — duration keyword list (optional)
 
   ## Example
@@ -71,10 +80,65 @@ defmodule AshBpmn.Changes.RequireApproval do
     due_in = Keyword.get(opts, :due_in)
     follow_up_in = Keyword.get(opts, :follow_up_in)
     escalate_in = Keyword.get(opts, :escalate_in)
+    remind_in = Keyword.get(opts, :remind_in)
     expire_in = Keyword.get(opts, :expire_in)
 
     resources = DomainResolver.resolve!()
     resolver = Config.assignment_resolver!()
+
+    case unwired_timers(resolver, remind_in, escalate_in) do
+      [] ->
+        create_wired_approval(changeset, result, resources, resolver, %{
+          key: key,
+          name: name,
+          candidate_specs: candidate_specs,
+          exclusion_specs: exclusion_specs,
+          on_complete: on_complete,
+          due_in: due_in,
+          follow_up_in: follow_up_in,
+          remind_in: remind_in,
+          escalate_in: escalate_in,
+          expire_in: expire_in
+        })
+
+      reasons ->
+        {:error,
+         Ash.Error.Changes.InvalidChanges.exception(
+           fields: [:__approval__],
+           message:
+             "approval #{key} declares " <>
+               Enum.join(reasons, " and ") <> "; see DESIGN.md §11.8"
+         )}
+    end
+  end
+
+  # Fail closed (DESIGN.md §11.8), at creation because a change has no publish step.
+  defp unwired_timers(resolver, remind_in, escalate_in) do
+    notifier = Config.task_notifier()
+
+    [
+      remind_in && is_nil(notifier) && "remind_in, but no task notifier is configured",
+      escalate_in && is_nil(notifier) && "escalate_in, but no task notifier is configured",
+      escalate_in &&
+        not (Code.ensure_loaded?(resolver) and function_exported?(resolver, :escalate, 2)) &&
+        "escalate_in, but the assignment resolver does not implement escalate/2"
+    ]
+    |> Enum.filter(&is_binary/1)
+  end
+
+  defp create_wired_approval(changeset, result, resources, resolver, opts) do
+    %{
+      key: key,
+      name: name,
+      candidate_specs: candidate_specs,
+      exclusion_specs: exclusion_specs,
+      on_complete: on_complete,
+      due_in: due_in,
+      follow_up_in: follow_up_in,
+      remind_in: remind_in,
+      escalate_in: escalate_in,
+      expire_in: expire_in
+    } = opts
 
     subject = result
     actor = changeset.context[:actor]
@@ -171,6 +235,7 @@ defmodule AshBpmn.Changes.RequireApproval do
         due_at: due_at,
         follow_up_at: follow_up_at,
         now: now,
+        remind_in: remind_in,
         escalate_in: escalate_in,
         expires_at: expires_at,
         candidates: filtered_candidates,
@@ -202,6 +267,7 @@ defmodule AshBpmn.Changes.RequireApproval do
       due_at: due_at,
       follow_up_at: follow_up_at,
       now: now,
+      remind_in: remind_in,
       escalate_in: escalate_in,
       expires_at: expires_at,
       candidates: filtered_candidates,
@@ -242,7 +308,8 @@ defmodule AshBpmn.Changes.RequireApproval do
       end)
 
       # Schedule timers
-      timer_job_ids = schedule_approval_timers(task.id, now, escalate_in, expires_at, scope)
+      timer_job_ids =
+        schedule_approval_timers(task.id, now, {remind_in, escalate_in, expires_at}, scope)
 
       if timer_job_ids != [] do
         resources.human_task.attach_timers!(task, timer_job_ids, AshBpmn.Scope.engine(scope))
@@ -307,13 +374,14 @@ defmodule AshBpmn.Changes.RequireApproval do
   defp friendly_constraint_error(_error, _key), do: nil
 
   # "index" is the timer's position among an approval's timers -- 0 for the escalation, 1 for
-  # the expiry -- which with the task id, its key and the repetition makes the timer's key
-  # (DESIGN.md §11.4), as a diagram timer's position in its `ash:timers` does.
-  defp schedule_approval_timers(task_id, now, escalate_in, expires_at, scope) do
+  # the expiry, 2 for the reminder -- which with the task id, its key and the repetition makes
+  # the timer's key (DESIGN.md §11.4), as a diagram timer's position in its `ash:timers` does.
+  defp schedule_approval_timers(task_id, now, {remind_in, escalate_in, expires_at}, scope) do
     [
       escalate_in &&
         {"escalate", 0, DateTime.add(now, duration_to_minutes(escalate_in), :minute)},
-      expires_at && {"expire", 1, expires_at}
+      expires_at && {"expire", 1, expires_at},
+      remind_in && {"remind", 2, DateTime.add(now, duration_to_minutes(remind_in), :minute)}
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.map(fn {kind, index, scheduled_at} ->

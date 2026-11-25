@@ -46,8 +46,86 @@ defmodule AshBpmn.Compiler.Verify do
     #     entered only by that interruption, and leaving by exactly one flow.
     errors = errors ++ verify_boundary_events(nodes, flows)
 
+    # 11. Timers that reach people: a remind (or a cycle) needs a task notifier, and an
+    #     escalate without a signal needs the resolver's escalate/2 and a notifier.
+    errors = errors ++ verify_people_timers(nodes)
+
     errors
   end
+
+  # Fail closed at publication (DESIGN.md §11.8). A diagram that declares a reminder or an
+  # escalation the host has not wired up is refused where a person is looking at it, the
+  # lesson of the business rule task's resolver check applied to people. Without it the timer
+  # fires on schedule and tells nobody. Definitions already published keep running; their
+  # timers write `:notice_undelivered` instead.
+  defp verify_people_timers(nodes) do
+    notifier = AshBpmn.Config.task_notifier()
+
+    nodes
+    |> Enum.sort_by(fn {id, _node} -> id end)
+    |> Enum.flat_map(fn {id, node} ->
+      node
+      |> Map.get("timers", [])
+      |> List.wrap()
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {timer, index} -> people_timer_errors(id, timer, index, notifier) end)
+    end)
+  end
+
+  defp people_timer_errors(id, %{"kind" => kind} = timer, index, notifier) do
+    cond do
+      (kind == "remind" or Map.has_key?(timer, "cycle")) and is_nil(notifier) ->
+        [
+          Errors.error(
+            id,
+            "'#{id}' has a #{kind} timer (ash:timer #{index + 1}), which tells people, but no " <>
+              "task notifier is configured. Set `config :ash_bpmn, task_notifier: " <>
+              "MyApp.Bpmn.Notices` (an AshBpmn.TaskNotifier) first; see DESIGN.md §11.7."
+          )
+        ]
+
+      kind == "escalate" and timer["signal"] in [nil, ""] ->
+        escalate_errors(id, index, notifier)
+
+      true ->
+        []
+    end
+  end
+
+  defp people_timer_errors(_id, _timer, _index, _notifier), do: []
+
+  defp escalate_errors(id, index, notifier) do
+    resolver = Application.get_env(:ash_bpmn, :assignment_resolver)
+
+    missing =
+      [
+        !escalates?(resolver) &&
+          "the assignment resolver does not implement escalate/2 (whom to add)",
+        is_nil(notifier) &&
+          "no task notifier is configured (`config :ash_bpmn, task_notifier: ...`)"
+      ]
+      |> Enum.filter(& &1)
+
+    case missing do
+      [] ->
+        []
+
+      reasons ->
+        [
+          Errors.error(
+            id,
+            "'#{id}' has an escalate timer (ash:timer #{index + 1}) without a signal, but " <>
+              Enum.join(reasons, ", and ") <>
+              ". Wire both, or give the timer a signal to throw; see DESIGN.md §11.6."
+          )
+        ]
+    end
+  end
+
+  defp escalates?(nil), do: false
+
+  defp escalates?(resolver),
+    do: Code.ensure_loaded?(resolver) and function_exported?(resolver, :escalate, 2)
 
   # Publishing a `businessRuleTask` against a decision that does not exist should fail here,
   # where a person is looking at the diagram, rather than at three in the morning on the first

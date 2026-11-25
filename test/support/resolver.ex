@@ -64,28 +64,42 @@ defmodule AshBpmn.Test.Resolver do
   end
 
   @doc """
-  Handles an escalation, recording that it happened.
+  Answers whom an escalation adds, recording that it was asked.
 
   Implemented here on purpose, and its absence was a real bug rather than an omission: while
   this module had no `escalate/2`, every escalation in the suite raised
   `UndefinedFunctionError` inside `TimerWorker`'s clause-level rescue and reported success.
-  The test named "escalation timer fires" passed throughout, because all it asserted was that
-  the task was still open -- which is exactly what happens when nothing happens.
 
-  `set_escalate_result/1` stages a failure so the unhappy paths are reachable too. A double
-  that can only succeed tests only half of a contract whose interesting half is failure.
+  By default it adds `escalation_target/1` of the subject's `created_by_id` (the creator's
+  manager's manager), or nobody when the subject has no creator. `set_escalate_result/1`
+  stages any other answer, so the unhappy paths are reachable too.
 
-  Callback: `escalate(task :: map(), ctx :: map()) :: :ok | {:ok, map()} | {:error, term()}`
+  Callback: `escalate(task :: map(), ctx :: map()) :: {:ok, [principal]} | {:error, term()}`
   """
   def escalate(task, ctx) do
     Process.put({__MODULE__, :escalations}, escalations() ++ [task.id])
     Process.put({__MODULE__, :escalation_ctxs}, escalation_ctxs() ++ [ctx])
 
-    case Process.get({__MODULE__, :escalate_result}, :ok) do
+    case Process.get({__MODULE__, :escalate_result}, :default) do
       {:__raise__, message} -> raise message
+      :default -> {:ok, default_escalation(ctx)}
       result -> result
     end
   end
+
+  @doc "Whom the default `escalate/2` adds for a subject created by `creator_id`."
+  @spec escalation_target(Ash.UUID.t()) :: Ash.UUID.t()
+  def escalation_target(creator_id), do: creator_id |> manager_of() |> manager_of()
+
+  defp default_escalation(ctx) do
+    case ctx |> Map.get(:subject) |> creator_of() do
+      nil -> []
+      creator_id -> [%{type: :user, id: escalation_target(creator_id)}]
+    end
+  end
+
+  defp creator_of(%{created_by_id: id}) when is_binary(id), do: id
+  defp creator_of(_subject), do: nil
 
   @doc "Stages what `escalate/2` returns. `{:__raise__, msg}` makes it raise."
   def set_escalate_result(result), do: Process.put({__MODULE__, :escalate_result}, result)
@@ -255,6 +269,7 @@ defmodule AshBpmn.Test.FallbackResolver do
   """
 
   defdelegate exclusions(specs, ctx), to: AshBpmn.Test.Resolver
+  defdelegate escalate(task, ctx), to: AshBpmn.Test.Resolver
 
   def candidates(specs, ctx) do
     if Process.get({__MODULE__, :empty_candidates}),

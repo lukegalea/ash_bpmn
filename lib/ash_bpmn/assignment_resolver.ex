@@ -61,17 +61,48 @@ defmodule AshBpmn.AssignmentResolver do
 
     * `candidates/2` — resolve specs into principal records.
     * `exclusions/2` — resolve exclusion specs into principal ids to remove.
-    * `escalate/2` — (optional) handle escalation for a task. Its context
-      carries `:tenant`, `:instance`, `:subject` (loaded with the node's
-      `ash:load`), `:task`, `:candidates` (the task's current candidate
-      principals), `:exclusions` (`task.excluded_principal_ids`), `:timer`
-      (`kind`, `index`, `repetition` and `key`, stable across retries of one
-      firing) and `:actor`.
+    * `escalate/2` — (optional) whom an escalation adds. See "Escalation"
+      below. Optional because a host whose diagrams declare no escalation needs
+      none; a draft with an escalate timer is refused at publish without it.
     * `team_ids/2` — (optional) the teams a person acts for, so a `:team`
       candidate row is matched. See "Team candidates" below.
     * `no_eligible_candidate/2` — (optional) who gets a task when its
       candidates, minus its exclusions, leave nobody. See "A task nobody can
       act on" below.
+
+  ## Escalation
+
+  An `escalate` timer without `signal` asks `escalate/2` whom to add:
+
+      @impl true
+      def escalate(_task, %{tenant: tenant, subject: subject}),
+        do: {:ok, MyApp.Org.managers_of(subject.created_by_id, tenant)}
+
+  Return `{:ok, principals}` or `{:error, reason}`. The context carries
+  `:tenant` (resolve only in it), `:instance`, `:subject` (loaded with the
+  node's `ash:load`), `:task`, `:candidates` (the task's current candidate
+  principals), `:exclusions` (`task.excluded_principal_ids`), `:timer`
+  (`kind`, `index`, `repetition` and `key`, the same on every retry of one
+  firing) and `:actor`.
+
+  The engine, not the host (DESIGN.md §11.6):
+
+    1. subtracts the task's exclusions from the answer, so an escalation never
+       hands a task to someone maker-checker excluded;
+    2. writes the rest as new candidate rows in the task's tenant, and never
+       removes a candidate or the assignee: an escalation widens who may act;
+    3. records `:task_escalated` (the added ids, and the ids refused as
+       excluded), then delivers an `:escalated` notice through the configured
+       `AshBpmn.TaskNotifier` to the assignee or the candidates, plus the
+       people just added;
+    4. treats `{:ok, []}`, or an answer the exclusions empty, as an escalation
+       that reached nobody: an `:escalation_reached_nobody` event, not retried.
+
+  `{:error, _}`, a raise or any other shape (the old contract's bare `:ok`
+  included) is `:escalation_failed`, and the job is retried. A retry of the same
+  firing adds no rows twice. When a team is added, its members the task
+  excludes still can never act: the candidacy check subtracts excluded ids from
+  team membership at claim time.
 
   ## A task nobody can act on
 
@@ -136,8 +167,8 @@ defmodule AshBpmn.AssignmentResolver do
   @callback exclusions(specs :: [exclusion_spec()], ctx :: map()) ::
               {:ok, [Ash.UUID.t()]} | {:error, term()}
 
-  @doc "Handles escalation for a task (e.g. notify manager's manager)."
-  @callback escalate(task :: map(), ctx :: map()) :: :ok | {:ok, map()} | {:error, term()}
+  @doc "Whom an escalation adds to a task. See \"Escalation\" in the moduledoc."
+  @callback escalate(task :: map(), ctx :: map()) :: {:ok, [principal()]} | {:error, term()}
 
   @doc """
   The team ids a person acts for, matched against `:team` candidate rows.

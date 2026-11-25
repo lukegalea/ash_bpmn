@@ -24,13 +24,15 @@ defmodule AshBpmnDev.Resolver do
     {:ok, specs |> Enum.flat_map(&exclude(&1, ctx)) |> Enum.uniq()}
   end
 
+  # Whom an escalation adds: the manager of the subject's creator's manager.
+  # The engine adds them minus the task's exclusions, and tells them through
+  # `AshBpmnDev.Notices`.
   @impl true
-  def escalate(task, _ctx) do
-    # A real host would notify; the demo records the intent in the log the
-    # timer worker writes anyway.
-    require Logger
-    Logger.info("escalating task #{task.id} (#{task.name})")
-    :ok
+  def escalate(_task, ctx) do
+    case ctx |> subject_field("subject.created_by_id") |> People.manager_of() |> People.manager_of() do
+      nil -> {:ok, []}
+      id -> {:ok, [%{type: :user, id: id}]}
+    end
   end
 
   # A diagram's `ash:candidate` and a `RequireApproval` option both arrive in
