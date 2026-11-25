@@ -139,7 +139,7 @@ defmodule AshBpmn.Triggers.Correlator do
   def dispatch_event(event, subscriptions, ctx, opts \\ []) do
     redrive? = Keyword.get(opts, :redrive, false)
     raw_ctx = ctx.event_source.context(event)
-    feel_ctx = Feel.to_feel_value(raw_ctx)
+    feel_ctx = Feel.event_value(raw_ctx)
 
     if listening?(feel_ctx, subscriptions) do
       signal? = signal_event?(feel_ctx, ctx)
@@ -208,7 +208,7 @@ defmodule AshBpmn.Triggers.Correlator do
     {raw_ctx, owed} =
       case safe_context(ctx.event_source, event) do
         {:ok, raw_ctx} ->
-          feel_ctx = Feel.to_feel_value(raw_ctx)
+          feel_ctx = Feel.event_value(raw_ctx)
 
           if listening?(feel_ctx, subscriptions) do
             signal? = signal_event?(feel_ctx, ctx)

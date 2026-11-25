@@ -686,8 +686,13 @@ defmodule AshBpmn.Runtime.Interpreter do
     # `:decisions` (who decided each completed task in this instance, read once by the advance
     # worker) lets a resolver answer an exclusion such as `who="decided_by:Review_1"`, so a
     # second review can leave out whoever made the first. `:tenant` is the tenant to resolve in.
+    # `:routing` is what the token carries: the scalars earlier nodes promoted. A decision can
+    # name who decides (a role, the person who asked) and a clause can read it from here, so
+    # the answer stays the decision's rather than a second copy of it in the diagram.
     candidate_ctx =
-      Map.take(ctx, [:subject, :actor, :instance, :task, :assigns, :tenant, :decisions])
+      ctx
+      |> Map.take([:subject, :actor, :instance, :task, :assigns, :tenant, :decisions])
+      |> Map.put(:routing, current_routing(ctx))
 
     {:ok, candidates} = resolver.candidates(candidate_specs, candidate_ctx)
     {:ok, exclusions} = resolver.exclusions(exclusion_specs, candidate_ctx)
@@ -1340,7 +1345,10 @@ defmodule AshBpmn.Runtime.Interpreter do
                  instance_id: ctx[:instance].id,
                  node_id: target_node_id,
                  status: :active,
-                 fork_id: fork_id
+                 fork_id: fork_id,
+                 # Each branch carries what the token carried into the fork, as a sequence
+                 # flow does: a value promoted before it is read on every branch after it.
+                 routing: current_routing(ctx)
                }
              ]},
             {:jobs,

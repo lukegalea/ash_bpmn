@@ -105,7 +105,7 @@ defmodule AshBpmn.Runtime.LookbackWorker do
         Correlator.deliver_one(
           token,
           graph,
-          AshBpmn.Feel.to_feel_value(source.context(event)),
+          AshBpmn.Feel.event_value(source.context(event)),
           ctx
         )
 

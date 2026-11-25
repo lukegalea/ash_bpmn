@@ -302,4 +302,17 @@ defmodule AshBpmn.Feel do
     do: to_string(value)
 
   def to_feel_value(value, _depth), do: value
+
+  @event_depth 8
+
+  @doc """
+  An event context (`AshBpmn.EventSource.context/1`) as a FEEL value.
+
+  The same conversion as `to_feel_value/2`, deeper. The default depth bounds a record's
+  loaded relationships; an event context is already plain data, and its payload sits two
+  levels down (`data.<field>`), so a nested payload (`data.record.request.subject_id`) would
+  read as null at the default depth and a `match` on it would never fire.
+  """
+  @spec event_value(map()) :: term()
+  def event_value(context), do: to_feel_value(context, @event_depth)
 end

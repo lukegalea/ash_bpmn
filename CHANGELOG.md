@@ -169,6 +169,29 @@ Nothing has been released yet. Everything below is the initial body of work.
   `:notice_undelivered` plus `[:ash_bpmn, :notice, :undelivered]` telemetry.
   Nothing is delivered for a completed or cancelled task. No new columns.
 - `RequireApproval` accepts `remind_in`.
+- **A called child that ends at a terminate end releases its parent.** A
+  terminate end marked the child completed without waking the call activity
+  waiting on it, so the parent waited forever.
+
+- **A message catch can match on a payload nested deep in the event.** The
+  correlator read an event context at the record depth, so
+  `data.record.request.subject_id` was null and the catch never fired. Event
+  contexts are now read through `AshBpmn.Feel.event_value/1`, deep enough
+  for a nested payload.
+
+- **Every branch of a parallel fork carries the token's routing.** A value
+  promoted before a fork used to be lost on its branches, so a branch that
+  read it (a user task's candidates, a message catch's correlate) saw
+  nothing. A fork now copies the routing onto each branch, as a sequence
+  flow does. The same holds past a completed user task: the token that leaves
+  it carries the routing that entered it.
+
+- **A user task's clauses can read the token's routing.** The assignment
+  resolver's context now carries `:routing` for a diagram's user task: the
+  scalars earlier nodes promoted. A business rule task can name the role that
+  approves and the person who asked, and the task's candidates and exclusions
+  read them (`of="routing.approver_role"`, `who="routing.requested_by_id"`), so
+  the rule stays in the decision.
 
 - **A user task's due date and follow-up date are data (`ash:schedule`).**
   `<ash:schedule due="..." followUp="..."/>` inside a user task's
