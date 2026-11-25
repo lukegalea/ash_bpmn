@@ -298,6 +298,17 @@ gateway conditions, never in resolver specs, never in the invoker.
     bounded `cycle` on a reminder or a non-interrupting boundary, never with a
     host-side loop of reminders; an unbounded clock belongs in the host's
     scheduler.
+36. **A notifier says what happened to each recipient.** `deliver/2` answers
+    `:ok` only when every recipient was handed the notice. A recipient the host
+    will not try again (suppressed, rejected, no address, an ambiguous send) goes
+    in `{:ok, %{not_reached: [{principal, reason}]}}`; when nobody was reached and
+    nobody will be retried, answer `{:error, {:final, reason}}`. Answer
+    `{:error, reason}` only for what a retry can fix. Tell every recipient you
+    can before answering: one failed address must not silence the rest. On a
+    claimed task `notice.holder` holds it, and the people an escalation added can
+    act only if the holder delegates: write that, not "the task is yours". An
+    escalated person's claim or decision carries `"authority" => "escalation"`;
+    show it wherever the decision is shown as evidence.
 
 ## Testing
 

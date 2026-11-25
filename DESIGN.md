@@ -887,7 +887,12 @@ a deadline actually is.
 **What an expression can read.** The same context a gateway condition reads at that node:
 `subject` (only the paths the node declares in `ash:load`), `routing`, and on a user task
 `task.inserted_at`, `task.due_at` and `task.follow_up_at` once §11.5's schedule has been
-evaluated (so a reminder can be written as `= task.due_at - duration("P2D")`).
+evaluated (so a reminder can be written as `= task.due_at - duration("P2D")`). The order is
+fixed: the explicit due date; with none, the expire timers (the due date falls back to their
+instant); the follow-up date; then every other timer. So a reminder reads the due date even
+when it comes from the expiry, and the follow-up date whatever it is relative to. The one
+read left null, and so an incident, is the cycle itself: an expire timer that reads the due
+date its own instant supplies.
 Months and years are still refused in a duration *literal*; inside a date expression they
 are allowed (`= subject.renews_on_at - duration("P1M")` is calendar arithmetic FEEL defines),
 because the result is recorded as an instant before anyone relies on it. If `boxic_feel`
@@ -919,7 +924,10 @@ armed for live tasks and parked tokens of that subject's instances: each moved t
 ledger row is cancelled with reason `:rescheduled` and a new one armed, a timer whose new
 instant is past follows the `ifPast` rule, timers that have already fired are left alone,
 and one `:timers_rescheduled` event records old and new instants. A host calls it from the
-change that moves the date, in the same transaction.
+change that moves the date, in the same transaction. A duration, and a cycle with no start,
+count from the instant the timer was **first** armed (`"armed_at"`, kept in the ledger row
+through every repetition and reschedule), not from the latest row: with unchanged data a
+reschedule moves nothing, however often and however late it runs.
 
 **Cycles.** A `cycle` must name its count: `R/...` (unbounded) and cron are refused,
 and the count is at most 100. Cycles are allowed only where repeating means something: an
@@ -940,9 +948,16 @@ the activity has ended.
   idempotency key a host deduplicates notices on. It does not depend on the timer ledger
   being installed. The ledger is still recommended, and its row id is carried beside the key
   when it is.
-- **Nothing for work that is over.** A timer for a task that is completed or cancelled, or a
-  token that has moved on, fires nothing and delivers nothing; its ledger row is cancelled
-  with the reason the task ended.
+- **Nothing for work that is over.** A timer for a task that is completed, cancelled or
+  expired, or a token that has moved on, fires nothing and delivers nothing; its ledger row
+  is cancelled with the reason the task ended (`:task_decided`, `:task_cancelled`,
+  `:task_expired`, `:token_consumed`). The check is made again inside the firing's step,
+  under the instance's lock: a completion, cancel, claim or reschedule that committed while
+  the firing waited for the lock wins, and the firing does nothing.
+- **One firing per key, whatever handles it.** A remind, an escalation answered by the
+  resolver and an escalation that throws a signal all write their `:timer_fired` and ledger
+  row in the same step as their effect, so a redelivered firing finds them written and
+  neither reminds, adds people nor throws the signal twice.
 - **Start and completion deadlines.** An `ash:timer` may say `until="claimed"` (WS-HumanTask's
   start deadline): it is cancelled, with reason `:claimed`, when someone claims the task, and
   is not re-armed if the task is released. The default, `until="completed"`, is the
@@ -1012,19 +1027,36 @@ membership at claim time).
 An escalate timer with `signal="..."` keeps its current meaning: it throws the signal and
 calls no resolver.
 
+**A claimed task.** An escalate timer runs until the task is completed (`until="completed"`),
+so it can fire while someone holds the task. Escalation still only adds people: the holder
+keeps the task, and the people added become candidates who can act on it only if the holder
+delegates it to one of them. `:task_escalated` carries `"held_by"`, and the notice carries
+`holder`, so neither the record nor the host's words read as a transfer.
+
+**Authority an escalation gave.** Escalation widens who may act, and can reach past the role
+a control names. A claim or a decision by someone who was a candidate *only* because an
+escalation added them carries `"authority" => "escalation"` and the `"escalation_keys"` that
+added them on its `:task_claimed` and `:task_completed` events, so evidence of a decision
+says on what authority it was made.
+
 ### 11.7 Notices go through one host behaviour
 
 **[host-breaking only through §11.8]**
 
 ```elixir
 defmodule AshBpmn.TaskNotifier do
-  @callback deliver(notice :: AshBpmn.Notice.t(), ctx :: map()) :: :ok | {:error, term()}
+  @callback deliver(notice :: AshBpmn.Notice.t(), ctx :: map()) ::
+              :ok
+              | {:ok, %{not_reached: [{principal(), reason :: term()}]}}
+              | {:error, {:final, term()}}
+              | {:error, term()}
 end
 # config :ash_bpmn, task_notifier: MyApp.Bpmn.Notices
 ```
 
 `AshBpmn.Notice` carries `key` (§11.4), `kind` (`:remind | :escalated | :expired`), `task`,
-`recipients`, `added` (on `:escalated`), `due_at`, `late`, `repetition` and `tenant`.
+`recipients`, `added` (on `:escalated`), `due_at`, `late`, `repetition`, `tenant` and
+`holder` (who holds a claimed task, §11.6).
 `recipients` is computed by the engine: the assignee when the task is claimed, otherwise its
 candidate principals, plus on `:escalated` the principals just added, always minus the
 task's exclusions. The host turns principals into people and addresses, chooses the channel
@@ -1036,7 +1068,13 @@ What the engine guarantees: `deliver/2` is called after the timer's state change
 committed, so a failed delivery never undoes an escalation; it is called at least once per
 fired timer, again on every retry with the same `key`, and a host must make delivery
 idempotent by that key; success writes `:notice_delivered`; an error is retried by Oban and
-the final failure writes `:notice_failed`. An `expire` with a notifier configured delivers
+the final failure writes `:notice_failed`. A host that will not try again (an address it
+suppresses, a rejection, a send whose outcome it cannot know) answers
+`{:error, {:final, reason}}`: `:notice_failed` with `"final" => true` is written at once and
+nothing is retried. A host that reached some recipients and not others answers
+`{:ok, %{not_reached: [{principal, reason}]}}`: `:notice_delivered` names only those reached
+and lists the others under `"not_reached"`, and if that leaves nobody it is `:notice_failed`.
+A notice nobody received is never `:notice_delivered`. An `expire` with a notifier configured delivers
 an `:expired` notice; without one it still expires, since expiry routes the graph and does
 not depend on anyone being told.
 

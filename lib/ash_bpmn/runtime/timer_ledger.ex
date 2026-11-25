@@ -25,10 +25,27 @@ defmodule AshBpmn.Runtime.TimerLedger do
     end
   end
 
-  @doc "What a ledger row keeps of a timer's args."
+  @doc """
+  What a ledger row keeps of a timer's args. `"armed_at"` is the instant the timer was first
+  armed, kept through every repetition and every reschedule: it is what a duration, and a cycle
+  with no start, count from.
+  """
   def data(args) do
-    Map.take(args, ["key", "index", "repetition", "until", "late", "attached_to"])
+    Map.take(args, ["key", "index", "repetition", "until", "late", "attached_to", "armed_at"])
   end
+
+  @doc """
+  When the timer on `row` was first armed: its `"armed_at"`, or, for a row armed before that
+  was recorded, the row's own `inserted_at`.
+  """
+  def armed_at(%{data: %{"armed_at" => iso}} = row) when is_binary(iso) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, at, _} -> at
+      _ -> row.inserted_at
+    end
+  end
+
+  def armed_at(row), do: row.inserted_at
 
   @doc """
   The firing's own ledger row, when the job carries its id and the ledger is installed.

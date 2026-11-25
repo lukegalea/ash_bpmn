@@ -90,10 +90,17 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
     resources
     |> Step.transaction(
       fn _locked ->
-        if args["interrupting"] == false do
-          spawn_branch(resources, token, args, scope)
-        else
-          do_interrupt(resources, token, args, scope)
+        cond do
+          # Read again under the lock: a completion, cancel or reschedule that committed while
+          # this firing waited for it cancelled the row, and wins (DESIGN.md §11.4).
+          TimerLedger.cancelled?(resources, args, scope) ->
+            {:ok, :skipped}
+
+          args["interrupting"] == false ->
+            spawn_branch(resources, token, args, scope)
+
+          true ->
+            do_interrupt(resources, token, args, scope)
         end
       end,
       lock: {token.instance_id, scope}
@@ -119,11 +126,25 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
   #
   # A cycle's next repetition is armed in the same step, so a row already recorded fired means
   # a delivery of this job finished and a redelivery starts nothing.
+  #
+  # The token is read again under the lock: an activity that completed while this firing waited
+  # consumed it, and a branch beside an activity that is over is not a branch beside anything.
   defp spawn_branch(resources, token, args, scope) do
-    if match?(%{status: :fired}, TimerLedger.own_row(resources, args, scope)) do
-      {:ok, :already_fired}
-    else
-      do_spawn_branch(resources, token, args, scope)
+    token =
+      resources.token
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(id == ^token.id)
+      |> Ash.read_one!(Scope.engine(scope))
+
+    cond do
+      is_nil(token) or token.status not in [:waiting, :executing, :active] ->
+        {:ok, :not_live}
+
+      match?(%{status: :fired}, TimerLedger.own_row(resources, args, scope)) ->
+        {:ok, :already_fired}
+
+      true ->
+        do_spawn_branch(resources, token, args, scope)
     end
   end
 
@@ -227,10 +248,8 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
   defp route(resources, token, task, args, scope) do
     boundary_id = args["boundary_id"]
 
-    # The task's own remind and escalate timers are now pointless -- there is nobody left to
-    # remind about a task that no longer exists. Cancelled by owner through the meta index
-    # rather than by job id, because the ids live on the task row and the task may not have
-    # been reloaded since they were attached.
+    # Every pending job the token owns, found through the meta index. The task's own timers
+    # carry the task in their meta, not the token, and are cancelled with the task below.
     AshBpmn.Runtime.Oban.cancel_all(%{"token_id" => token.id})
 
     if task do
@@ -242,6 +261,13 @@ defmodule AshBpmn.Runtime.BoundaryTimerWorker do
     end
 
     record_fired(resources, token, args, scope)
+
+    # The interrupted task's own timers (reminders, escalations, its expiry) end with it, in
+    # Oban and in the ledger. Left `:scheduled`, the ledger would say they were still armed and
+    # `reschedule_timers/2` would re-arm them for a cancelled task.
+    if task do
+      AshBpmn.cancel_task_timers(resources, task, :task_cancelled, scope, boundaries: false)
+    end
 
     # The activity is over, so every other boundary timer it armed is too.
     TimerLedger.cancel_rows(

@@ -94,17 +94,25 @@ defmodule AshBpmn.Runtime.TimerWorker do
   # failed finds the writes made and only delivers, under the same key.
   defp fire_timer(resources, task, "remind", scope, job) do
     timer = timer_info(resources, task, job.args, scope)
-    fun = fn -> remind(resources, task, timer, scope, job.args) end
+    fun = fn -> remind(resources, task.id, timer, scope, job.args) end
 
-    case task.instance_id do
-      nil -> Step.transaction(resources, fun)
-      id -> Step.transaction(resources, fn _locked -> fun.() end, lock: {id, scope})
-    end
+    task
+    |> locked_step(resources, scope, fun)
     |> case do
-      {:ok, :reminded} -> deliver_remind(resources, task, timer, scope, job, :reminded)
-      {:ok, :already_fired} -> deliver_remind(resources, task, timer, scope, job, :already_fired)
-      {:error, :instance_gone} -> {:ok, :skipped}
-      {:error, reason} -> {:error, reason}
+      {:ok, {:reminded, task}} ->
+        deliver_remind(resources, task, timer, scope, job, :reminded)
+
+      {:ok, {:already_fired, task}} ->
+        deliver_remind(resources, task, timer, scope, job, :already_fired)
+
+      {:ok, :over} ->
+        {:ok, :skipped}
+
+      {:error, :instance_gone} ->
+        {:ok, :skipped}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -116,44 +124,55 @@ defmodule AshBpmn.Runtime.TimerWorker do
   # `escalate/2` reaches a person through whatever the host wired up, and a signal reaches
   # every process listening for that name. A modeller who wants the second should not have to
   # ask an Elixir developer for it.
-  defp fire_timer(resources, task, "escalate", scope, %Oban.Job{args: %{"signal" => name} = args})
+  #
+  # The throw is one step with its `:timer_fired` and its ledger row, under the instance's
+  # lock, so a redelivered firing finds them written and throws nothing: one escalation starts
+  # what it starts once. A throw that fails writes nothing in the step; `:escalation_failed` is
+  # recorded and Oban retries, and only the final attempt closes the ledger row.
+  defp fire_timer(
+         resources,
+         task,
+         "escalate",
+         scope,
+         %Oban.Job{args: %{"signal" => name} = args} = job
+       )
        when is_binary(name) and name != "" do
-    instance = load_instance(resources, task, scope)
+    timer = timer_info(resources, task, args, scope)
+    fun = fn -> throw_signal(resources, task.id, name, timer, scope, args) end
 
-    case AshBpmn.emit_signal(name,
-           instance: instance,
-           node_id: task.node_id,
-           payload: %{"task_id" => task.id, "escalated" => true},
-           actor: Map.get(scope, :actor),
-           tenant: Map.get(scope, :tenant)
-         ) do
-      {:ok, _signal} ->
-        record_task_event(
-          resources,
-          task,
-          :timer_fired,
-          scope,
-          Map.merge(firing_data(args), %{
-            "timer_kind" => "escalate",
-            "handler" => "signal",
-            "signal_name" => name
-          })
-        )
-
-        record_fire(resources, task, :escalate, scope, args)
+    task
+    |> locked_step(resources, scope, fun)
+    |> case do
+      {:ok, :escalated} ->
         {:ok, :escalated}
 
-      {:error, reason} ->
+      {:ok, :already_fired} ->
+        {:ok, :already_fired}
+
+      {:ok, :over} ->
+        {:ok, :skipped}
+
+      {:ok, {:failed, reason}} ->
         record_task_event(
           resources,
           task,
           :escalation_failed,
           scope,
-          Map.merge(firing_data(args), %{"timer_kind" => "escalate", "error" => inspect(reason)})
+          Map.merge(firing_data(args), %{
+            "timer_kind" => "escalate",
+            "key" => timer.key,
+            "error" => inspect(reason)
+          })
         )
 
-        record_fire(resources, task, :escalate, scope, args)
+        if final_attempt?(job), do: record_fire(resources, task, :escalate, scope, args)
         {:error, inspect(reason)}
+
+      {:error, :instance_gone} ->
+        {:ok, :skipped}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -210,12 +229,15 @@ defmodule AshBpmn.Runtime.TimerWorker do
   # told, so a notifier that fails retries the job, and the retry finds the task already
   # expired and only delivers (`resume_expired_notice/4`).
   defp fire_timer(resources, task, "expire", scope, job) do
-    fun = fn -> expire(resources, task, scope, job.args) end
-
-    case task.instance_id do
-      nil -> Step.transaction(resources, fun)
-      id -> Step.transaction(resources, fn _locked -> fun.() end, lock: {id, scope})
+    fun = fn ->
+      case current(resources, task.id, job.args, scope) do
+        :over -> {:ok, :skipped}
+        {:ok, task} -> expire(resources, task, scope, job)
+      end
     end
+
+    task
+    |> locked_step(resources, scope, fun)
     |> case do
       {:ok, {:ok, :expired}} -> deliver_expired(resources, task, scope, job)
       {:ok, result} -> result
@@ -228,30 +250,113 @@ defmodule AshBpmn.Runtime.TimerWorker do
     {:error, "unknown timer kind: #{kind}"}
   end
 
-  defp remind(resources, task, timer, scope, args) do
-    already? =
-      match?(%{status: :fired}, TimerLedger.own_row(resources, args, scope)) or
-        fired?(resources, task, timer.key, scope)
+  defp throw_signal(resources, task_id, name, timer, scope, args) do
+    with {:ok, task} <- current(resources, task_id, args, scope),
+         false <- fired_under_key?(resources, task, timer, args, scope) do
+      case AshBpmn.emit_signal(name,
+             instance: load_instance(resources, task, scope),
+             node_id: task.node_id,
+             payload: %{"task_id" => task.id, "escalated" => true},
+             actor: Map.get(scope, :actor),
+             tenant: Map.get(scope, :tenant)
+           ) do
+        {:ok, _signal} ->
+          record_task_event(
+            resources,
+            task,
+            :timer_fired,
+            scope,
+            Map.merge(firing_data(args), %{
+              "timer_kind" => "escalate",
+              "handler" => "signal",
+              "signal_name" => name,
+              "key" => timer.key
+            })
+          )
 
-    if already? do
-      :already_fired
+          record_fire(resources, task, :escalate, scope, args)
+          :escalated
+
+        {:error, reason} ->
+          {:failed, reason}
+      end
     else
-      resources.process_event.create!(
-        %{
-          instance_id: task.instance_id,
-          token_id: task.token_id,
-          node_id: task.node_id,
-          task_id: task.id,
-          kind: :timer_fired,
-          data: Map.merge(firing_data(args), %{"timer_kind" => "remind", "key" => timer.key})
-        },
-        Scope.engine(scope)
-      )
-
-      record_fire(resources, task, :remind, scope, args)
-      arm_next_repetition(resources, task, scope, args)
-      :reminded
+      :over -> :over
+      true -> :already_fired
     end
+  end
+
+  # This firing already happened: its ledger row says fired, or its key has a `:timer_fired`.
+  defp fired_under_key?(resources, task, timer, args, scope) do
+    match?(%{status: :fired}, TimerLedger.own_row(resources, args, scope)) or
+      fired?(resources, task, timer.key, scope)
+  end
+
+  defp final_attempt?(%Oban.Job{attempt: attempt, max_attempts: max})
+       when is_integer(attempt) and is_integer(max),
+       do: attempt >= max
+
+  defp final_attempt?(_job), do: false
+
+  # A firing's writes run as one step under the instance's lock, the lock a completion, a
+  # cancel, a claim and `reschedule_timers/2` also take. A standalone approval has no instance,
+  # and its step locks nothing.
+  defp locked_step(%{instance_id: nil}, resources, _scope, fun),
+    do: Step.transaction(resources, fun)
+
+  defp locked_step(%{instance_id: id}, resources, scope, fun),
+    do: Step.transaction(resources, fn _locked -> fun.() end, lock: {id, scope})
+
+  # Inside the step, under the instance's lock (DESIGN.md §11.4). What `perform/1` read before
+  # taking the lock is only a quick way out: a completion, cancel, claim or reschedule that
+  # committed while this firing waited for the lock is seen here, and wins. Nothing fires for a
+  # task that is over, a start deadline whose task was claimed, or a timer whose ledger row was
+  # cancelled.
+  defp current(resources, task_id, args, scope) do
+    task =
+      resources.human_task
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(id == ^task_id)
+      |> Ash.read_one!(Scope.engine(scope))
+
+    cond do
+      is_nil(task) or task.status in [:completed, :cancelled] -> :over
+      args["until"] == "claimed" and task.status != :open -> :over
+      TimerLedger.cancelled?(resources, args, scope) -> :over
+      true -> {:ok, task}
+    end
+  end
+
+  defp remind(resources, task_id, timer, scope, args) do
+    case current(resources, task_id, args, scope) do
+      :over ->
+        :over
+
+      {:ok, task} ->
+        if fired_under_key?(resources, task, timer, args, scope) do
+          {:already_fired, task}
+        else
+          {fire_remind(resources, task, timer, scope, args), task}
+        end
+    end
+  end
+
+  defp fire_remind(resources, task, timer, scope, args) do
+    resources.process_event.create!(
+      %{
+        instance_id: task.instance_id,
+        token_id: task.token_id,
+        node_id: task.node_id,
+        task_id: task.id,
+        kind: :timer_fired,
+        data: Map.merge(firing_data(args), %{"timer_kind" => "remind", "key" => timer.key})
+      },
+      Scope.engine(scope)
+    )
+
+    record_fire(resources, task, :remind, scope, args)
+    arm_next_repetition(resources, task, scope, args)
+    :reminded
   end
 
   # A redelivery of a firing whose writes and notice both happened does nothing. One whose
@@ -260,7 +365,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
   defp deliver_remind(resources, task, timer, scope, job, result) do
     if result == :already_fired and
          (is_nil(Config.task_notifier()) or
-            Notices.delivered?(resources, task, timer.key, scope)) do
+            Notices.settled?(resources, task, timer.key, scope)) do
       {:ok, :already_fired}
     else
       case Notices.deliver(resources, task, :remind, timer, [], scope, job, notice_opts(job)) do
@@ -312,7 +417,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
 
     if task.outcome == "expired" and not is_nil(Config.task_notifier()) and
          expired_by_timer?(resources, task, scope) and
-         not Notices.delivered?(resources, task, timer.key, scope) do
+         not Notices.settled?(resources, task, timer.key, scope) do
       deliver_expired(resources, task, scope, job)
     else
       {:ok, :skipped}
@@ -327,7 +432,7 @@ defmodule AshBpmn.Runtime.TimerWorker do
     |> Enum.any?()
   end
 
-  defp expire(resources, task, scope, args) do
+  defp expire(resources, task, scope, %Oban.Job{args: args} = job) do
     # Force complete the task with :expired outcome
     resources.human_task.force_complete!(task, :expired, Scope.engine(scope))
 
@@ -359,6 +464,15 @@ defmodule AshBpmn.Runtime.TimerWorker do
     )
 
     record_fire(resources, task, :expire, scope, args)
+
+    # The task is over, so its other timers are: reminders, escalations and the activity's
+    # boundary timers stop here, in Oban and in the ledger, with reason `:task_expired`. Left
+    # `:scheduled`, the ledger would say they were still armed, and `reschedule_timers/2` would
+    # re-arm a reminder for a task nobody can act on. This job is the one running, and is left
+    # alone.
+    own = TimerLedger.own_row(resources, args, scope)
+    running = Enum.reject([job.id, own && own.oban_job_id], &is_nil/1)
+    AshBpmn.cancel_task_timers(resources, task, :task_expired, scope, except: running)
 
     # If this is a process task (has token_id), advance the token
     if task.token_id do
@@ -467,17 +581,19 @@ defmodule AshBpmn.Runtime.TimerWorker do
   defp escalated(resources, task, principals, timer, scope, job, ctx) do
     fun = fn -> escalate_step(resources, task.id, principals, timer, scope, job.args) end
 
-    case task.instance_id do
-      nil -> Step.transaction(resources, fun)
-      id -> Step.transaction(resources, fn _locked -> fun.() end, lock: {id, scope})
-    end
+    task
+    |> locked_step(resources, scope, fun)
     |> case do
       {:ok, {:added, current, added}} ->
         opts = Keyword.put(notice_opts(job), :instance, ctx.instance)
 
-        case Notices.deliver(resources, current, :escalated, timer, added, scope, job, opts) do
-          :ok -> {:ok, :escalated}
-          {:error, message} -> {:error, message}
+        if Notices.settled?(resources, current, timer.key, scope) do
+          {:ok, :escalated}
+        else
+          case Notices.deliver(resources, current, :escalated, timer, added, scope, job, opts) do
+            :ok -> {:ok, :escalated}
+            {:error, message} -> {:error, message}
+          end
         end
 
       {:ok, :reached_nobody} ->
@@ -499,16 +615,14 @@ defmodule AshBpmn.Runtime.TimerWorker do
   # `:escalation_reached_nobody`) already written and reuses it, so a replayed firing adds one
   # set of rows, not two.
   defp escalate_step(resources, task_id, principals, timer, scope, args) do
-    task =
-      resources.human_task
-      |> Ash.Query.for_read(:read)
-      |> Ash.Query.filter(id == ^task_id)
-      |> Ash.read_one!(Scope.engine(scope))
+    case current(resources, task_id, args, scope) do
+      :over -> :over
+      {:ok, task} -> escalate_current(resources, task, principals, timer, scope, args)
+    end
+  end
 
+  defp escalate_current(resources, task, principals, timer, scope, args) do
     cond do
-      is_nil(task) or task.status in [:completed, :cancelled] ->
-        :over
-
       previous = keyed_event(resources, task, :task_escalated, timer.key, scope) ->
         {:added, task, Enum.map(previous.data["added"] || [], &principal_from_data/1)}
 
@@ -547,9 +661,13 @@ defmodule AshBpmn.Runtime.TimerWorker do
         )
       end)
 
+      # On a claimed task the people added cannot act until the holder delegates to one of
+      # them: escalation never takes a task from whoever holds it (DESIGN.md §11.6). The event
+      # names the holder, so a reader does not take the escalation for a transfer.
       record_task_event(resources, task, :task_escalated, scope, %{
         "key" => timer.key,
         "repetition" => timer.repetition,
+        "held_by" => held_by(task),
         "added" => Enum.map(added, &principal_data/1),
         "already_candidates" => Enum.map(remaining -- added, & &1.id),
         "refused" => Enum.map(refused, & &1.id)
@@ -619,6 +737,12 @@ defmodule AshBpmn.Runtime.TimerWorker do
     # catches is a handler that blew up and never a failure of ours.
     e -> {:failed, Exception.message(e)}
   end
+
+  defp held_by(%{status: :claimed, assignee_type: type, assignee_id: id})
+       when not is_nil(type) and not is_nil(id),
+       do: %{"type" => to_string(type), "id" => id}
+
+  defp held_by(_task), do: nil
 
   defp principal?(%{type: type, id: id}) when type in [:user, :team] and is_binary(id), do: true
   defp principal?(_), do: false

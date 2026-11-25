@@ -368,6 +368,140 @@ defmodule AshBpmn.NoticesTest do
     end
   end
 
+  describe "a notifier that cannot reach someone, and will not try again" do
+    test "a final failure is :notice_failed at once, and not retried" do
+      task = reminded_task!()
+      Notifier.answer_next({:error, {:final, :address_suppressed}})
+
+      assert {:ok, :reminded} = fire(task, "remind", attempt: 1)
+
+      assert [event] = events(task, :notice_failed)
+      assert event.data["final"] == true
+      assert event.data["error"] =~ "address_suppressed"
+      assert events(task, :notice_delivered) == []
+
+      # A redelivery of the same firing asks nobody again.
+      assert {:ok, :already_fired} = fire(task, "remind", attempt: 1)
+      assert length(Notifier.attempts()) == 1
+    end
+
+    test "a partial delivery names who was reached and who was not" do
+      creator = uuid()
+      task = reminded_task!(creator)
+      manager = Resolver.manager_of(creator)
+      target = Resolver.escalation_target(creator)
+      Notifier.answer_next({:ok, %{not_reached: [{%{type: :user, id: target}, :hard_bounce}]}})
+
+      assert {:ok, :escalated} = fire(task, "escalate")
+
+      assert [event] = events(task, :notice_delivered)
+      assert event.data["recipients"] == [%{"type" => "user", "id" => manager}]
+
+      assert event.data["not_reached"] == [
+               %{"type" => "user", "id" => target, "reason" => ":hard_bounce"}
+             ]
+
+      assert events(task, :notice_failed) == []
+    end
+
+    test "a partial delivery that reached nobody is :notice_failed, not delivered" do
+      creator = uuid()
+      task = reminded_task!(creator)
+      manager = Resolver.manager_of(creator)
+      Notifier.answer_next({:ok, %{not_reached: [{%{type: :user, id: manager}, :no_address}]}})
+
+      assert {:ok, :reminded} = fire(task, "remind")
+
+      assert events(task, :notice_delivered) == []
+      assert [event] = events(task, :notice_failed)
+      assert event.data["final"] == true
+
+      assert event.data["not_reached"] == [
+               %{"type" => "user", "id" => manager, "reason" => ":no_address"}
+             ]
+    end
+
+    test "the notifier is told which attempt is the last" do
+      task = reminded_task!()
+      Notifier.fail_times(1)
+
+      assert {:error, _} = fire(task, "remind", attempt: 1)
+      assert {:ok, :reminded} = fire(task, "remind", attempt: 3)
+
+      assert [{_notice, ctx}] = Notifier.delivered()
+      assert ctx.final_attempt? == true
+    end
+
+    test "a partial answer naming someone who was not a recipient is refused and retried" do
+      task = reminded_task!()
+      Notifier.answer_next({:ok, %{not_reached: [{%{type: :user, id: uuid()}, :x}]}})
+
+      assert {:error, message} = fire(task, "remind", attempt: 1)
+      assert message =~ "not a recipient"
+      assert events(task, :notice_delivered) == []
+    end
+  end
+
+  describe "an escalation of a claimed task" do
+    test "names who holds it, in the event and the notice" do
+      creator = uuid()
+      task = reminded_task!(creator)
+      manager = Resolver.manager_of(creator)
+      {:ok, _claimed} = AshBpmn.claim_task(task, actor: %{id: manager})
+
+      assert {:ok, :escalated} = fire(reload(task), "escalate")
+
+      assert [event] = events(task, :task_escalated)
+      assert event.data["held_by"] == %{"type" => "user", "id" => manager}
+
+      assert [notice] = Notifier.notices()
+      assert notice.holder == %{type: :user, id: manager}
+    end
+
+    test "an open task's escalation names no holder" do
+      task = reminded_task!()
+
+      assert {:ok, :escalated} = fire(task, "escalate")
+
+      assert [event] = events(task, :task_escalated)
+      assert event.data["held_by"] == nil
+      assert [%{holder: nil}] = Notifier.notices()
+    end
+  end
+
+  describe "a decision made with authority an escalation gave" do
+    test "says so on the claim and the decision" do
+      creator = uuid()
+      task = reminded_task!(creator)
+      target = Resolver.escalation_target(creator)
+
+      assert {:ok, :escalated} = fire(task, "escalate")
+      key = "#{task.id}/test_reminded_approval/0/1"
+
+      {:ok, _} = AshBpmn.complete_task(reload(task), outcome: :approved, actor: %{id: target})
+
+      assert [claimed] = events(task, :task_claimed)
+      assert claimed.data["authority"] == "escalation"
+      assert claimed.data["escalation_keys"] == [key]
+
+      assert [completed] = events(task, :task_completed)
+      assert completed.data["authority"] == "escalation"
+      assert completed.data["escalation_keys"] == [key]
+    end
+
+    test "a decision by a candidate the task started with says nothing of escalation" do
+      creator = uuid()
+      task = reminded_task!(creator)
+      assert {:ok, :escalated} = fire(task, "escalate")
+
+      manager = Resolver.manager_of(creator)
+      {:ok, _} = AshBpmn.complete_task(reload(task), outcome: :approved, actor: %{id: manager})
+
+      assert [completed] = events(task, :task_completed)
+      refute Map.has_key?(completed.data, "authority")
+    end
+  end
+
   describe "an escalation that reaches nobody" do
     test "{:ok, []} records :escalation_reached_nobody and is not retried" do
       task = reminded_task!()
@@ -517,6 +651,7 @@ defmodule AshBpmn.NoticesTest do
       end) || raise "no #{kind} job for #{task.id}"
 
     TimerWorker.perform(%Oban.Job{
+      id: record.id,
       args: record.args,
       scheduled_at: record[:scheduled_at],
       attempt: Keyword.get(opts, :attempt, 1),

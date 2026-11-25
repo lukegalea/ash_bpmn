@@ -73,13 +73,20 @@ defmodule AshBpmn.Runtime.CatchTimerWorker do
         # does: it is the ordinary way for this worker to end.
         opts = Keyword.put(Scope.engine(scope), :rollback_on_error?, false)
 
-        case resources.token.claim_waiting(token, opts) do
-          {:error, _} ->
-            # Killed, cancelled, or already woken. All three are ordinary.
-            {:ok, :not_waiting}
+        # Read again under the lock: a reschedule that moved this timer while the firing waited
+        # for the lock cancelled its row, and the token must wake at the new instant, not this
+        # one (DESIGN.md §11.3).
+        if AshBpmn.Runtime.TimerLedger.cancelled?(resources, args, scope) do
+          {:ok, :skipped}
+        else
+          case resources.token.claim_waiting(token, opts) do
+            {:error, _} ->
+              # Killed, cancelled, or already woken. All three are ordinary.
+              {:ok, :not_waiting}
 
-          {:ok, token} ->
-            advance(resources, token, args, scope)
+            {:ok, token} ->
+              advance(resources, token, args, scope)
+          end
         end
       end,
       lock: {token.instance_id, scope}

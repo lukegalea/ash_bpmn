@@ -59,6 +59,52 @@ Nothing has been released yet. Everything below is the initial body of work.
 
 ### Bug Fixes:
 
+- **`reschedule_timers/2` no longer moves a timer whose data has not changed.**
+  It counted a duration, and a cycle with no start, from the ledger row's
+  `inserted_at`, which every reschedule and every repetition rewrites, so each
+  call pushed those timers later by the time since the last write. Timers now
+  carry `"armed_at"`, the instant they were first armed, through every
+  repetition and reschedule, and reschedule counts from it. Rows armed before
+  this change count from their own `inserted_at` once, then keep that.
+- **A timer reads the task's follow-up date, and its due date when it comes
+  from the expiry.** `task.follow_up_at` was always null at arming, and
+  `task.due_at` was null when the due date fell back to the expire timer, so a
+  diagram written to DESIGN.md §11.3 failed every instance with
+  `:timer_unresolved`. The order is now: explicit due date, the expire timers
+  when the due date falls back to them, the follow-up date, every other timer.
+  The schedule is also resolved before the resolver is asked for candidates.
+- **A signal escalation fires once per key.** A redelivered `signal=` escalation
+  threw its signal again and wrote a second `:timer_fired`. The throw now
+  commits with its event and ledger row under the instance's lock, and a
+  redelivery finds them and does nothing. A throw that fails leaves the ledger
+  row scheduled for the retry and closes it only on the final attempt.
+- **A firing checks again, under the lock, that its work is still live.** A
+  remind, escalation, expiry, boundary or catch firing that read "open" and
+  "scheduled" before a completion, cancel, claim or reschedule committed used
+  to go ahead once it had the lock: a reminder for a completed task, a branch
+  beside a finished activity, a wake at an instant a reschedule had moved. The
+  task, the token and the ledger row are now read again inside the step.
+- **An expiry and an interrupting boundary end the task's other timers.** Their
+  reminder, escalation and boundary rows stayed `:scheduled`, so the ledger
+  said they were armed and `reschedule_timers/2` re-armed them for a dead task,
+  or refused the host's update because the dead task's expression no longer
+  resolved. Expiry cancels them with the new reason `:task_expired`, an
+  interrupting boundary with `:task_cancelled`.
+- **A notifier can say a notice failed for good, or reached only some people.**
+  `TaskNotifier.deliver/2` may answer `{:error, {:final, reason}}` (written at
+  once as `:notice_failed` with `"final" => true`, not retried) and
+  `{:ok, %{not_reached: [{principal, reason}]}}` (`:notice_delivered` names only
+  those reached; nobody reached is `:notice_failed`). A host that would not
+  retry had only `:ok` to answer, so a notice nobody received was recorded as
+  delivered. Both answers are additive: `:ok` and `{:error, reason}` mean what
+  they meant.
+- **An escalation of a claimed task names its holder, and a decision made on an
+  escalation's authority says so.** `:task_escalated` carries `"held_by"` and
+  `AshBpmn.Notice` a `holder`, because the people added cannot act until the
+  holder delegates. `:task_claimed` and `:task_completed` carry
+  `"authority" => "escalation"` and the `"escalation_keys"` when the actor was a
+  candidate only because an escalation added them.
+
 - **A malformed `ash:timer` is a compile error naming the node.** A timer with
   no unit or no kind was dropped, a misspelled kind compiled and failed at run
   time, `hours="2.5"` raised inside the compiler, and `signal` on a reminder
