@@ -31,6 +31,17 @@ defmodule AshBpmn.CallActivityTest do
     assert reload(parent).status == :completed
   end
 
+  # A terminate end completes the child as surely as its last branch ending does, and the
+  # call activity waiting on it carries on.
+  test "a child that ends at a terminate end releases the parent" do
+    {parent, _child_key} = start!(child: "terminate")
+
+    assert [child] = children_of(parent)
+    assert reload(child).status == :completed
+    assert invoked?("after_child")
+    assert reload(parent).status == :completed
+  end
+
   test "the child names the token waiting for it" do
     {parent, _} = start!(child: "approval")
 
@@ -374,7 +385,13 @@ defmodule AshBpmn.CallActivityTest do
   end
 
   defp start!(opts \\ []) do
-    child_fixture = if opts[:child] == "approval", do: "access_request.bpmn", else: "linear.bpmn"
+    child_fixture =
+      case opts[:child] do
+        "approval" -> "access_request.bpmn"
+        "terminate" -> "terminate.bpmn"
+        _ -> "linear.bpmn"
+      end
+
     child_key = key()
     publish!(child_fixture, child_key)
 

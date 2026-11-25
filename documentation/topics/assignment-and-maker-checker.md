@@ -92,6 +92,24 @@ perfectly good clause — and a library that rewrote those strings would be
 deciding what a clause means. Write the same spelling in the diagram and in the
 change options, and one resolver clause serves both.
 
+## A decision names who decides
+
+A user task in a diagram also hands the resolver the token's `routing`: the
+scalars earlier nodes promoted. That is how a decision says who approves,
+without the rule being copied into the diagram. A business rule task promotes
+its answer and the user task's clauses read it:
+
+```xml
+<ash:candidate kind="role" of="routing.approver_role"/>
+<ash:exclusion who="routing.requested_by_id"/>
+```
+
+The engine passes the routing and reads neither clause. What
+`of="routing.approver_role"` means is still your resolver's, exactly as
+`of="subject.created_by_id"` is. A routing value is a scalar the diagram
+declared, never business data, and a standalone `RequireApproval` gate has no
+token and so no `routing`.
+
 ## Resolution and re-checking
 
 Your resolver interprets those opaque specs against a live org chart. The rows

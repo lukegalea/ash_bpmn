@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Luke Galea
+SPDX-License-Identifier: MIT
+-->
+<bpmn2:definitions xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                   xmlns:ash="https://github.com/lukegalea/ash_bpmn/ns"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   id="Definitions_decided_assignment">
+  <bpmn2:process id="Process_decided_assignment" isExecutable="true">
+    <bpmn2:startEvent id="Start">
+      <bpmn2:outgoing>F_start</bpmn2:outgoing>
+    </bpmn2:startEvent>
+
+    <!-- The decision names who decides: a role, and the person who asked. -->
+    <bpmn2:businessRuleTask id="WhoDecides" name="Who decides?">
+      <bpmn2:extensionElements>
+        <ash:decision ref="approval.who" binding="latest"/>
+        <ash:inputs>
+          <ash:input name="amount" from="subject.amount"/>
+        </ash:inputs>
+        <ash:promote>
+          <ash:signal name="approver_role" required="true"/>
+          <ash:signal name="requested_by_id" required="true"/>
+        </ash:promote>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_start</bpmn2:incoming>
+      <bpmn2:outgoing>F_decided</bpmn2:outgoing>
+    </bpmn2:businessRuleTask>
+
+    <bpmn2:userTask id="Approve" name="Approve">
+      <bpmn2:extensionElements>
+        <ash:taskConfig>
+          <ash:candidates>
+            <ash:candidate kind="role" of="routing.approver_role"/>
+            <ash:candidate kind="user" of="subject.created_by_id"/>
+          </ash:candidates>
+          <ash:exclusions>
+            <ash:exclusion who="routing.requested_by_id"/>
+          </ash:exclusions>
+          <ash:outcomes>
+            <ash:outcome name="approved"/>
+          </ash:outcomes>
+        </ash:taskConfig>
+      </bpmn2:extensionElements>
+      <bpmn2:incoming>F_decided</bpmn2:incoming>
+      <bpmn2:outgoing>F_approved</bpmn2:outgoing>
+    </bpmn2:userTask>
+
+    <bpmn2:endEvent id="End">
+      <bpmn2:incoming>F_approved</bpmn2:incoming>
+    </bpmn2:endEvent>
+
+    <bpmn2:sequenceFlow id="F_start" sourceRef="Start" targetRef="WhoDecides"/>
+    <bpmn2:sequenceFlow id="F_decided" sourceRef="WhoDecides" targetRef="Approve"/>
+    <bpmn2:sequenceFlow id="F_approved" sourceRef="Approve" targetRef="End"/>
+  </bpmn2:process>
+</bpmn2:definitions>

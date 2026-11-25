@@ -896,6 +896,9 @@ defmodule AshBpmn.Runtime.AdvanceWorker do
         )
 
         record_event(resources, ctx, :instance_completed, %{"outcome" => outcome})
+        # A terminated child has completed as surely as one whose last branch ended, and its
+        # call activity is waiting on it the same way.
+        wake_parent(resources, ctx[:instance], outcome, scope)
 
       {:complete_instance, outcome} ->
         # A join this branch's end has stranded fires first, so its token is live when the

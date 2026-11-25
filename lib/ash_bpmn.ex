@@ -1281,7 +1281,10 @@ defmodule AshBpmn do
           %{
             instance_id: instance.id,
             node_id: next_node_id,
-            status: :active
+            status: :active,
+            # The routing the token carried into the task carries on past it, as it does past
+            # every other node: a value promoted before an approval is read after it.
+            routing: token.routing || %{}
           },
           Scope.engine(scope)
         )

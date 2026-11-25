@@ -9,7 +9,7 @@ defmodule AshBpmn.AssignmentResolver do
   from a diagram's `ash:taskConfig` or from a `RequireApproval` change — into
   concrete principal ids. The engine passes a context map with `:subject`,
   `:actor`, `:instance`, `:task`, `:assigns`, `:tenant` (the tenant to resolve
-  in) and `:decisions`.
+  in), `:decisions` and, for a diagram's user task, `:routing`.
 
   `:decisions` maps the node id of each task already completed in the instance
   to `%{decided_by_id: id, outcome: outcome, task_id: id}` (the latest, for a
@@ -17,6 +17,20 @@ defmodule AshBpmn.AssignmentResolver do
   exclusion name an earlier decider (`<ash:exclusion who="decided_by:Review_1"/>`,
   a spelling the resolver chooses), so a second review can leave out whoever
   made the first. A standalone approval passes `%{}`.
+
+  `:routing` is the scalars the token carries, which earlier nodes promoted. It
+  is how a decision names who decides. A business rule task promotes its answer
+  (a role, the person who asked), and a clause reads it, so the rule stays in
+  the decision rather than being copied into the diagram:
+
+      <ash:candidate kind="role" of="routing.approver_role"/>
+      <ash:exclusion who="routing.requested_by_id"/>
+
+  What `of` and `who` mean is still the resolver's: the engine hands it the
+  token's routing and does not read the clause. Like every other value on a
+  token, a routing value is a scalar the diagram declared, never business
+  data. A standalone approval (`AshBpmn.Changes.RequireApproval`) has no token,
+  so its context has no `:routing`.
 
   ## One spec shape
 

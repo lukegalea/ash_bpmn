@@ -79,6 +79,28 @@ defmodule AshBpmn.MessageCatchTest do
       assert event.data["resource"] == "payment"
     end
 
+    test "a match can read a field nested deep in the event's payload" do
+      xml =
+        String.replace(
+          File.read!("test/fixtures/message_catch.bpmn"),
+          ~s(match="data.invoice_id"),
+          ~s(match="data.record.request.invoice_id")
+        )
+
+      {:ok, subject} =
+        AshBpmn.Test.Subject.create!(%{name: "msg", amount: 0, is_privileged: false})
+
+      {:ok, instance} =
+        AshBpmn.start_instance(AshBpmn.Test.Domain,
+          definition: publish_xml!(xml),
+          subject: subject
+        )
+
+      deliver!(%{record: %{request: %{invoice_id: subject.id}}})
+
+      assert reload(instance).status == :completed
+    end
+
     test "an event carrying a different key leaves the token waiting" do
       {instance, _subject} = start!()
 
