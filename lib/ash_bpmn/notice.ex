@@ -20,6 +20,10 @@ defmodule AshBpmn.Notice do
     * `late` — true when the timer fired after its moment had passed.
     * `repetition` — 1 for the first firing of a timer.
     * `tenant` — the task's tenant, or nil.
+    * `holder` — who holds the task when it is claimed (`%{type:, id:}`), or nil when it is
+      open. Escalation only adds people (DESIGN.md §11.6): on a claimed task the principals in
+      `added` become candidates, but only the holder can act on it until the holder delegates
+      it to one of them. A host's words must say so, not that the task was passed to them.
   """
 
   @enforce_keys [:key, :kind, :task, :recipients]
@@ -29,6 +33,7 @@ defmodule AshBpmn.Notice do
     :task,
     :due_at,
     :tenant,
+    :holder,
     recipients: [],
     added: [],
     late: false,
@@ -46,6 +51,7 @@ defmodule AshBpmn.Notice do
           due_at: DateTime.t() | nil,
           late: boolean(),
           repetition: pos_integer(),
-          tenant: term()
+          tenant: term(),
+          holder: AshBpmn.AssignmentResolver.principal() | nil
         }
 end

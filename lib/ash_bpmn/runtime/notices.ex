@@ -9,6 +9,11 @@ defmodule AshBpmn.Runtime.Notices do
   delivery that fails never undoes them. What is recorded:
 
     * `:notice_delivered` when the notifier answers `:ok`;
+    * `:notice_delivered` naming only the principals reached, with `"not_reached"`, when it
+      answers `{:ok, %{not_reached: [{principal, reason}]}}`; `:notice_failed` with
+      `"final" => true` when that leaves nobody reached;
+    * `:notice_failed` with `"final" => true`, at once and not retried, when it answers
+      `{:error, {:final, reason}}`: the host has decided not to try again;
     * nothing but the returned error when it fails and the job has attempts left, so Oban
       retries the job and delivery is asked again with the same key;
     * `:notice_failed` when it fails on the job's final attempt;
@@ -51,7 +56,8 @@ defmodule AshBpmn.Runtime.Notices do
       due_at: Map.get(task, :due_at),
       late: Keyword.get(opts, :late, false),
       repetition: timer.repetition,
-      tenant: tenant(task, scope)
+      tenant: tenant(task, scope),
+      holder: holder(task)
     }
 
     case Config.task_notifier() do
@@ -66,12 +72,30 @@ defmodule AshBpmn.Runtime.Notices do
           tenant: notice.tenant,
           instance: Keyword.get(opts, :instance),
           timer: timer,
-          actor: Map.get(scope, :actor)
+          actor: Map.get(scope, :actor),
+          # The last attempt Oban will make: a host that retries a recipient it missed answers
+          # with what it reached instead, so the record names who was and who was not told.
+          final_attempt?: final_attempt?(job)
         }
 
         case call(notifier, notice, ctx) do
           :ok ->
             record(resources, task, :notice_delivered, notice, %{}, scope)
+            :ok
+
+          {:partial, not_reached} ->
+            partial(resources, task, notice, not_reached, scope)
+
+          {:final, message} ->
+            record(
+              resources,
+              task,
+              :notice_failed,
+              notice,
+              %{"error" => message, "final" => true},
+              scope
+            )
+
             :ok
 
           {:failed, message} ->
@@ -82,6 +106,47 @@ defmodule AshBpmn.Runtime.Notices do
             {:error, message}
         end
     end
+  end
+
+  # Some recipients were reached and some were not, and the host will not try those again.
+  # Recorded as delivered to the ones reached, naming the others; reaching nobody is a failure.
+  defp partial(resources, task, notice, not_reached, scope) do
+    missed = Enum.map(not_reached, fn {principal, _reason} -> key(principal) end)
+    reached = Enum.reject(notice.recipients, &(key(&1) in missed))
+
+    detail = %{
+      "not_reached" =>
+        Enum.map(not_reached, fn {principal, reason} ->
+          principal |> principal_data() |> Map.put("reason", inspect(reason, limit: 5))
+        end)
+    }
+
+    if reached == [] do
+      record(resources, task, :notice_failed, notice, Map.put(detail, "final", true), scope)
+    else
+      record(resources, task, :notice_delivered, %{notice | recipients: reached}, detail, scope)
+    end
+
+    :ok
+  end
+
+  defp key(%{type: type, id: id}), do: {to_string(type), id}
+
+  @doc """
+  Whether the notice with this key is settled for the task: delivered, or failed with a final
+  answer the host will not retry. A redelivered firing whose notice is settled asks nobody
+  again.
+  """
+  @spec settled?(map(), map(), String.t(), Scope.t()) :: boolean()
+  def settled?(resources, task, key, scope) do
+    resources.process_event
+    |> Ash.Query.for_read(:read)
+    |> Ash.Query.filter(task_id == ^task.id and kind in [:notice_delivered, :notice_failed])
+    |> Ash.read!(Scope.engine(scope))
+    |> Enum.any?(fn event ->
+      event.data["key"] == key and
+        (event.kind == :notice_delivered or event.data["final"] == true)
+    end)
   end
 
   @doc """
@@ -152,14 +217,52 @@ defmodule AshBpmn.Runtime.Notices do
 
   defp call(notifier, notice, ctx) do
     case notifier.deliver(notice, ctx) do
-      :ok -> :ok
-      {:error, reason} -> {:failed, inspect(reason, limit: 5)}
-      other -> {:failed, "deliver/2 returned an undeclared shape: #{inspect(other, limit: 5)}"}
+      :ok ->
+        :ok
+
+      {:ok, %{not_reached: not_reached}} when is_list(not_reached) ->
+        partial_answer(notice, not_reached)
+
+      {:error, {:final, reason}} ->
+        {:final, inspect(reason, limit: 5)}
+
+      {:error, reason} ->
+        {:failed, inspect(reason, limit: 5)}
+
+      other ->
+        {:failed, "deliver/2 returned an undeclared shape: #{inspect(other, limit: 5)}"}
     end
   rescue
     # Narrow by construction: this wraps the host's callback and nothing else.
     e -> {:failed, Exception.message(e)}
   end
+
+  # A partial answer names recipients of this notice, each with a reason. Anything else is an
+  # answer the engine cannot record truthfully, and is retried like any other failure.
+  defp partial_answer(notice, not_reached) do
+    recipients = Enum.map(notice.recipients, &key/1)
+
+    cond do
+      not Enum.all?(not_reached, &match?({%{type: _, id: _}, _reason}, &1)) ->
+        {:failed,
+         "deliver/2 answered not_reached entries of an undeclared shape: " <>
+           inspect(not_reached, limit: 5) <> "; each is {principal, reason}"}
+
+      not Enum.all?(not_reached, fn {principal, _} -> key(principal) in recipients end) ->
+        {:failed,
+         "deliver/2 answered not_reached naming a principal that is not a recipient of " <>
+           "this notice: " <> inspect(not_reached, limit: 5)}
+
+      true ->
+        {:partial, Enum.uniq_by(not_reached, fn {principal, _} -> key(principal) end)}
+    end
+  end
+
+  defp holder(%{status: :claimed, assignee_type: type, assignee_id: id})
+       when not is_nil(type) and not is_nil(id),
+       do: %{type: type, id: id}
+
+  defp holder(_task), do: nil
 
   defp record(resources, task, kind, notice, extra, scope) do
     resources.process_event.create!(

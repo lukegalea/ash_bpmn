@@ -7,7 +7,9 @@ defmodule AshBpmn.Test.Notifier do
   is handed, in the calling process, as the resolver double does.
 
   `fail_times/2` makes the next `n` deliveries fail with a reason, so a retry is reachable;
-  `fail_always/1` makes every delivery fail; `raise_next/1` makes the next one raise.
+  `fail_always/1` makes every delivery fail; `raise_next/1` makes the next one raise;
+  `answer_next/1` makes the next one answer anything, such as a final failure or a partial
+  delivery.
   """
 
   @behaviour AshBpmn.TaskNotifier
@@ -27,6 +29,10 @@ defmodule AshBpmn.Test.Notifier do
       {:raise, message} ->
         Process.delete({__MODULE__, :stage})
         raise message
+
+      {:answer, answer} ->
+        Process.delete({__MODULE__, :stage})
+        answer
 
       _ ->
         Process.put({__MODULE__, :delivered}, delivered() ++ [{notice, ctx}])
@@ -53,6 +59,9 @@ defmodule AshBpmn.Test.Notifier do
   @doc "Every delivery answers `{:error, reason}`."
   def fail_always(reason \\ :channel_down),
     do: Process.put({__MODULE__, :stage}, {:always, reason})
+
+  @doc "The next delivery answers `answer` as it is, recording nothing as delivered."
+  def answer_next(answer), do: Process.put({__MODULE__, :stage}, {:answer, answer})
 
   @doc "The next delivery raises."
   def raise_next(message), do: Process.put({__MODULE__, :stage}, {:raise, message})

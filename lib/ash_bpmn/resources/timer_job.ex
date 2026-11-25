@@ -236,6 +236,10 @@ defmodule AshBpmn.Resources.TimerJob do
                         # not left to infer it from an absence.
                         :task_decided,
                         :task_cancelled,
+                        # The task's expire timer fired: the task is over without a decision,
+                        # so its other timers (reminders, escalations, boundaries) stopped with
+                        # it.
+                        :task_expired,
                         # The branch was pruned out from under the timer -- an interrupting
                         # boundary event, a terminate end event, or a cancelled instance.
                         :token_consumed,

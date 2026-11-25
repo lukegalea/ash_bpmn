@@ -253,6 +253,7 @@ defmodule AshBpmn do
     task = reload_task!(resources, task, scope)
 
     principals = Candidacy.for_actor(actor, scope)
+    authority = escalation_authority(resources, task, principals, scope)
 
     # A task may be completed without an explicit claim, by a candidate; record the implicit
     # claim so the event log still shows who took it before deciding. A claimed task is
@@ -283,11 +284,14 @@ defmodule AshBpmn do
       resources,
       completed,
       :task_completed,
-      %{
-        "outcome" => outcome,
-        "decided_by_id" => actor.id,
-        "comment" => comment
-      },
+      Map.merge(
+        %{
+          "outcome" => outcome,
+          "decided_by_id" => actor.id,
+          "comment" => comment
+        },
+        authority
+      ),
       scope
     )
 
@@ -468,7 +472,50 @@ defmodule AshBpmn do
   end
 
   defp record_claim_event(resources, task, actor, scope) do
-    record_task_event(resources, task, :task_claimed, %{"assignee_id" => actor.id}, scope)
+    authority = escalation_authority(resources, task, Candidacy.for_actor(actor, scope), scope)
+
+    record_task_event(
+      resources,
+      task,
+      :task_claimed,
+      Map.merge(%{"assignee_id" => actor.id}, authority),
+      scope
+    )
+  end
+
+  # Whether the actor may act on this task only because an escalation added them (DESIGN.md
+  # §11.6). Escalation widens who may act, which can reach past the role a control names; a
+  # decision made on that authority must say so, or the record reads as though a designated
+  # candidate decided. `%{"authority" => "escalation", "escalation_keys" => [...]}` when none
+  # of the actor's principals was a candidate before an escalation added it, `%{}` otherwise.
+  #
+  # Reads the task's `:task_escalated` events and candidate rows. This is the completion and
+  # claim path, not a policy check.
+  defp escalation_authority(resources, task, principals, scope) do
+    added =
+      resources.process_event
+      |> Ash.Query.for_read(:read)
+      |> Ash.Query.filter(task_id == ^task.id and kind == :task_escalated)
+      |> Ash.Query.sort(recorded_at: :asc)
+      |> Ash.read!(Scope.engine(scope))
+      |> Enum.flat_map(fn event ->
+        Enum.map(event.data["added"] || [], &{&1["id"], event.data["key"]})
+      end)
+
+    with [_ | _] <- added,
+         ids = Candidacy.ids(principals),
+         added_ids = Enum.map(added, &elem(&1, 0)),
+         original =
+           resources
+           |> AshBpmn.Runtime.Notices.candidates(task, scope)
+           |> Enum.map(& &1.id)
+           |> Kernel.--(added_ids),
+         false <- Enum.any?(ids, &(&1 in original)),
+         [_ | _] = keys <- for({id, key} <- added, id in ids, uniq: true, do: key) do
+      %{"authority" => "escalation", "escalation_keys" => keys}
+    else
+      _ -> %{}
+    end
   end
 
   # Cancels every outstanding timer job on a task and records a
@@ -481,12 +528,18 @@ defmodule AshBpmn do
   # be told why; the Pruner then deletes the row entirely. So without this, "the escalation
   # never fired" and "the escalation stopped because somebody decided at 14:07" are the same
   # absence a week later.
-  defp cancel_task_timers(resources, task, reason, scope) do
+  #
+  # Also called by the expiry and by an interrupting boundary, which end a task from inside a
+  # timer's own job: `except:` names that job, which must not be cancelled while it runs, and
+  # `boundaries: false` leaves the token's boundary timers to the boundary that is routing.
+  @doc false
+  @spec cancel_task_timers(map(), map(), atom(), Scope.t(), keyword()) :: :ok
+  def cancel_task_timers(resources, task, reason, scope, opts \\ []) do
     # Cancelling the Oban jobs still depends on having their ids, because that is what a
     # cancel addresses. The ledger sweep below deliberately does NOT -- a task whose ids were
     # never persisted (the window between insert and attach) is exactly the case the ledger
     # exists to cover, and gating it on the same empty list would blind it there.
-    case task.timer_job_ids || [] do
+    case (task.timer_job_ids || []) -- List.wrap(opts[:except]) do
       [] ->
         :ok
 
@@ -496,7 +549,9 @@ defmodule AshBpmn do
         record_task_event(resources, task, :timer_cancelled, %{"job_ids" => job_ids}, scope)
     end
 
-    cancel_boundary_timers(resources, task, reason, scope)
+    if Keyword.get(opts, :boundaries, true),
+      do: cancel_boundary_timers(resources, task, reason, scope)
+
     cancel_ledger_rows(resources, task, reason, scope)
   end
 

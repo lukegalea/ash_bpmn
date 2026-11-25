@@ -663,18 +663,51 @@ defmodule AshBpmn.Runtime.Interpreter do
   defp user_task(graph, node_id, node, ctx) do
     now = DateTime.utc_now()
 
-    # The explicit due date first, so a timer can be written relative to it
-    # (`= task.due_at - duration("P2D")`); then the timers; then the rest of the schedule, whose
-    # due date falls back to the expire timer's instant (DESIGN.md §11.3, §11.5).
-    with {:ok, due_at} <- explicit_due(node_id, node["schedule"], ctx, now),
-         {:ok, timer_specs} <-
-           task_timer_specs(node_id, node["timers"] || [], ctx, now, due_at),
+    with {:ok, timer_specs, dates} <- task_deadlines(node_id, node, ctx, now),
          {:ok, boundary_jobs} <- boundary_timer_jobs(graph, node_id, ctx, now) do
-      user_task(graph, node_id, node, ctx, {timer_specs, boundary_jobs, now})
+      user_task(graph, node_id, node, ctx, {timer_specs, boundary_jobs, dates})
     end
   end
 
-  defp user_task(graph, node_id, node, ctx, {timer_specs, boundary_jobs, now}) do
+  # The task's dates and timers, in the one order in which each can read what the ones before
+  # it resolved (DESIGN.md §11.3, §11.5):
+  #
+  #   1. the explicit due date;
+  #   2. with none, the expire timers, because the due date falls back to the expiry instant;
+  #   3. the follow-up date, which may read the due date;
+  #   4. every other timer, which may read both (`= task.follow_up_at`,
+  #      `= task.due_at - duration("PT1H")`).
+  #
+  # So a timer reads the dates the task is created with, never a null for a date it has. Only a
+  # genuine cycle stays null, and so an incident: an expire timer that reads the due date its own
+  # instant supplies.
+  defp task_deadlines(node_id, node, ctx, now) do
+    schedule = node["schedule"] || %{}
+    timers = Enum.with_index(node["timers"] || [])
+
+    with {:ok, explicit_due} <- explicit_due(node_id, schedule, ctx, now) do
+      {first, rest} =
+        if explicit_due,
+          do: {[], timers},
+          else: Enum.split_with(timers, fn {timer, _} -> timer["kind"] == "expire" end)
+
+      with {:ok, first_specs} <-
+             task_timer_specs(node_id, first, ctx, now, task_ctx(now, explicit_due, nil)),
+           due_at = explicit_due || expire_instant(Enum.map(first_specs, &elem(&1, 1))),
+           {:ok, follow_up_at} <- follow_up(node_id, schedule, ctx, now, due_at),
+           {:ok, rest_specs} <-
+             task_timer_specs(node_id, rest, ctx, now, task_ctx(now, due_at, follow_up_at)) do
+        specs =
+          (first_specs ++ rest_specs)
+          |> Enum.sort_by(&elem(&1, 0))
+          |> Enum.map(&elem(&1, 1))
+
+        {:ok, specs, %{due_at: due_at, follow_up_at: follow_up_at, now: now}}
+      end
+    end
+  end
+
+  defp user_task(graph, node_id, node, ctx, {timer_specs, boundary_jobs, dates}) do
     resolver = AshBpmn.Config.assignment_resolver!()
     instance = ctx[:instance]
     token = ctx[:token]
@@ -713,18 +746,16 @@ defmodule AshBpmn.Runtime.Interpreter do
         candidate_ctx
       )
 
-    with {:ok, dates} <- schedule(node_id, node["schedule"], timer_specs, ctx, now) do
-      user_task_effects(graph, node_id, node, ctx, %{
-        instance: instance,
-        token: token,
-        exclusions: exclusions,
-        candidates: filtered_candidates,
-        unassignable: unassignable,
-        timers: timer_specs,
-        jobs: boundary_jobs,
-        dates: dates
-      })
-    end
+    user_task_effects(graph, node_id, node, ctx, %{
+      instance: instance,
+      token: token,
+      exclusions: exclusions,
+      candidates: filtered_candidates,
+      unassignable: unassignable,
+      timers: timer_specs,
+      jobs: boundary_jobs,
+      dates: dates
+    })
   end
 
   defp user_task_effects(_graph, node_id, node, ctx, spec) do
@@ -783,29 +814,18 @@ defmodule AshBpmn.Runtime.Interpreter do
   # ── ash:schedule ─────────────────────────────────────────────────────────
 
   # The task's due and follow-up dates (DESIGN.md §11.5), resolved once, now, and recorded on
-  # the row. `due` first, so `followUp` can be written relative to it (`= task.due_at -
-  # duration("P2D")`). With no `due`, the task's completion deadline is its expire timer, so
-  # that instant is its due date. Neither date triggers anything by itself.
+  # the row (`task_deadlines/4` says in which order). With no `due`, the task's completion
+  # deadline is its expire timer, so that instant is its due date. Neither date triggers
+  # anything by itself.
   #
   # A moment that cannot be resolved is an incident, not a guess: the instance fails at this
   # node with a `:timer_unresolved` event, and nothing retries it, because the same data gives
   # the same answer. A modeller who wants a fallback writes it in the expression.
-  defp schedule(node_id, schedule, timers, ctx, now) do
-    schedule = schedule || %{}
-    expr_ctx = build_expr_ctx(ctx)
-
-    with {:ok, due_at} <-
-           resolve_moment(node_id, "due", schedule["due"], now, expr_ctx, %{
-             "inserted_at" => now
-           }),
-         due_at = due_at || expire_instant(timers),
-         {:ok, follow_up_at} <-
-           resolve_moment(node_id, "followUp", schedule["follow_up"], now, expr_ctx, %{
-             "inserted_at" => now,
-             "due_at" => due_at
-           }) do
-      {:ok, %{due_at: due_at, follow_up_at: follow_up_at, now: now}}
-    end
+  defp follow_up(node_id, schedule, ctx, now, due_at) do
+    resolve_moment(node_id, "followUp", schedule["follow_up"], now, build_expr_ctx(ctx), %{
+      "inserted_at" => now,
+      "due_at" => due_at
+    })
   end
 
   defp resolve_moment(_node_id, _attr, nil, _now, _expr_ctx, _task), do: {:ok, nil}
@@ -840,7 +860,7 @@ defmodule AshBpmn.Runtime.Interpreter do
   end
 
   defp explicit_due(node_id, schedule, ctx, now) do
-    resolve_moment(node_id, "due", (schedule || %{})["due"], now, build_expr_ctx(ctx), %{
+    resolve_moment(node_id, "due", schedule["due"], now, build_expr_ctx(ctx), %{
       "inserted_at" => now
     })
   end
@@ -1084,6 +1104,7 @@ defmodule AshBpmn.Runtime.Interpreter do
           "node_id" => node_id,
           "key" => TimerMoment.key(ctx[:token].id, node_id, 0, 1),
           "repetition" => 1,
+          "armed_at" => DateTime.to_iso8601(now),
           "due_at" => DateTime.to_iso8601(resolved.due_at)
         }
         |> put_late(resolved)
@@ -1455,7 +1476,8 @@ defmodule AshBpmn.Runtime.Interpreter do
             "boundary_id" => boundary_id,
             "attached_to" => node_id,
             "interrupting" => get_in(graph, ["nodes", boundary_id, "interrupting"]) != false,
-            "repetition" => 1
+            "repetition" => 1,
+            "armed_at" => DateTime.to_iso8601(now)
           }
           |> TimerMoment.cycle_args(resolved)
 
@@ -1500,19 +1522,27 @@ defmodule AshBpmn.Runtime.Interpreter do
   # `{:skip, args, due_at}` for the worker to record, rather than dropped: "why was nobody
   # reminded?" must still have an answer.
   #
-  # `task.inserted_at` is the arming instant: the row is written in this same step.
-  # `task.due_at` and `task.follow_up_at` read null until the task schedule lands.
-  defp task_timer_specs(node_id, timers, ctx, now, due_at) do
-    expr_ctx = Map.put(build_expr_ctx(ctx), "task", task_ctx(now, due_at))
+  # `task.inserted_at` is the arming instant: the row is written in this same step. `task_ctx`
+  # carries the dates `task_deadlines/4` has resolved so far. Each spec comes back with its
+  # position, so the caller can put timers resolved in two passes back in their order.
+  #
+  # Every timer carries `"armed_at"`, the instant it was first armed. A duration counts from
+  # it, and so does a cycle with no start; `AshBpmn.reschedule_timers/2` re-counts from it, so
+  # a reschedule with unchanged data moves nothing however late it runs.
+  defp task_timer_specs(node_id, timers, ctx, now, task_ctx) do
+    expr_ctx = Map.put(build_expr_ctx(ctx), "task", task_ctx)
 
-    timers
-    |> Enum.with_index()
-    |> reduce_ok(fn {timer, position} ->
+    reduce_ok(timers, fn {timer, position} ->
       index = timer["index"] || position
 
       with {:ok, resolved} <- resolve_timer(timer, node_id, index, expr_ctx, now) do
         args =
-          %{"kind" => timer["kind"], "index" => index, "repetition" => 1}
+          %{
+            "kind" => timer["kind"],
+            "index" => index,
+            "repetition" => 1,
+            "armed_at" => DateTime.to_iso8601(now)
+          }
           |> put_present("signal", timer["signal"])
           |> put_present("until", timer["until"])
           |> TimerMoment.cycle_args(resolved)
@@ -1521,16 +1551,18 @@ defmodule AshBpmn.Runtime.Interpreter do
           # A cycle whose every repetition is already past: all of them are skipped, none armed.
           is_nil(resolved.due_at) ->
             {:ok,
-             {:skip, Map.put(args, "due_at", DateTime.to_iso8601(resolved.last_due_at)),
-              resolved.last_due_at}}
+             {position,
+              {:skip, Map.put(args, "due_at", DateTime.to_iso8601(resolved.last_due_at)),
+               resolved.last_due_at}}}
 
           resolved.late and timer["if_past"] == "skip" ->
-            {:ok, {:skip, due_args(args, resolved), resolved.due_at}}
+            {:ok, {position, {:skip, due_args(args, resolved), resolved.due_at}}}
 
           true ->
             {:ok,
-             {AshBpmn.Runtime.TimerWorker, due_args(args, resolved),
-              [scheduled_at: resolved.due_at]}}
+             {position,
+              {AshBpmn.Runtime.TimerWorker, due_args(args, resolved),
+               [scheduled_at: resolved.due_at]}}}
         end
       end
     end)
@@ -1538,10 +1570,9 @@ defmodule AshBpmn.Runtime.Interpreter do
 
   # The task being created, and only that: in the step that leaves a completed task the
   # expression context's `task` is the previous task's outcome, which a timer must not read by
-  # accident. `due_at` is the schedule's explicit due date; a due date that falls back to the
-  # expire timer is not known to the timers, which resolve first.
-  defp task_ctx(now, due_at),
-    do: %{"inserted_at" => now, "due_at" => due_at, "follow_up_at" => nil}
+  # accident.
+  defp task_ctx(now, due_at, follow_up_at),
+    do: %{"inserted_at" => now, "due_at" => due_at, "follow_up_at" => follow_up_at}
 
   # A moment that cannot be resolved is a timer incident: the step that would arm it fails, and
   # the worker marks the instance failed at this node with a `:timer_unresolved` event. It is

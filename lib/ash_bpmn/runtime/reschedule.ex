@@ -169,8 +169,11 @@ defmodule AshBpmn.Runtime.Reschedule do
       }
       |> put_task(task)
 
-    # A duration counts from when the timer was armed, which is when its row was written.
-    case TimerMoment.resolve(spec, ctx, row.inserted_at) do
+    # A duration counts from when the timer was first armed, and so does a cycle with no start.
+    # Not from this row's `inserted_at`: a row is rewritten by every reschedule and every
+    # repetition, and counting from the last write would move the timer later on every call,
+    # with the data unchanged.
+    case TimerMoment.resolve(spec, ctx, TimerLedger.armed_at(row)) do
       {:ok, resolved} ->
         {:ok, move(row, spec, resolved, now, %{graph: graph, task: task, token: token})}
 
@@ -263,7 +266,7 @@ defmodule AshBpmn.Runtime.Reschedule do
         node_id: row.node_id,
         kind: row.kind,
         due_at: due_at,
-        data: row.data
+        data: Map.put(row.data, "armed_at", DateTime.to_iso8601(TimerLedger.armed_at(row)))
       })
 
     new_row && resources.timer_job.record_cancelled(new_row, :past, Scope.engine(scope))
@@ -386,6 +389,7 @@ defmodule AshBpmn.Runtime.Reschedule do
 
   defp common(args, move) do
     args
+    |> Map.put("armed_at", DateTime.to_iso8601(TimerLedger.armed_at(move.row)))
     |> Map.put("due_at", DateTime.to_iso8601(move.due_at))
     |> then(&if(Map.get(move, :late), do: Map.put(&1, "late", true), else: &1))
     |> then(&if(move[:cycle], do: Map.put(&1, "cycle", move.cycle), else: &1))
